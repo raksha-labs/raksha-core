@@ -1,0 +1,12 @@
+[package]
+name = "persistence"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+common-types = { path = "../common-types" }
+serde_json.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tracing.workspace = true

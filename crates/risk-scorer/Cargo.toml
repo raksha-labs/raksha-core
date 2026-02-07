@@ -1,0 +1,10 @@
+[package]
+name = "risk-scorer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+common-types = { path = "../common-types" }
+core-interfaces = { path = "../core-interfaces" }

@@ -1,0 +1,17 @@
+[package]
+name = "rule-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+common-types = { path = "../common-types" }
+core-interfaces = { path = "../core-interfaces" }
+serde.workspace = true
+serde_yaml.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

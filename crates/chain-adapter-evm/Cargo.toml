@@ -1,0 +1,16 @@
+[package]
+name = "chain-adapter-evm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+common-types = { path = "../common-types" }
+core-interfaces = { path = "../core-interfaces" }
+ethers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true

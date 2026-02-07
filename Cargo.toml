@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/common-types",
+  "crates/core-interfaces",
+  "crates/config",
+  "crates/chain-adapter-evm",
+  "crates/reference-price",
+  "crates/rule-engine",
+  "crates/trace-enricher",
+  "crates/risk-scorer",
+  "crates/alert-client",
+  "crates/event-stream",
+  "crates/persistence",
+  "crates/replay-backtest",
+  "crates/finality-engine",
+  "crates/correlation-engine",
+  "apps/detector-worker",
+  "apps/replay-cli",
+  "apps/indexer-worker",
+  "apps/finality-worker",
+  "apps/alert-orchestrator",
+]
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+dotenv = "0.15"
+ethers = { version = "2.0", features = ["ws", "rustls"] }
+futures-util = "0.3"
+hex = "0.4"
+redis = { version = "0.27", features = ["tokio-comp"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+thiserror = "2.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }

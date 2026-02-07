@@ -1,0 +1,9 @@
+[package]
+name = "trace-enricher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+common-types = { path = "../common-types" }
+serde_json.workspace = true

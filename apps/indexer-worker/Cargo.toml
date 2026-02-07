@@ -1,0 +1,20 @@
+[package]
+name = "indexer-worker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+dotenv.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+chain-adapter-evm = { path = "../../crates/chain-adapter-evm" }
+common-types = { path = "../../crates/common-types" }
+core-interfaces = { path = "../../crates/core-interfaces" }
+event-stream = { path = "../../crates/event-stream" }

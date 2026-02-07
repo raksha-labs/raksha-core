@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defi-surv/schemas/normalized_event.schema.json",
+  "title": "NormalizedEvent",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_key",
+    "chain",
+    "chain_slug",
+    "protocol",
+    "protocol_category",
+    "tx_hash",
+    "block_number",
+    "status",
+    "lifecycle_state",
+    "requires_confirmation",
+    "confirmation_depth",
+    "observed_at",
+    "metadata"
+  ],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_key": { "type": "string" },
+    "chain": { "type": "string", "enum": ["ethereum", "base", "unknown"] },
+    "chain_slug": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "protocol": { "type": "string" },
+    "protocol_category": {
+      "type": "string",
+      "enum": ["lending", "perp_dex", "unknown"]
+    },
+    "tx_hash": { "type": "string" },
+    "block_number": { "type": "integer", "minimum": 0 },
+    "status": { "type": "string", "enum": ["observed", "confirmed", "retracted"] },
+    "lifecycle_state": {
+      "type": "string",
+      "enum": ["provisional", "confirmed", "retracted", "suppressed", "resolved"]
+    },
+    "requires_confirmation": { "type": "boolean" },
+    "confirmation_depth": { "type": "integer", "minimum": 0 },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "oracle_price": { "type": ["number", "null"] },
+    "reference_price": { "type": ["number", "null"] },
+    "metadata": { "type": "object" }
+  }
+}

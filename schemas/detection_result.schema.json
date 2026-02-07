@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defi-surv/schemas/detection_result.schema.json",
+  "title": "DetectionResult",
+  "type": "object",
+  "required": [
+    "detection_id",
+    "chain",
+    "chain_slug",
+    "protocol",
+    "lifecycle_state",
+    "requires_confirmation",
+    "severity",
+    "triggered_rule_ids",
+    "tx_hash",
+    "block_number",
+    "signals",
+    "risk_score",
+    "oracle_context",
+    "actions_recommended",
+    "created_at"
+  ],
+  "properties": {
+    "detection_id": { "type": "string", "format": "uuid" },
+    "chain": { "type": "string", "enum": ["ethereum", "base", "unknown"] },
+    "chain_slug": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "protocol": { "type": "string" },
+    "lifecycle_state": {
+      "type": "string",
+      "enum": ["provisional", "confirmed", "retracted", "suppressed", "resolved"]
+    },
+    "requires_confirmation": { "type": "boolean" },
+    "severity": {
+      "type": "string",
+      "enum": ["info", "low", "medium", "high", "critical"]
+    },
+    "triggered_rule_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tx_hash": { "type": "string" },
+    "block_number": { "type": "integer", "minimum": 0 },
+    "signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["signal_type", "triggered", "detail"],
+        "properties": {
+          "signal_type": {
+            "type": "string",
+            "enum": [
+              "oracle_divergence",
+              "flash_loan_detected",
+              "oracle_read_detected",
+              "large_swap_detected",
+              "cross_chain_mismatch"
+            ]
+          },
+          "triggered": { "type": "boolean" },
+          "value": { "type": ["number", "null"] },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "risk_score": {
+      "type": "object",
+      "required": ["score", "rationale"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 100 },
+        "rationale": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "oracle_context": { "type": "object" },
+    "actions_recommended": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

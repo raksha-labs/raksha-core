@@ -1,0 +1,19 @@
+[package]
+name = "alert-orchestrator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+dotenv.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+alert-client = { path = "../../crates/alert-client" }
+common-types = { path = "../../crates/common-types" }
+core-interfaces = { path = "../../crates/core-interfaces" }
+event-stream = { path = "../../crates/event-stream" }
+persistence = { path = "../../crates/persistence" }
