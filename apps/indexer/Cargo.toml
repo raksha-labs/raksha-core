@@ -1,0 +1,24 @@
+[package]
+name = "indexer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "indexer"
+path = "src/main.rs"
+
+[dependencies]
+# Local crates
+ingestion = { path = "../../crates/ingestion" }
+event-schema = { path = "../../crates/event-schema" }
+common = { path = "../../crates/common" }
+state-manager = { path = "../../crates/state-manager" }
+
+# External dependencies
+anyhow = { workspace = true }
+chrono = { workspace = true }
+dotenv = { workspace = true }
+ethers = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

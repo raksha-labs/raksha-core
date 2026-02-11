@@ -1,25 +1,21 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/common-types",
-  "crates/core-interfaces",
-  "crates/config",
-  "crates/chain-adapter-evm",
-  "crates/reference-price",
-  "crates/rule-engine",
-  "crates/trace-enricher",
+  # Library crates
+  "crates/event-schema",
+  "crates/common",
+  "crates/ingestion",
+  "crates/feature-builder",
+  "crates/detection-engine",
   "crates/risk-scorer",
-  "crates/alert-client",
-  "crates/event-stream",
-  "crates/persistence",
-  "crates/replay-backtest",
-  "crates/finality-engine",
-  "crates/correlation-engine",
-  "apps/detector-worker",
-  "apps/replay-cli",
-  "apps/indexer-worker",
-  "apps/finality-worker",
-  "apps/alert-orchestrator",
+  "crates/state-manager",
+  "crates/notifier",
+  # Binary applications
+  "apps/indexer",
+  "apps/detector",
+  "apps/scorer",
+  "apps/orchestrator",
+  "apps/finality",
 ]
 
 [workspace.dependencies]
@@ -35,6 +31,7 @@ reqwest = { version = "0.11", default-features = false, features = ["json", "rus
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }

@@ -5,18 +5,61 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
+
+  # Recommended: Use S3 backend for state management
+  # backend "s3" {
+  #   bucket         = "defi-surv-terraform-state"
+  #   key            = "production/terraform.tfstate"
+  #   region         = "eu-west-1"
+  #   encrypt        = true
+  #   dynamodb_table = "terraform-locks"
+  # }
 }
 
 provider "aws" {
   region = var.aws_region
+
+  default_tags {
+    tags = var.tags
+  }
 }
 
+# ECS Cluster with Container Insights
 resource "aws_ecs_cluster" "defi_surv" {
-  name = "defi-surv-mvp"
+  name = "defi-surv-${var.environment}"
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+
+  tags = var.tags
 }
 
-resource "aws_cloudwatch_log_group" "detector" {
-  name              = "/ecs/defi-surv/detector-worker"
+# CloudWatch Log Groups for all services
+resource "aws_cloudwatch_log_group" "services" {
+  for_each = toset([
+    "ingestion",
+    "detection-engine",
+    "state-manager",
+    "notifier",
+    "api-service",
+    "auth-tenants",
+    "config-service",
+    "integration-manager",
+    "notifier-gateway",
+    "policy-manager"
+  ])
+
+  name              = "/ecs/defi-surv/${each.key}"
   retention_in_days = 14
+
+  tags = merge(var.tags, {
+    Service = each.key
+  })
 }

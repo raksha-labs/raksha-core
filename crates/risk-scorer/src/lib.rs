@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use common_types::{Attribution, DetectionResult, RiskScore, Severity, SignalType};
-use core_interfaces::RiskScorer;
+use event_schema::{Attribution, DetectionResult, RiskScore, Severity, SignalType};
+use common::RiskScorer;
 
 pub struct DeterministicRiskScorer;
 

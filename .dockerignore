@@ -1,0 +1,10 @@
+target/
+.git/
+.gitignore
+*.md
+docs/
+infra/
+.env
+.env.*
+*.log
+.DS_Store
