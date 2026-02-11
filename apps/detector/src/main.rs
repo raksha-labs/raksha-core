@@ -31,9 +31,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 const DEFAULT_RULE_RELATIVE_ROOTS: [&str; 3] = [
-    "../defi-surv-rules",
-    "../../defi-surv-rules",
-    "../../../defi-surv-rules",
+    "./rules",      // Running from defi-surv-core/
+    "../rules",     // Running from defi-surv-core/apps/
+    "../../rules",  // Running from defi-surv-core/apps/detector/
 ];
 const DEFAULT_STREAM_BATCH_SIZE: usize = 100;
 const DEFAULT_STREAM_BLOCK_MS: usize = 1000;

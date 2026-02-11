@@ -22,9 +22,9 @@ use tokio_postgres::{Client, NoTls};
 use tracing::{info, warn};
 
 const DEFAULT_RULE_RELATIVE_ROOTS: [&str; 3] = [
-    "../defi-surv-rules",
-    "../../defi-surv-rules",
-    "../../../defi-surv-rules",
+    "./rules",      // Running from defi-surv-core/
+    "../rules",     // Running from defi-surv-core/apps/
+    "../../rules",  // Running from defi-surv-core/apps/indexer/
 ];
 const DEFAULT_INGESTION_POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_INGESTION_BLOCK_BATCH_SIZE: u64 = 8;
