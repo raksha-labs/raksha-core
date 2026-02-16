@@ -28,11 +28,19 @@ Important runtime variables:
 - `REDIS_URL`: Redis Streams transport.
 - `NOTIFIER_GATEWAY_URL`: endpoint used by notifier sink adapters (`/dispatch`).
 
-## Local infra
+## Local Docker stack (recommended)
+
+From repository root (`defi-surv/`):
 
 ```bash
-docker compose -f infra/local/docker-compose.yml up -d
+# Optional for live Ethereum ingestion; omit to run in mock mode
+export ETH_WS_URL=wss://eth-mainnet.g.alchemy.com/v2/<your-key>
+
+docker compose up -d --build
+docker compose logs -f indexer detector
 ```
+
+This starts Postgres, Redis, indexer, and detector together.
 
 ## Run binaries
 

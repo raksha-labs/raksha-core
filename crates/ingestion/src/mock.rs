@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use event_schema::{EventStatus, LifecycleState, NormalizedEvent, ProtocolCategory};
+use event_schema::{EventStatus, EventType, LifecycleState, NormalizedEvent, ProtocolCategory};
 use common::ChainAdapter;
 use uuid::Uuid;
 
@@ -85,6 +85,7 @@ impl ChainAdapter for EvmMockAdapter {
             events.push(NormalizedEvent {
                 event_id: Uuid::new_v4(),
                 event_key: format!("{}:{}:{}:{}", self.chain_slug, block_number, tx_hash, tick),
+                event_type: EventType::OracleUpdate,
                 tenant_id: None,
                 chain: chain_from_slug(&self.chain_slug),
                 chain_slug: self.chain_slug.clone(),

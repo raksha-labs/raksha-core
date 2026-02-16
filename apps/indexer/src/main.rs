@@ -9,15 +9,15 @@ use anyhow::{anyhow, Context, Result};
 use ingestion::{
     build_oracle_protocol_map, default_eth_oracles, parse_oracle_addresses,
     parse_oracle_addresses_csv, parse_protocol_category, EvmChainAdapter, EvmChainConfig,
-    EvmMockAdapter, EvmProtocolConfigFile, MockProtocol, ProtocolBinding,
+    EvmMockAdapter, EvmProtocolConfigFile, FlashLoanSourceConfig, MockProtocol, ProtocolBinding,
     DEFAULT_FILTER_CHUNK_SIZE, DEFAULT_LOOKBACK_BLOCKS, DEFAULT_ORACLE_DECIMALS,
 };
 use chrono::Utc;
 use event_schema::{NormalizedEvent, ReorgNotice};
 use common::ChainAdapter;
 use dotenv::dotenv;
-use state_manager::RedisStreamPublisher;
 use serde::de::DeserializeOwned;
+use state_manager::RedisStreamPublisher;
 use tokio_postgres::{Client, NoTls};
 use tracing::{info, warn};
 
@@ -171,6 +171,40 @@ impl IndexerStateStore {
                 CREATE INDEX IF NOT EXISTS idx_processed_events_chain_block
                     ON processed_events (chain, block_number);
 
+                CREATE TABLE IF NOT EXISTS normalized_events (
+                    event_key TEXT PRIMARY KEY,
+                    event_id UUID NOT NULL,
+                    chain TEXT NOT NULL,
+                    chain_slug TEXT NOT NULL,
+                    chain_id BIGINT,
+                    protocol TEXT NOT NULL,
+                    protocol_category TEXT NOT NULL,
+                    event_type TEXT NOT NULL CHECK (event_type IN ('oracle_update', 'flash_loan_candidate')),
+                    tx_hash TEXT NOT NULL,
+                    block_number BIGINT NOT NULL,
+                    block_hash TEXT,
+                    tx_index BIGINT,
+                    log_index BIGINT,
+                    status TEXT NOT NULL,
+                    lifecycle_state TEXT NOT NULL,
+                    requires_confirmation BOOLEAN NOT NULL,
+                    confirmation_depth BIGINT NOT NULL,
+                    observed_at TIMESTAMPTZ NOT NULL,
+                    reverted BOOLEAN NOT NULL DEFAULT FALSE,
+                    payload JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_normalized_events_chain_block
+                    ON normalized_events (chain_slug, block_number);
+                CREATE INDEX IF NOT EXISTS idx_normalized_events_tx_hash
+                    ON normalized_events (tx_hash);
+                CREATE INDEX IF NOT EXISTS idx_normalized_events_observed_at
+                    ON normalized_events (observed_at);
+                CREATE INDEX IF NOT EXISTS idx_normalized_events_reverted
+                    ON normalized_events (reverted);
+
                 INSERT INTO indexer_state (chain, last_indexed_block, last_block_hash)
                 VALUES
                     ('ethereum', 0, '0x0000000000000000000000000000000000000000000000000000000000000000'),
@@ -313,6 +347,149 @@ impl IndexerStateStore {
         Ok(affected)
     }
 
+    async fn mark_normalized_events_reverted_from_block(
+        &self,
+        chain_slug: &str,
+        orphaned_from_block: u64,
+    ) -> Result<u64> {
+        let orphaned_from_block = to_i64(orphaned_from_block, "orphaned_from_block")?;
+
+        let updated = self
+            .client
+            .execute(
+                r#"
+                UPDATE normalized_events
+                SET reverted = TRUE,
+                    updated_at = NOW()
+                WHERE chain_slug = $1
+                  AND block_number >= $2
+                  AND reverted = FALSE
+                "#,
+                &[&chain_slug, &orphaned_from_block],
+            )
+            .await?;
+
+        Ok(updated)
+    }
+
+    async fn upsert_normalized_event(&self, event: &NormalizedEvent) -> Result<()> {
+        let chain_id = event
+            .chain_id
+            .map(|value| to_i64(value, "event.chain_id"))
+            .transpose()?;
+        let block_number = to_i64(event.block_number, "event.block_number")?;
+        let tx_index = event
+            .tx_index
+            .map(|value| to_i64(value, "event.tx_index"))
+            .transpose()?;
+        let log_index = event
+            .log_index
+            .map(|value| to_i64(value, "event.log_index"))
+            .transpose()?;
+        let confirmation_depth = to_i64(event.confirmation_depth, "event.confirmation_depth")?;
+        let chain = enum_to_string(&event.chain, "event.chain")?;
+        let protocol_category = enum_to_string(&event.protocol_category, "event.protocol_category")?;
+        let event_type = enum_to_string(&event.event_type, "event.event_type")?;
+        let status = enum_to_string(&event.status, "event.status")?;
+        let lifecycle_state = enum_to_string(&event.lifecycle_state, "event.lifecycle_state")?;
+        let payload = serde_json::to_value(event).context("serialize normalized event payload")?;
+
+        self.client
+            .execute(
+                r#"
+                INSERT INTO normalized_events (
+                    event_key,
+                    event_id,
+                    chain,
+                    chain_slug,
+                    chain_id,
+                    protocol,
+                    protocol_category,
+                    event_type,
+                    tx_hash,
+                    block_number,
+                    block_hash,
+                    tx_index,
+                    log_index,
+                    status,
+                    lifecycle_state,
+                    requires_confirmation,
+                    confirmation_depth,
+                    observed_at,
+                    reverted,
+                    payload
+                )
+                VALUES (
+                    $1,
+                    $2::uuid,
+                    $3,
+                    $4,
+                    $5,
+                    $6,
+                    $7,
+                    $8,
+                    $9,
+                    $10,
+                    $11,
+                    $12,
+                    $13,
+                    $14,
+                    $15,
+                    $16,
+                    $17,
+                    $18,
+                    FALSE,
+                    $19::jsonb
+                )
+                ON CONFLICT (event_key) DO UPDATE
+                SET event_id = EXCLUDED.event_id,
+                    chain = EXCLUDED.chain,
+                    chain_slug = EXCLUDED.chain_slug,
+                    chain_id = EXCLUDED.chain_id,
+                    protocol = EXCLUDED.protocol,
+                    protocol_category = EXCLUDED.protocol_category,
+                    event_type = EXCLUDED.event_type,
+                    tx_hash = EXCLUDED.tx_hash,
+                    block_number = EXCLUDED.block_number,
+                    block_hash = EXCLUDED.block_hash,
+                    tx_index = EXCLUDED.tx_index,
+                    log_index = EXCLUDED.log_index,
+                    status = EXCLUDED.status,
+                    lifecycle_state = EXCLUDED.lifecycle_state,
+                    requires_confirmation = EXCLUDED.requires_confirmation,
+                    confirmation_depth = EXCLUDED.confirmation_depth,
+                    observed_at = EXCLUDED.observed_at,
+                    payload = EXCLUDED.payload,
+                    reverted = FALSE,
+                    updated_at = NOW()
+                "#,
+                &[
+                    &event.event_key,
+                    &event.event_id,
+                    &chain,
+                    &event.chain_slug,
+                    &chain_id,
+                    &event.protocol,
+                    &protocol_category,
+                    &event_type,
+                    &event.tx_hash,
+                    &block_number,
+                    &event.block_hash,
+                    &tx_index,
+                    &log_index,
+                    &status,
+                    &lifecycle_state,
+                    &event.requires_confirmation,
+                    &confirmation_depth,
+                    &event.observed_at,
+                    &payload,
+                ],
+            )
+            .await?;
+
+        Ok(())
+    }
+
     async fn upsert_processed_event(&self, event: &NormalizedEvent) -> Result<()> {
         let block_number = to_i64(event.block_number, "event.block_number")?;
         let block_hash = event.block_hash.as_deref().unwrap_or(ZERO_BLOCK_HASH);
@@ -336,7 +513,7 @@ impl IndexerStateStore {
                     processed_at = NOW()
                 "#,
                 &[
-                    &event.event_id.to_string(),
+                    &event.event_id,
                     &event.event_key,
                     &event.tx_hash,
                     &block_number,
@@ -708,6 +885,12 @@ async fn publish_events(
                     let affected_event_keys = store
                         .mark_reverted_from_block(&event.chain_slug, event.block_number)
                         .await?;
+                    store
+                        .mark_normalized_events_reverted_from_block(
+                            &event.chain_slug,
+                            event.block_number,
+                        )
+                        .await?;
                     if !affected_event_keys.is_empty() {
                         let notice = ReorgNotice {
                             chain: event.chain.clone(),
@@ -727,6 +910,7 @@ async fn publish_events(
                 }
             }
 
+            store.upsert_normalized_event(event).await?;
             stream.publish_normalized_event(event).await?;
             store.upsert_processed_event(event).await?;
         } else {
@@ -779,6 +963,17 @@ fn checkpoint_hash_after_range(
 
 fn to_i64(value: u64, field: &str) -> Result<i64> {
     i64::try_from(value).with_context(|| format!("{field} exceeds i64 range"))
+}
+
+fn enum_to_string<T>(value: &T, field: &str) -> Result<String>
+where
+    T: serde::Serialize,
+{
+    let raw = serde_json::to_value(value)
+        .with_context(|| format!("failed to serialize {field} as JSON value"))?;
+    raw.as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("{field} did not serialize to string"))
 }
 
 async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
@@ -847,6 +1042,7 @@ async fn build_chain_adapter_from_rules(
     env_decimals_override: Option<u8>,
 ) -> Result<Option<RuntimeChainAdapter>> {
     let chain = discovered.chain;
+    let protocols_file = discovered.protocols;
 
     if !chain.family.eq_ignore_ascii_case("evm") {
         warn!(
@@ -864,23 +1060,23 @@ async fn build_chain_adapter_from_rules(
 
     let lookback_blocks = env_lookback_override
         .or(chain.lookback_blocks)
-        .or(discovered.protocols.lookback_blocks)
+        .or(protocols_file.lookback_blocks)
         .unwrap_or(DEFAULT_LOOKBACK_BLOCKS);
     let default_oracle_decimals = env_decimals_override
         .or(chain.default_oracle_decimals)
-        .or(discovered.protocols.default_oracle_decimals)
+        .or(protocols_file.default_oracle_decimals)
         .unwrap_or(DEFAULT_ORACLE_DECIMALS);
     let default_protocol_category = chain.protocol_category_default();
+    let flash_sources: Vec<FlashLoanSourceConfig> = protocols_file
+        .flash_loan_sources
+        .into_iter()
+        .filter(|entry| entry.enabled)
+        .collect();
 
     let mut map_entries = Vec::new();
     let mut mock_protocols = Vec::new();
 
-    for protocol in discovered
-        .protocols
-        .protocols
-        .into_iter()
-        .filter(|entry| entry.enabled)
-    {
+    for protocol in protocols_file.protocols.into_iter().filter(|entry| entry.enabled) {
         let protocol_category = protocol
             .protocol_category
             .as_deref()
@@ -916,12 +1112,12 @@ async fn build_chain_adapter_from_rules(
         });
     }
 
-    if map_entries.is_empty() {
+    if map_entries.is_empty() && flash_sources.is_empty() {
         warn!(
             chain_slug = %chain_slug,
             chain_config = %discovered.chain_config_path.display(),
             protocol_config = %discovered.protocol_config_path.display(),
-            "no enabled protocols with oracle addresses",
+            "no enabled oracle protocols with addresses and no enabled flash-loan sources",
         );
         return Ok(None);
     }
@@ -958,6 +1154,10 @@ async fn build_chain_adapter_from_rules(
     .await
     {
         Ok(adapter) => {
+            let adapter = adapter
+                .with_filter_chunk_size(DEFAULT_FILTER_CHUNK_SIZE)
+                .with_confirmation_depth(confirmation_depth)
+                .with_flash_loan_sources(flash_sources, default_protocol_category.clone())?;
             info!(
                 chain_slug = %chain_slug,
                 ws_provider_count = ws_urls.len(),
@@ -970,11 +1170,7 @@ async fn build_chain_adapter_from_rules(
                 current_batch_size: 0,
                 last_indexed_block: 0,
                 last_block_hash: ZERO_BLOCK_HASH.to_string(),
-                adapter: Box::new(
-                    adapter
-                        .with_filter_chunk_size(DEFAULT_FILTER_CHUNK_SIZE)
-                        .with_confirmation_depth(confirmation_depth),
-                ),
+                adapter: Box::new(adapter),
             }))
         }
         Err(err) => {

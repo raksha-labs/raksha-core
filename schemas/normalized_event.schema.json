@@ -6,6 +6,7 @@
   "required": [
     "event_id",
     "event_key",
+    "event_type",
     "chain",
     "chain_slug",
     "protocol",
@@ -22,6 +23,10 @@
   "properties": {
     "event_id": { "type": "string", "format": "uuid" },
     "event_key": { "type": "string" },
+    "event_type": {
+      "type": "string",
+      "enum": ["oracle_update", "flash_loan_candidate"]
+    },
     "chain": { "type": "string", "enum": ["ethereum", "base", "unknown"] },
     "chain_slug": { "type": "string", "pattern": "^[a-z0-9-]+$" },
     "protocol": { "type": "string" },

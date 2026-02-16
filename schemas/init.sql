@@ -18,16 +18,16 @@ CREATE TABLE IF NOT EXISTS detections (
     signals JSONB NOT NULL,
     oracle_context JSONB NOT NULL,
     actions_recommended TEXT[],
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    
-    -- Indexing for common queries
-    INDEX idx_detections_chain (chain),
-    INDEX idx_detections_protocol (protocol),
-    INDEX idx_detections_severity (severity),
-    INDEX idx_detections_block (block_number),
-    INDEX idx_detections_created (created_at),
-    INDEX idx_detections_tx (tx_hash)
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Indexing for common queries
+CREATE INDEX IF NOT EXISTS idx_detections_chain ON detections (chain);
+CREATE INDEX IF NOT EXISTS idx_detections_protocol ON detections (protocol);
+CREATE INDEX IF NOT EXISTS idx_detections_severity ON detections (severity);
+CREATE INDEX IF NOT EXISTS idx_detections_block ON detections (block_number);
+CREATE INDEX IF NOT EXISTS idx_detections_created ON detections (created_at);
+CREATE INDEX IF NOT EXISTS idx_detections_tx ON detections (tx_hash);
 
 -- Alerts table: Stores alerts sent to external systems
 CREATE TABLE IF NOT EXISTS alerts (
@@ -53,14 +53,14 @@ CREATE TABLE IF NOT EXISTS alerts (
     dedup_key VARCHAR(255),
     
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    
-    INDEX idx_alerts_chain (chain),
-    INDEX idx_alerts_severity (severity),
-    INDEX idx_alerts_status (delivery_status),
-    INDEX idx_alerts_created (created_at),
-    INDEX idx_alerts_dedup (dedup_key)
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_alerts_chain ON alerts (chain);
+CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts (severity);
+CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts (delivery_status);
+CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts (created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_dedup ON alerts (dedup_key);
 
 -- Incidents table: Groups related alerts into incidents
 CREATE TABLE IF NOT EXISTS incidents (
@@ -83,13 +83,13 @@ CREATE TABLE IF NOT EXISTS incidents (
     first_detected_at TIMESTAMP WITH TIME ZONE NOT NULL,
     resolved_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    
-    INDEX idx_incidents_status (status),
-    INDEX idx_incidents_chain (chain),
-    INDEX idx_incidents_severity (severity),
-    INDEX idx_incidents_created (created_at)
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents (status);
+CREATE INDEX IF NOT EXISTS idx_incidents_chain ON incidents (chain);
+CREATE INDEX IF NOT EXISTS idx_incidents_severity ON incidents (severity);
+CREATE INDEX IF NOT EXISTS idx_incidents_created ON incidents (created_at);
 
 -- Indexer state: Track processing progress per chain
 CREATE TABLE IF NOT EXISTS indexer_state (
@@ -110,11 +110,46 @@ CREATE TABLE IF NOT EXISTS processed_events (
     chain VARCHAR(50) NOT NULL,
     processed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     reverted BOOLEAN DEFAULT FALSE,
-    
-    INDEX idx_processed_tx (tx_hash),
-    INDEX idx_processed_block (block_number),
     UNIQUE (tx_hash, block_number, chain)
 );
+
+CREATE INDEX IF NOT EXISTS idx_processed_tx ON processed_events (tx_hash);
+CREATE INDEX IF NOT EXISTS idx_processed_block ON processed_events (block_number);
+
+-- Normalized event store: Canonical ingestion payload persistence
+CREATE TABLE IF NOT EXISTS normalized_events (
+    event_key TEXT PRIMARY KEY,
+    event_id UUID NOT NULL,
+    chain TEXT NOT NULL,
+    chain_slug TEXT NOT NULL,
+    chain_id BIGINT NULL,
+    protocol TEXT NOT NULL,
+    protocol_category TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('oracle_update', 'flash_loan_candidate')),
+    tx_hash TEXT NOT NULL,
+    block_number BIGINT NOT NULL,
+    block_hash TEXT NULL,
+    tx_index BIGINT NULL,
+    log_index BIGINT NULL,
+    status TEXT NOT NULL,
+    lifecycle_state TEXT NOT NULL,
+    requires_confirmation BOOLEAN NOT NULL,
+    confirmation_depth BIGINT NOT NULL,
+    observed_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    reverted BOOLEAN NOT NULL DEFAULT FALSE,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_normalized_events_chain_block
+    ON normalized_events (chain_slug, block_number);
+CREATE INDEX IF NOT EXISTS idx_normalized_events_tx_hash
+    ON normalized_events (tx_hash);
+CREATE INDEX IF NOT EXISTS idx_normalized_events_observed_at
+    ON normalized_events (observed_at);
+CREATE INDEX IF NOT EXISTS idx_normalized_events_reverted
+    ON normalized_events (reverted);
 
 -- Alert delivery log: Track all delivery attempts
 CREATE TABLE IF NOT EXISTS alert_delivery_log (
@@ -125,11 +160,11 @@ CREATE TABLE IF NOT EXISTS alert_delivery_log (
     response_code INT,
     response_body TEXT,
     error_message TEXT,
-    delivered_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    
-    INDEX idx_delivery_alert (alert_id),
-    INDEX idx_delivery_status (status)
+    delivered_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_delivery_alert ON alert_delivery_log (alert_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_status ON alert_delivery_log (status);
 
 -- Rule execution metrics: Performance tracking
 CREATE TABLE IF NOT EXISTS rule_execution_metrics (
@@ -140,11 +175,11 @@ CREATE TABLE IF NOT EXISTS rule_execution_metrics (
     execution_time_ms INT NOT NULL,
     triggered BOOLEAN NOT NULL,
     event_count INT DEFAULT 1,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    
-    INDEX idx_metrics_rule (rule_id),
-    INDEX idx_metrics_created (created_at)
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_metrics_rule ON rule_execution_metrics (rule_id);
+CREATE INDEX IF NOT EXISTS idx_metrics_created ON rule_execution_metrics (created_at);
 
 -- Insert initial indexer state
 INSERT INTO indexer_state (chain, last_indexed_block, last_block_hash)
@@ -163,12 +198,15 @@ END;
 $$ language 'plpgsql';
 
 -- Add triggers for updated_at
+DROP TRIGGER IF EXISTS update_alerts_updated_at ON alerts;
 CREATE TRIGGER update_alerts_updated_at BEFORE UPDATE ON alerts
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_incidents_updated_at ON incidents;
 CREATE TRIGGER update_incidents_updated_at BEFORE UPDATE ON incidents
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_indexer_state_updated_at ON indexer_state;
 CREATE TRIGGER update_indexer_state_updated_at BEFORE UPDATE ON indexer_state
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 

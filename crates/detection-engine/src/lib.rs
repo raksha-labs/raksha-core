@@ -199,7 +199,7 @@ fn severity_rank(severity: &Severity) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use event_schema::{Chain, EventStatus, NormalizedEvent, ProtocolCategory};
+    use event_schema::{Chain, EventStatus, EventType, NormalizedEvent, ProtocolCategory};
     use std::collections::HashMap;
 
     fn mk_event(
@@ -211,6 +211,7 @@ mod tests {
         NormalizedEvent {
             event_id: Uuid::new_v4(),
             event_key: "ethereum:1:0xtest:0".to_string(),
+            event_type: EventType::OracleUpdate,
             tenant_id: None,
             chain,
             chain_slug: "ethereum".to_string(),

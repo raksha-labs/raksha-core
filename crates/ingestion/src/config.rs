@@ -84,6 +84,8 @@ pub struct EvmProtocolConfigFile {
     pub lookback_blocks: Option<u64>,
     pub default_oracle_decimals: Option<u8>,
     pub protocols: Vec<EvmProtocolConfig>,
+    #[serde(default)]
+    pub flash_loan_sources: Vec<FlashLoanSourceConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +99,23 @@ pub struct EvmProtocolConfig {
     // Backward compatibility with old protocol-scoped ws env.
     #[serde(default)]
     pub ws_url_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FlashLoanSourceConfig {
+    pub id: String,
+    pub protocol: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub contract_addresses: Vec<String>,
+    pub event_signature: String,
+    pub protocol_category: Option<String>,
+    pub asset_pair_hint: Option<String>,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 pub fn parse_protocol_category(raw: &str) -> ProtocolCategory {

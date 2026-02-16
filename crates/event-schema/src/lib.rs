@@ -74,10 +74,18 @@ pub enum SignalType {
     NearMissPattern,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum EventType {
+    OracleUpdate,
+    FlashLoanCandidate,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedEvent {
     pub event_id: Uuid,
     pub event_key: String,
+    pub event_type: EventType,
     pub tenant_id: Option<String>,
     pub chain: Chain,
     pub chain_slug: String,

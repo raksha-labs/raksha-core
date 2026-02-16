@@ -240,7 +240,7 @@ impl ChainFinalityTracker {
 mod tests {
     use std::collections::HashMap;
 
-    use event_schema::{EventStatus, ProtocolCategory};
+    use event_schema::{EventStatus, EventType, ProtocolCategory};
     use uuid::Uuid;
 
     use super::*;
@@ -249,6 +249,7 @@ mod tests {
         NormalizedEvent {
             event_id: Uuid::new_v4(),
             event_key: event_key.to_string(),
+            event_type: EventType::OracleUpdate,
             tenant_id: None,
             chain: Chain::Ethereum,
             chain_slug: "ethereum".to_string(),
