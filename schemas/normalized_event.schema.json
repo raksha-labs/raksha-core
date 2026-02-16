@@ -27,7 +27,7 @@
       "type": "string",
       "enum": ["oracle_update", "flash_loan_candidate"]
     },
-    "chain": { "type": "string", "enum": ["ethereum", "base", "unknown"] },
+    "chain": { "type": "string", "enum": ["ethereum", "base", "offchain", "unknown"] },
     "chain_slug": { "type": "string", "pattern": "^[a-z0-9-]+$" },
     "protocol": { "type": "string" },
     "protocol_category": {

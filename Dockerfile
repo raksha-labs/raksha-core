@@ -22,7 +22,9 @@ COPY apps ./apps
 # Build release binaries required for local data-plane stack.
 RUN cargo build --release \
     -p indexer \
-    -p detector
+    -p detector \
+    -p market-indexer \
+    -p market-detector
 
 # Runtime stage - minimal image
 FROM debian:bookworm-slim
@@ -41,6 +43,8 @@ WORKDIR /app
 # Copy binaries from builder.
 COPY --from=builder /app/target/release/indexer /app/bin/indexer
 COPY --from=builder /app/target/release/detector /app/bin/detector
+COPY --from=builder /app/target/release/market-indexer /app/bin/market-indexer
+COPY --from=builder /app/target/release/market-detector /app/bin/market-detector
 
 # Copy schemas and rules (needed for runtime validation)
 COPY schemas ./schemas

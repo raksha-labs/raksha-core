@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub enum Chain {
     Ethereum,
     Base,
+    Offchain,
     Unknown,
 }
 
@@ -33,6 +34,7 @@ pub enum LifecycleState {
 #[serde(rename_all = "snake_case")]
 pub enum AttackFamily {
     OracleManipulation,
+    PegDeviation,
     FlashLoanManipulation,
     CrossChainMismatch,
     StalePriceExploitation,
@@ -64,6 +66,7 @@ pub enum Severity {
 #[serde(rename_all = "snake_case")]
 pub enum SignalType {
     OracleDivergence,
+    PegDeviation,
     FlashLoanDetected,
     OracleReadDetected,
     LargeSwapDetected,
@@ -110,6 +113,37 @@ pub struct NormalizedEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketQuoteEvent {
+    pub quote_id: Uuid,
+    pub tenant_id: String,
+    pub source_id: String,
+    pub source_kind: String,
+    pub source_name: String,
+    pub market_key: String,
+    pub source_symbol: String,
+    pub price: f64,
+    pub peg_target: f64,
+    pub observed_at: DateTime<Utc>,
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketConsensusSnapshot {
+    pub snapshot_id: Uuid,
+    pub tenant_id: String,
+    pub market_key: String,
+    pub peg_target: f64,
+    pub weighted_median_price: f64,
+    pub divergence_pct: f64,
+    pub source_count: u32,
+    pub quorum_met: bool,
+    pub breach_active: bool,
+    pub severity: Option<Severity>,
+    pub observed_at: DateTime<Utc>,
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectionSignal {
     pub signal_type: SignalType,
     pub triggered: bool,
@@ -136,6 +170,8 @@ pub struct RiskScore {
 pub struct DetectionResult {
     pub detection_id: Uuid,
     pub event_key: Option<String>,
+    pub subject_type: Option<String>,
+    pub subject_key: Option<String>,
     pub tenant_id: Option<String>,
     pub chain: Chain,
     pub chain_slug: String,
@@ -162,6 +198,8 @@ pub struct AlertEvent {
     pub alert_id: Uuid,
     pub incident_id: Option<String>,
     pub event_key: Option<String>,
+    pub subject_type: Option<String>,
+    pub subject_key: Option<String>,
     pub tenant_id: Option<String>,
     pub chain: Chain,
     pub chain_slug: String,

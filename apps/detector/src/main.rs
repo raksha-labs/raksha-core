@@ -326,6 +326,8 @@ fn alert_from_detection(detection: &event_schema::DetectionResult) -> AlertEvent
         alert_id: Uuid::new_v4(),
         incident_id: None,
         event_key: detection.event_key.clone(),
+        subject_type: detection.subject_type.clone(),
+        subject_key: detection.subject_key.clone(),
         tenant_id: detection.tenant_id.clone(),
         chain: detection.chain.clone(),
         chain_slug: detection.chain_slug.clone(),

@@ -128,6 +128,8 @@ impl RuleEvaluator for RuleEngine {
         let result = DetectionResult {
             detection_id: Uuid::new_v4(),
             event_key: Some(event.event_key.clone()),
+            subject_type: None,
+            subject_key: None,
             tenant_id: event.tenant_id.clone(),
             chain: event.chain.clone(),
             chain_slug: event.chain_slug.clone(),

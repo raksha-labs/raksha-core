@@ -262,6 +262,7 @@ fn default_confirmation_depth_for_chain(chain: &Chain) -> u64 {
     let env_name = match chain {
         Chain::Ethereum => "ETH_CONFIRMATION_DEPTH",
         Chain::Base => "BASE_CONFIRMATION_DEPTH",
+        Chain::Offchain => "OFFCHAIN_CONFIRMATION_DEPTH",
         Chain::Unknown => "CONFIRMATION_DEPTH",
     };
 
@@ -270,6 +271,7 @@ fn default_confirmation_depth_for_chain(chain: &Chain) -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(match chain {
             Chain::Base => 64,
+            Chain::Offchain => 1,
             _ => 3,
         })
         .max(1)
