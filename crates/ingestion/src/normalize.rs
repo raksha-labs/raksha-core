@@ -14,6 +14,7 @@ pub fn chain_from_slug(chain_slug: &str) -> Chain {
     match chain_slug {
         "ethereum" => Chain::Ethereum,
         "base" => Chain::Base,
+        "offchain" => Chain::Offchain,
         _ => Chain::Unknown,
     }
 }

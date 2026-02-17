@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use event_schema::AlertEvent;
 use common::AlertSink;
@@ -7,6 +7,24 @@ use serde_json::json;
 use tracing::{info, warn};
 
 const DEFAULT_NOTIFIER_GATEWAY_URL: &str = "http://localhost:3002";
+const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "default";
+
+#[derive(Debug, Clone)]
+pub struct GatewayChannelResult {
+    pub channel: String,
+    pub delivered: bool,
+    pub reason: Option<String>,
+    pub status_code: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GatewayDispatchResult {
+    pub tenant_id: String,
+    pub delivered: bool,
+    pub reason: Option<String>,
+    pub resolved_channels: Vec<String>,
+    pub results: Vec<GatewayChannelResult>,
+}
 
 #[derive(Clone)]
 struct NotifierGatewayHttp {
@@ -30,6 +48,10 @@ impl NotifierGatewayHttp {
     }
 
     async fn dispatch(&self, channel: &str, alert: &AlertEvent) -> Result<()> {
+        let tenant_id = alert
+            .tenant_id
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string());
         let dedup_key = format!(
             "{}:{}:{}:{}",
             format!("{:?}", alert.chain).to_lowercase(),
@@ -42,8 +64,9 @@ impl NotifierGatewayHttp {
             .client
             .post(format!("{}/dispatch", self.endpoint))
             .json(&json!({
+                "tenant_id": tenant_id,
                 "dedup_key": dedup_key,
-                "channel": channel,
+                "requested_channels": [channel],
                 "severity": format!("{:?}", alert.severity).to_lowercase(),
                 "payload": alert
             }))
@@ -62,6 +85,169 @@ impl NotifierGatewayHttp {
 
         info!(channel, "alert forwarded to notifier-gateway");
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct NotifierGatewayClient {
+    http: NotifierGatewayHttp,
+    fallback_tenant_id: String,
+}
+
+impl Default for NotifierGatewayClient {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl NotifierGatewayClient {
+    pub fn from_env() -> Self {
+        Self {
+            http: NotifierGatewayHttp::from_env(),
+            fallback_tenant_id: std::env::var("ALERT_FALLBACK_TENANT_ID")
+                .unwrap_or_else(|_| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string()),
+        }
+    }
+
+    pub async fn dispatch_alert(&self, alert: &AlertEvent) -> Result<GatewayDispatchResult> {
+        let tenant_id = alert
+            .tenant_id
+            .clone()
+            .unwrap_or_else(|| self.fallback_tenant_id.clone());
+        let requested_channels = alert
+            .channel_routes
+            .iter()
+            .filter(|channel| {
+                matches!(
+                    channel.as_str(),
+                    "webhook" | "slack" | "telegram" | "discord"
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let response = self
+            .http
+            .client
+            .post(format!("{}/dispatch", self.http.endpoint))
+            .json(&json!({
+                "tenant_id": tenant_id,
+                "dedup_key": alert.dedup_key,
+                "severity": format!("{:?}", alert.severity).to_lowercase(),
+                "requested_channels": requested_channels,
+                "payload": alert,
+            }))
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to call notifier-gateway dispatch at {}",
+                    self.http.endpoint
+                )
+            })?;
+
+        let status = response.status();
+        let payload = response
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_else(|_| json!({}));
+        let result = parse_gateway_dispatch_result(&payload, tenant_id);
+
+        if !status.is_success() {
+            warn!(
+                status = %status,
+                reason = ?result.reason,
+                "notifier-gateway returned non-success status"
+            );
+        }
+
+        Ok(result)
+    }
+}
+
+/// NotifierGatewaySink sends alert to notifier-gateway once and lets gateway route channels.
+pub struct NotifierGatewaySink {
+    gateway: NotifierGatewayClient,
+}
+
+impl Default for NotifierGatewaySink {
+    fn default() -> Self {
+        Self {
+            gateway: NotifierGatewayClient::from_env(),
+        }
+    }
+}
+
+impl NotifierGatewaySink {
+    pub fn with_client(gateway: NotifierGatewayClient) -> Self {
+        Self { gateway }
+    }
+}
+
+fn parse_gateway_dispatch_result(
+    value: &serde_json::Value,
+    tenant_id_fallback: String,
+) -> GatewayDispatchResult {
+    let tenant_id = value
+        .get("tenant_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or(tenant_id_fallback);
+    let delivered = value
+        .get("delivered")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let reason = value
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let resolved_channels = value
+        .get("resolved_channels")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let results = value
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|entry| GatewayChannelResult {
+                    channel: entry
+                        .get("channel")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    delivered: entry
+                        .get("delivered")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    reason: entry
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    status_code: entry
+                        .get("status_code")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|v| v as u16),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    GatewayDispatchResult {
+        tenant_id,
+        delivered,
+        reason,
+        resolved_channels,
+        results,
     }
 }
 
@@ -413,6 +599,28 @@ impl DiscordSink {
 
         info!("Alert sent to Discord");
         Ok(())
+    }
+}
+
+#[async_trait]
+impl AlertSink for NotifierGatewaySink {
+    async fn send(&self, alert: &AlertEvent) -> Result<()> {
+        let result = self.gateway.dispatch_alert(alert).await?;
+        if result.delivered {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "notifier-gateway dispatch failed for tenant {}: {}",
+                result.tenant_id,
+                result
+                    .reason
+                    .unwrap_or_else(|| "all_channels_failed".to_string())
+            ))
+        }
+    }
+
+    fn sink_name(&self) -> &'static str {
+        "notifier-gateway"
     }
 }
 

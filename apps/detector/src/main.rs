@@ -37,6 +37,7 @@ const DEFAULT_RULE_RELATIVE_ROOTS: [&str; 3] = [
 ];
 const DEFAULT_STREAM_BATCH_SIZE: usize = 100;
 const DEFAULT_STREAM_BLOCK_MS: usize = 1000;
+const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "default";
 
 type DynReferencePriceProvider = Arc<dyn ReferencePriceProvider>;
 
@@ -83,7 +84,17 @@ async fn main() -> Result<()> {
     let stream_publisher = init_stream_publisher().await;
     let reference_price_provider = init_reference_price_provider();
     let oracle_pair_overrides = load_oracle_pair_overrides();
-    if should_use_stream_mode() {
+    let stream_mode_enabled = should_use_stream_mode();
+    let stream_mode_emit_alerts = if stream_mode_enabled && emit_alerts {
+        warn!(
+            "DETECTION_ENGINE_EMIT_ALERTS=true ignored in stream mode; orchestrator owns alert dispatch"
+        );
+        false
+    } else {
+        emit_alerts
+    };
+
+    if stream_mode_enabled {
         if let Some(stream) = stream_publisher.as_ref() {
             info!("detection-engine running in stream-consumer mode");
             run_stream_mode(
@@ -92,7 +103,7 @@ async fn main() -> Result<()> {
                 &risk_scorer,
                 &sinks,
                 repository.as_ref(),
-                emit_alerts,
+                stream_mode_emit_alerts,
                 reference_price_provider.as_deref(),
                 &oracle_pair_overrides,
                 &shutdown,
@@ -326,7 +337,9 @@ fn alert_from_detection(detection: &event_schema::DetectionResult) -> AlertEvent
         alert_id: Uuid::new_v4(),
         incident_id: None,
         event_key: detection.event_key.clone(),
-        tenant_id: detection.tenant_id.clone(),
+        subject_type: detection.subject_type.clone(),
+        subject_key: detection.subject_key.clone(),
+        tenant_id: Some(resolve_alert_tenant_id(detection.tenant_id.clone())),
         chain: detection.chain.clone(),
         chain_slug: detection.chain_slug.clone(),
         protocol: detection.protocol.clone(),
@@ -357,6 +370,13 @@ fn should_use_stream_mode() -> bool {
         .ok()
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(true)
+}
+
+fn resolve_alert_tenant_id(tenant_id: Option<String>) -> String {
+    tenant_id.unwrap_or_else(|| {
+        std::env::var("ALERT_FALLBACK_TENANT_ID")
+            .unwrap_or_else(|_| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string())
+    })
 }
 
 fn load_rule_engine() -> Result<RuleEngine> {

@@ -10,12 +10,16 @@ members = [
   "crates/risk-scorer",
   "crates/state-manager",
   "crates/notifier",
+  "crates/market-connectors",
+  "crates/dpeg-engine",
   # Binary applications
   "apps/indexer",
   "apps/detector",
   "apps/scorer",
   "apps/orchestrator",
   "apps/finality",
+  "apps/market-indexer",
+  "apps/market-detector",
 ]
 
 [workspace.dependencies]
@@ -34,7 +38,9 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net", "io-util"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4", "with-uuid-1"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+url = "2.5"
 uuid = { version = "1", features = ["v4", "serde"] }

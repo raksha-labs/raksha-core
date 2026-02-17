@@ -22,9 +22,11 @@
   ],
   "properties": {
     "detection_id": { "type": "string", "format": "uuid" },
-    "chain": { "type": "string", "enum": ["ethereum", "base", "unknown"] },
+    "chain": { "type": "string", "enum": ["ethereum", "base", "offchain", "unknown"] },
     "chain_slug": { "type": "string", "pattern": "^[a-z0-9-]+$" },
     "protocol": { "type": "string" },
+    "subject_type": { "type": ["string", "null"] },
+    "subject_key": { "type": ["string", "null"] },
     "lifecycle_state": {
       "type": "string",
       "enum": ["provisional", "confirmed", "retracted", "suppressed", "resolved"]
@@ -50,6 +52,7 @@
             "type": "string",
             "enum": [
               "oracle_divergence",
+              "peg_deviation",
               "flash_loan_detected",
               "oracle_read_detected",
               "large_swap_detected",
