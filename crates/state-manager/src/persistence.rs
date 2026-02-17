@@ -90,6 +90,22 @@ impl PostgresRepository {
                 CREATE INDEX IF NOT EXISTS idx_alert_lifecycle_events_event_key
                     ON alert_lifecycle_events (event_key);
 
+                CREATE TABLE IF NOT EXISTS alert_delivery_attempts (
+                    id BIGSERIAL PRIMARY KEY,
+                    alert_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    delivered BOOLEAN NOT NULL,
+                    reason TEXT,
+                    status_code INTEGER,
+                    attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_alert_delivery_attempts_alert
+                    ON alert_delivery_attempts (alert_id, attempted_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_alert_delivery_attempts_tenant
+                    ON alert_delivery_attempts (tenant_id, attempted_at DESC);
+
                 CREATE TABLE IF NOT EXISTS market_quote_ticks (
                     quote_id UUID PRIMARY KEY,
                     tenant_id TEXT NOT NULL,
@@ -399,6 +415,36 @@ impl PostgresRepository {
                     &(alert.block_number as i64),
                     &format!("{:?}", alert.lifecycle_state).to_lowercase(),
                     &payload,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn save_alert_delivery_attempt(
+        &self,
+        alert_id: &str,
+        tenant_id: &str,
+        channel: &str,
+        delivered: bool,
+        reason: Option<&str>,
+        status_code: Option<u16>,
+    ) -> Result<()> {
+        let status_code_i32 = status_code.map(i32::from);
+        self.client
+            .execute(
+                r#"
+                INSERT INTO alert_delivery_attempts
+                    (alert_id, tenant_id, channel, delivered, reason, status_code)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                "#,
+                &[
+                    &alert_id,
+                    &tenant_id,
+                    &channel,
+                    &delivered,
+                    &reason,
+                    &status_code_i32,
                 ],
             )
             .await?;

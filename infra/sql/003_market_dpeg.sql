@@ -77,6 +77,22 @@ CREATE TABLE IF NOT EXISTS connector_health_state (
     PRIMARY KEY (tenant_id, source_id)
 );
 
+CREATE TABLE IF NOT EXISTS alert_delivery_attempts (
+    id BIGSERIAL PRIMARY KEY,
+    alert_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    delivered BOOLEAN NOT NULL,
+    reason TEXT,
+    status_code INTEGER,
+    attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_delivery_attempts_alert
+    ON alert_delivery_attempts (alert_id, attempted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_delivery_attempts_tenant
+    ON alert_delivery_attempts (tenant_id, attempted_at DESC);
+
 -- Suggested retention strategy:
 -- 1) Keep raw ticks for 7 days via scheduled DELETE on market_quote_ticks.created_at
 -- 2) Keep snapshots for 180 days via scheduled DELETE on market_consensus_snapshots.created_at

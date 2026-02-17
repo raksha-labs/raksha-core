@@ -1,10 +1,10 @@
 use std::{collections::HashMap, time::Duration};
 
-use notifier::{DiscordSink, SlackSink, TelegramSink, WebhookSink};
+use notifier::NotifierGatewayClient;
 use anyhow::Result;
 use chrono::Utc;
 use event_schema::{AlertEvent, DetectionResult, LifecycleState};
-use common::{AlertSink, ShutdownSignal};
+use common::ShutdownSignal;
 use dotenv::dotenv;
 use state_manager::RedisStreamPublisher;
 use state_manager::PostgresRepository;
@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 const DEFAULT_BATCH_SIZE: usize = 100;
 const DEFAULT_BLOCK_MS: usize = 1000;
+const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "default";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,12 +36,7 @@ async fn main() -> Result<()> {
 
     let repository = init_repository().await;
 
-    let sinks: Vec<Box<dyn AlertSink>> = vec![
-        Box::new(WebhookSink::default()),
-        Box::new(SlackSink::default()),
-        Box::new(TelegramSink::default()),
-        Box::new(DiscordSink::default()),
-    ];
+    let notifier_gateway = NotifierGatewayClient::from_env();
 
     let batch_size = std::env::var("STATE_MANAGER_STREAM_BATCH_SIZE")
         .ok()
@@ -113,7 +109,7 @@ async fn main() -> Result<()> {
 
             let alert = alert_from_detection(&detection);
             alerts_by_event_key.insert(event_key.to_string(), alert.clone());
-            dispatch_alert(&alert, &sinks, repository.as_ref(), &stream).await;
+            dispatch_alert(&alert, &notifier_gateway, repository.as_ref(), &stream).await;
             processed += 1;
 
             if use_consumer_group {
@@ -176,7 +172,7 @@ async fn main() -> Result<()> {
             updated_alert.lifecycle_state = update.lifecycle_state.clone();
             updated_alert.created_at = Utc::now();
             alerts_by_event_key.insert(update.event_key.clone(), updated_alert.clone());
-            dispatch_alert(&updated_alert, &sinks, repository.as_ref(), &stream).await;
+            dispatch_alert(&updated_alert, &notifier_gateway, repository.as_ref(), &stream).await;
             processed += 1;
 
             if use_consumer_group {
@@ -218,7 +214,7 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
         event_key: detection.event_key.clone(),
         subject_type: detection.subject_type.clone(),
         subject_key: detection.subject_key.clone(),
-        tenant_id: detection.tenant_id.clone(),
+        tenant_id: Some(resolve_alert_tenant_id(detection.tenant_id.clone())),
         chain: detection.chain.clone(),
         chain_slug: detection.chain_slug.clone(),
         protocol: detection.protocol.clone(),
@@ -246,13 +242,43 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
 
 async fn dispatch_alert(
     alert: &AlertEvent,
-    sinks: &[Box<dyn AlertSink>],
+    notifier_gateway: &NotifierGatewayClient,
     repository: Option<&PostgresRepository>,
     stream: &RedisStreamPublisher,
 ) {
-    for sink in sinks {
-        if let Err(err) = sink.send(alert).await {
-            warn!(sink = sink.sink_name(), error = ?err, "failed to dispatch alert to sink");
+    match notifier_gateway.dispatch_alert(alert).await {
+        Ok(dispatch_result) => {
+            if let Some(repo) = repository {
+                for result in &dispatch_result.results {
+                    if let Err(err) = repo
+                        .save_alert_delivery_attempt(
+                            &alert.alert_id.to_string(),
+                            &dispatch_result.tenant_id,
+                            &result.channel,
+                            result.delivered,
+                            result.reason.as_deref(),
+                            result.status_code,
+                        )
+                        .await
+                    {
+                        warn!(
+                            error = ?err,
+                            channel = %result.channel,
+                            "failed to persist alert delivery attempt"
+                        );
+                    }
+                }
+            }
+            if !dispatch_result.delivered {
+                warn!(
+                    tenant_id = %dispatch_result.tenant_id,
+                    reason = ?dispatch_result.reason,
+                    "notifier-gateway dispatch did not deliver alert"
+                );
+            }
+        }
+        Err(err) => {
+            warn!(error = ?err, "failed to dispatch alert to notifier-gateway");
         }
     }
 
@@ -271,6 +297,13 @@ async fn dispatch_alert(
     if let Err(err) = stream.publish_alert_lifecycle(alert).await {
         warn!(error = ?err, "failed to publish alert lifecycle stream event");
     }
+}
+
+fn resolve_alert_tenant_id(tenant_id: Option<String>) -> String {
+    tenant_id.unwrap_or_else(|| {
+        std::env::var("ALERT_FALLBACK_TENANT_ID")
+            .unwrap_or_else(|_| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string())
+    })
 }
 
 async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
