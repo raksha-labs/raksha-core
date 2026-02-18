@@ -57,3 +57,17 @@ This starts Postgres, Redis, indexer, and detector together.
 /usr/local/cargo/bin/cargo check
 /usr/local/cargo/bin/cargo test --workspace
 ```
+
+## AWS IaC (Core repo)
+
+Core-specific AWS IaC is in:
+
+- `infra/service-catalog.yaml` (core runtimes only)
+- `infra/terraform/environments/{test,stage,prod}`
+- `infra/terraform/modules/*`
+
+Local Terraform validation:
+
+```bash
+./scripts/local-terraform-check.sh
+```

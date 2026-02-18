@@ -1,0 +1,24 @@
+aws_region            = "eu-west-1"
+environment           = "test"
+compute_mode          = "ec2"
+enable_managed_data   = false
+budget_limit_usd      = 100
+alarm_emails          = ["you@example.com"]
+admin_access_mode     = "private-only"
+image_tag             = "main-latest"
+
+github_org            = "your-org"
+github_repo           = "defi-surv"
+github_allowed_branches = ["main"]
+
+# Set this to true only in one environment/account when bootstrapping OIDC.
+create_oidc_provider  = false
+# oidc_provider_arn   = "arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com"
+
+# service_desired_counts = {
+#   detector = 2
+# }
+
+# service_cpu_memory = {
+#   detector = { cpu = 1024, memory = 2048 }
+# }

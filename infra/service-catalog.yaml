@@ -1,0 +1,106 @@
+version: 1
+services:
+  - service_name: indexer
+    image_repo: defi-surv-indexer
+    container_port: 8081
+    health_path: /health
+    exposure: internal
+    deploy_strategy: rolling
+    scaling_class: fixed
+    cpu: 512
+    memory: 1024
+    command: ["/app/bin/indexer"]
+    desired_count:
+      test: 1
+      stage: 1
+      prod: 2
+
+  - service_name: detector
+    image_repo: defi-surv-detector
+    container_port: 8082
+    health_path: /health
+    exposure: internal
+    deploy_strategy: rolling
+    scaling_class: worker_cpu_and_lag
+    cpu: 1024
+    memory: 2048
+    command: ["/app/bin/detector"]
+    desired_count:
+      test: 1
+      stage: 3
+      prod: 5
+
+  - service_name: scorer
+    image_repo: defi-surv-scorer
+    container_port: 8083
+    health_path: /health
+    exposure: internal
+    deploy_strategy: rolling
+    scaling_class: worker_cpu_and_lag
+    cpu: 512
+    memory: 1024
+    command: ["/app/bin/scorer"]
+    desired_count:
+      test: 1
+      stage: 2
+      prod: 3
+
+  - service_name: orchestrator
+    image_repo: defi-surv-orchestrator
+    container_port: 8084
+    health_path: /health
+    exposure: internal
+    deploy_strategy: rolling
+    scaling_class: worker_cpu_and_lag
+    cpu: 512
+    memory: 1024
+    command: ["/app/bin/orchestrator"]
+    desired_count:
+      test: 1
+      stage: 2
+      prod: 3
+
+  - service_name: finality
+    image_repo: defi-surv-finality
+    container_port: 8085
+    health_path: /health
+    exposure: internal
+    deploy_strategy: rolling
+    scaling_class: fixed
+    cpu: 256
+    memory: 512
+    command: ["/app/bin/finality"]
+    desired_count:
+      test: 1
+      stage: 1
+      prod: 2
+
+  - service_name: market-indexer
+    image_repo: defi-surv-market-indexer
+    container_port: 8086
+    health_path: /health
+    exposure: internal
+    deploy_strategy: rolling
+    scaling_class: fixed
+    cpu: 512
+    memory: 1024
+    command: ["/app/bin/market-indexer"]
+    desired_count:
+      test: 1
+      stage: 1
+      prod: 2
+
+  - service_name: market-detector
+    image_repo: defi-surv-market-detector
+    container_port: 8087
+    health_path: /health
+    exposure: internal
+    deploy_strategy: rolling
+    scaling_class: worker_cpu_and_lag
+    cpu: 512
+    memory: 1024
+    command: ["/app/bin/market-detector"]
+    desired_count:
+      test: 1
+      stage: 2
+      prod: 3

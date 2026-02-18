@@ -1,0 +1,17 @@
+aws_region              = "eu-west-1"
+environment             = "prod"
+compute_mode            = "fargate_mix"
+budget_limit_usd        = 1000
+alarm_emails            = ["you@example.com"]
+admin_access_mode       = "private-only"
+enable_public_https     = true
+public_certificate_arn  = "arn:aws:acm:eu-west-1:123456789012:certificate/replace-me"
+enable_waf              = true
+image_tag               = "v1.0.0"
+
+github_org              = "your-org"
+github_repo             = "defi-surv"
+github_allowed_branches = ["main", "release/*"]
+
+create_oidc_provider    = false
+# oidc_provider_arn     = "arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com"

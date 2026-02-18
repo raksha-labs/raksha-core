@@ -19,10 +19,13 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY apps ./apps
 
-# Build release binaries required for local data-plane stack.
+# Build release binaries required for core runtimes.
 RUN cargo build --release \
     -p indexer \
     -p detector \
+    -p scorer \
+    -p orchestrator \
+    -p finality \
     -p market-indexer \
     -p market-detector
 
@@ -43,6 +46,9 @@ WORKDIR /app
 # Copy binaries from builder.
 COPY --from=builder /app/target/release/indexer /app/bin/indexer
 COPY --from=builder /app/target/release/detector /app/bin/detector
+COPY --from=builder /app/target/release/scorer /app/bin/scorer
+COPY --from=builder /app/target/release/orchestrator /app/bin/orchestrator
+COPY --from=builder /app/target/release/finality /app/bin/finality
 COPY --from=builder /app/target/release/market-indexer /app/bin/market-indexer
 COPY --from=builder /app/target/release/market-detector /app/bin/market-detector
 
