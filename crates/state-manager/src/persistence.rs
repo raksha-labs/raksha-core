@@ -71,12 +71,16 @@ impl PostgresRepository {
                     ADD COLUMN IF NOT EXISTS subject_key TEXT;
                 ALTER TABLE detections
                     ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+                ALTER TABLE detections
+                    ADD COLUMN IF NOT EXISTS pattern_id TEXT;
                 ALTER TABLE alerts
                     ADD COLUMN IF NOT EXISTS subject_type TEXT;
                 ALTER TABLE alerts
                     ADD COLUMN IF NOT EXISTS subject_key TEXT;
                 ALTER TABLE alerts
                     ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+                ALTER TABLE alerts
+                    ADD COLUMN IF NOT EXISTS pattern_id TEXT;
 
                 UPDATE detections
                 SET tenant_id = COALESCE(NULLIF(payload->>'tenant_id', ''), 'glider')
@@ -86,14 +90,26 @@ impl PostgresRepository {
                 SET tenant_id = COALESCE(NULLIF(payload->>'tenant_id', ''), 'glider')
                 WHERE tenant_id IS NULL;
 
+                UPDATE detections
+                SET pattern_id = COALESCE(NULLIF(payload->>'pattern_id', ''), pattern_id)
+                WHERE pattern_id IS NULL;
+
+                UPDATE alerts
+                SET pattern_id = COALESCE(NULLIF(payload->>'pattern_id', ''), pattern_id)
+                WHERE pattern_id IS NULL;
+
                 CREATE INDEX IF NOT EXISTS idx_detections_subject_created
                     ON detections (subject_type, subject_key, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_alerts_subject_created
                     ON alerts (subject_type, subject_key, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_detections_tenant_created
                     ON detections (tenant_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_detections_tenant_pattern_created
+                    ON detections (tenant_id, pattern_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_alerts_tenant_created
                     ON alerts (tenant_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_alerts_tenant_pattern_created
+                    ON alerts (tenant_id, pattern_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_alerts_tenant_lifecycle
                     ON alerts (tenant_id, lifecycle_state, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_alerts_tenant_severity
@@ -148,10 +164,17 @@ impl PostgresRepository {
                     source_name TEXT NOT NULL,
                     connection_config JSONB NOT NULL DEFAULT '{}',
                     filters JSONB,
+                    scope TEXT NOT NULL DEFAULT 'global',
+                    owner_tenant_id TEXT,
                     enabled BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (source_id)
                 );
+
+                ALTER TABLE data_sources
+                    ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'global';
+                ALTER TABLE data_sources
+                    ADD COLUMN IF NOT EXISTS owner_tenant_id TEXT;
 
                 CREATE TABLE IF NOT EXISTS tenant_data_sources (
                     tenant_id TEXT NOT NULL,
@@ -185,6 +208,48 @@ impl PostgresRepository {
                     config JSONB NOT NULL DEFAULT '{}',
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (tenant_id, pattern_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tenant_pattern_source_bindings (
+                    tenant_id TEXT NOT NULL,
+                    pattern_id TEXT NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+                    source_id TEXT NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    binding_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ,
+                    PRIMARY KEY (tenant_id, pattern_id, source_id),
+                    FOREIGN KEY (tenant_id, source_id)
+                        REFERENCES tenant_data_sources(tenant_id, source_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tenant_pattern_source_bindings_tenant_pattern
+                    ON tenant_pattern_source_bindings (tenant_id, pattern_id);
+
+                CREATE TABLE IF NOT EXISTS tenant_pattern_alert_policies (
+                    tenant_id TEXT NOT NULL,
+                    pattern_id TEXT NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+                    severity_threshold TEXT NOT NULL DEFAULT 'medium',
+                    cooldown_sec INTEGER NOT NULL DEFAULT 300,
+                    default_channels TEXT[] NOT NULL DEFAULT '{webhook}',
+                    route_overrides JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ,
+                    PRIMARY KEY (tenant_id, pattern_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tenant_pattern_notification_channels (
+                    tenant_id TEXT NOT NULL,
+                    pattern_id TEXT NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+                    channel TEXT NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    use_tenant_default BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ,
+                    PRIMARY KEY (tenant_id, pattern_id, channel),
+                    CHECK (channel IN ('webhook', 'slack', 'telegram', 'discord'))
                 );
 
                 CREATE TABLE IF NOT EXISTS raw_events (
@@ -255,8 +320,8 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO detections (id, tx_hash, chain, protocol, subject_type, subject_key, tenant_id, severity, risk_score, payload)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                INSERT INTO detections (id, tx_hash, chain, protocol, subject_type, subject_key, tenant_id, pattern_id, severity, risk_score, payload)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 ON CONFLICT (id) DO NOTHING
                 "#,
                 &[
@@ -267,6 +332,7 @@ impl PostgresRepository {
                     &detection.subject_type,
                     &detection.subject_key,
                     &tenant_id,
+                    &detection.pattern_id,
                     &format!("{:?}", detection.severity).to_lowercase(),
                     &detection.risk_score.score,
                     &payload,
@@ -282,8 +348,8 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO alerts (id, tx_hash, chain, chain_slug, protocol, subject_type, subject_key, tenant_id, lifecycle_state, severity, risk_score, payload)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                INSERT INTO alerts (id, tx_hash, chain, chain_slug, protocol, subject_type, subject_key, tenant_id, pattern_id, lifecycle_state, severity, risk_score, payload)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 ON CONFLICT (id) DO UPDATE
                 SET lifecycle_state = EXCLUDED.lifecycle_state,
                     severity = EXCLUDED.severity,
@@ -291,6 +357,7 @@ impl PostgresRepository {
                     subject_type = EXCLUDED.subject_type,
                     subject_key = EXCLUDED.subject_key,
                     tenant_id = EXCLUDED.tenant_id,
+                    pattern_id = EXCLUDED.pattern_id,
                     payload = EXCLUDED.payload
                 "#,
                 &[
@@ -302,6 +369,7 @@ impl PostgresRepository {
                     &alert.subject_type,
                     &alert.subject_key,
                     &tenant_id,
+                    &alert.pattern_id,
                     &format!("{:?}", alert.lifecycle_state).to_lowercase(),
                     &format!("{:?}", alert.severity).to_lowercase(),
                     &alert.risk_score,

@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS detections (
     tx_hash TEXT NOT NULL,
     chain TEXT NOT NULL,
     protocol TEXT NOT NULL,
+    tenant_id TEXT,
+    pattern_id TEXT,
     severity TEXT NOT NULL,
     risk_score DOUBLE PRECISION NOT NULL,
     payload JSONB NOT NULL,
@@ -24,12 +26,16 @@ CREATE INDEX IF NOT EXISTS idx_detections_chain ON detections(chain);
 CREATE INDEX IF NOT EXISTS idx_detections_protocol ON detections(protocol);
 CREATE INDEX IF NOT EXISTS idx_detections_tx_hash ON detections(tx_hash);
 CREATE INDEX IF NOT EXISTS idx_detections_created_at ON detections(created_at);
+CREATE INDEX IF NOT EXISTS idx_detections_tenant_pattern_created
+    ON detections (tenant_id, pattern_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS alerts (
     id TEXT PRIMARY KEY,
     tx_hash TEXT NOT NULL,
     chain TEXT NOT NULL,
     protocol TEXT NOT NULL,
+    tenant_id TEXT,
+    pattern_id TEXT,
     severity TEXT NOT NULL,
     risk_score DOUBLE PRECISION NOT NULL,
     payload JSONB NOT NULL,
@@ -40,6 +46,33 @@ CREATE INDEX IF NOT EXISTS idx_alerts_chain ON alerts(chain);
 CREATE INDEX IF NOT EXISTS idx_alerts_protocol ON alerts(protocol);
 CREATE INDEX IF NOT EXISTS idx_alerts_tx_hash ON alerts(tx_hash);
 CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts(created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_tenant_pattern_created
+    ON alerts (tenant_id, pattern_id, created_at DESC);
+
+ALTER TABLE detections
+    ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+ALTER TABLE detections
+    ADD COLUMN IF NOT EXISTS pattern_id TEXT;
+ALTER TABLE alerts
+    ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+ALTER TABLE alerts
+    ADD COLUMN IF NOT EXISTS pattern_id TEXT;
+
+UPDATE detections
+SET tenant_id = COALESCE(NULLIF(payload->>'tenant_id', ''), tenant_id)
+WHERE tenant_id IS NULL;
+
+UPDATE alerts
+SET tenant_id = COALESCE(NULLIF(payload->>'tenant_id', ''), tenant_id)
+WHERE tenant_id IS NULL;
+
+UPDATE detections
+SET pattern_id = COALESCE(NULLIF(payload->>'pattern_id', ''), pattern_id)
+WHERE pattern_id IS NULL;
+
+UPDATE alerts
+SET pattern_id = COALESCE(NULLIF(payload->>'pattern_id', ''), pattern_id)
+WHERE pattern_id IS NULL;
 
 -- ─── Finality State Persistence ─────────────────────────────────────────────
 
@@ -117,10 +150,49 @@ CREATE TABLE IF NOT EXISTS data_sources (
     source_name       TEXT NOT NULL,        -- display name / connector name (e.g. "binance", "chainlink")
     connection_config JSONB NOT NULL DEFAULT '{}',
     filters           JSONB,                -- optional per-source filters (e.g. symbols list)
+    scope             TEXT NOT NULL DEFAULT 'global',
+    owner_tenant_id   TEXT,
     enabled           BOOLEAN NOT NULL DEFAULT TRUE,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (source_id)
 );
+
+ALTER TABLE data_sources
+    ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'global';
+ALTER TABLE data_sources
+    ADD COLUMN IF NOT EXISTS owner_tenant_id TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'chk_data_sources_scope'
+    ) THEN
+        ALTER TABLE data_sources
+        ADD CONSTRAINT chk_data_sources_scope
+        CHECK (scope IN ('global', 'tenant'));
+    END IF;
+END$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'chk_data_sources_owner_scope'
+    ) THEN
+        ALTER TABLE data_sources
+        ADD CONSTRAINT chk_data_sources_owner_scope
+        CHECK (
+          (scope = 'global' AND owner_tenant_id IS NULL)
+          OR (scope = 'tenant' AND owner_tenant_id IS NOT NULL)
+        );
+    END IF;
+END$$;
+
+CREATE INDEX IF NOT EXISTS idx_data_sources_scope_owner
+    ON data_sources (scope, owner_tenant_id);
 
 CREATE TABLE IF NOT EXISTS tenant_data_sources (
     tenant_id       TEXT NOT NULL,
@@ -163,6 +235,54 @@ CREATE TABLE IF NOT EXISTS tenant_pattern_configs (
 
 CREATE INDEX IF NOT EXISTS idx_tenant_pattern_configs_tenant
     ON tenant_pattern_configs (tenant_id);
+
+CREATE TABLE IF NOT EXISTS tenant_pattern_source_bindings (
+    tenant_id      TEXT        NOT NULL,
+    pattern_id     TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    source_id      TEXT        NOT NULL,
+    enabled        BOOLEAN     NOT NULL DEFAULT TRUE,
+    binding_config JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, pattern_id, source_id),
+    FOREIGN KEY (tenant_id, source_id)
+      REFERENCES tenant_data_sources(tenant_id, source_id)
+      ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_source_bindings_tenant_pattern
+    ON tenant_pattern_source_bindings (tenant_id, pattern_id);
+
+CREATE TABLE IF NOT EXISTS tenant_pattern_alert_policies (
+    tenant_id          TEXT        NOT NULL,
+    pattern_id         TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    severity_threshold TEXT        NOT NULL DEFAULT 'medium',
+    cooldown_sec       INTEGER     NOT NULL DEFAULT 300,
+    default_channels   TEXT[]      NOT NULL DEFAULT '{webhook}',
+    route_overrides    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, pattern_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_alert_policies_tenant
+    ON tenant_pattern_alert_policies (tenant_id);
+
+CREATE TABLE IF NOT EXISTS tenant_pattern_notification_channels (
+    tenant_id          TEXT        NOT NULL,
+    pattern_id         TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    channel            TEXT        NOT NULL,
+    enabled            BOOLEAN     NOT NULL DEFAULT FALSE,
+    config_json        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    use_tenant_default BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, pattern_id, channel),
+    CHECK (channel IN ('webhook', 'slack', 'telegram', 'discord'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_notification_channels_tenant
+    ON tenant_pattern_notification_channels (tenant_id, pattern_id);
 
 -- ─── Raw Event Store ─────────────────────────────────────────────────────────
 

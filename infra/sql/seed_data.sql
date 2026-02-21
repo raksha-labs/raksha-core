@@ -26,9 +26,16 @@ INSERT INTO pattern_configs (pattern_id, config)
 VALUES
     ('dpeg', '{}'::jsonb),
     ('flash_loan', '{
-        "min_loan_amount_usd": 100000,
-        "profit_threshold_usd": 1000,
-        "cooldown_sec": 300
+        "rules": [
+          {
+            "rule_id": "flash-default",
+            "name": "Default Flash Loan Rule",
+            "enabled": true,
+            "min_loan_amount_usd": 100000,
+            "profit_threshold_usd": 1000,
+            "cooldown_sec": 300
+          }
+        ]
     }'::jsonb)
 ON CONFLICT (pattern_id) DO NOTHING;
 
@@ -36,34 +43,53 @@ ON CONFLICT (pattern_id) DO NOTHING;
 -- These are example sources. Real deployments should configure their own
 -- via the admin API or by inserting rows directly with actual API keys.
 
-INSERT INTO data_sources (source_id, source_type, source_name, connection_config, filters, enabled)
+INSERT INTO data_sources (
+  source_id,
+  source_type,
+  source_name,
+  connection_config,
+  filters,
+  scope,
+  owner_tenant_id,
+  enabled
+)
 VALUES
     -- CEX WebSocket Sources
     ('binance-global', 'cex_websocket', 'binance',
      '{"ws_endpoint": "wss://stream.binance.com:9443/ws"}'::jsonb,
      '{"market_symbols": ["USDCUSDT", "DAIUSDT", "USDTUSDT"]}'::jsonb,
+     'global',
+     NULL,
      TRUE),
 
     ('coinbase-advanced', 'cex_websocket', 'coinbase',
      '{"ws_endpoint": "wss://advanced-trade-ws.coinbase.com"}'::jsonb,
      '{"market_symbols": ["USDC-USD", "DAI-USD"]}'::jsonb,
+     'global',
+     NULL,
      TRUE),
 
     -- DEX API Sources
     ('uniswap-v3-eth', 'dex_api', 'uniswap-v3',
      '{"ws_endpoint": "wss://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3"}'::jsonb,
      '{"market_symbols": ["USDC/ETH", "DAI/ETH"]}'::jsonb,
+     'global',
+     NULL,
      TRUE),
 
     -- Oracle API Sources
     ('chainlink-eth', 'oracle_api', 'chainlink',
      '{"ws_endpoint": "wss://rpc.ankr.com/eth/ws"}'::jsonb,
      '{"market_symbols": ["USDC-USD", "DAI-USD"]}'::jsonb,
+     'global',
+     NULL,
      TRUE),
 
     ('pyth-mainnet', 'oracle_api', 'pyth',
      '{"ws_endpoint": "wss://hermes.pyth.network/api/v1/streaming"}'::jsonb,
      '{"market_symbols": ["Crypto.USDC/USD", "Crypto.DAI/USD"]}'::jsonb,
+     'global',
+     NULL,
      TRUE),
 
     -- EVM Chain Sources
@@ -71,10 +97,14 @@ VALUES
     ('ethereum-mainnet', 'evm_chain', 'ethereum',
      '{"chain_id": 1, "chain_slug": "ethereum", "rpc_url": "wss://mainnet.infura.io/ws/v3/INFURA_KEY"}'::jsonb,
      NULL,
+     'global',
+     NULL,
      TRUE),
 
     ('arbitrum-one', 'evm_chain', 'arbitrum',
      '{"chain_id": 42161, "chain_slug": "arbitrum", "rpc_url": "wss://arb-mainnet.g.alchemy.com/v2/ALCHEMY_KEY"}'::jsonb,
+     NULL,
+     'global',
      NULL,
      TRUE)
 ON CONFLICT (source_id) DO NOTHING;
@@ -122,11 +152,22 @@ VALUES
         }
     ]'::jsonb),
 
-    -- Flash Loan: Use default configuration
+    -- Flash Loan: legacy object + multi-rule model compatibility
     ('glider', 'flash_loan', TRUE, '{
+        "rules": [
+          {
+            "rule_id": "flash-default",
+            "name": "Default Flash Loan Rule",
+            "enabled": true,
+            "min_loan_amount_usd": 100000,
+            "profit_threshold_usd": 1000,
+            "cooldown_sec": 300
+          }
+        ],
         "min_loan_amount_usd": 100000,
         "profit_threshold_usd": 1000,
-        "cooldown_sec": 300
+        "cooldown_sec": 300,
+        "enabled": true
     }'::jsonb)
 ON CONFLICT (tenant_id, pattern_id) DO NOTHING;
 
@@ -136,6 +177,67 @@ INSERT INTO tenant_policies (tenant_id, severity_threshold, cooldown_sec, defaul
 VALUES
     ('glider', 'medium', 300, '{webhook}', '{}')
 ON CONFLICT (tenant_id) DO NOTHING;
+
+-- ─── Pattern Ingestion Bindings (backfill from tenant_data_sources) ─────────
+
+INSERT INTO tenant_pattern_source_bindings (tenant_id, pattern_id, source_id, enabled, binding_config)
+SELECT
+  tpc.tenant_id,
+  tpc.pattern_id,
+  tds.source_id,
+  tds.enabled,
+  '{}'::jsonb
+FROM tenant_pattern_configs tpc
+JOIN tenant_data_sources tds
+  ON tds.tenant_id = tpc.tenant_id
+WHERE tpc.enabled = TRUE
+ON CONFLICT (tenant_id, pattern_id, source_id) DO NOTHING;
+
+-- ─── Pattern Alerting Policies (backfill from tenant_policies) ──────────────
+
+INSERT INTO tenant_pattern_alert_policies (
+  tenant_id,
+  pattern_id,
+  severity_threshold,
+  cooldown_sec,
+  default_channels,
+  route_overrides
+)
+SELECT
+  tpc.tenant_id,
+  tpc.pattern_id,
+  tp.severity_threshold,
+  tp.cooldown_sec,
+  tp.default_channels,
+  tp.route_overrides
+FROM tenant_pattern_configs tpc
+JOIN tenant_policies tp
+  ON tp.tenant_id = tpc.tenant_id
+WHERE tpc.enabled = TRUE
+ON CONFLICT (tenant_id, pattern_id) DO NOTHING;
+
+-- ─── Pattern Notification Channel Overrides (default inherit) ────────────────
+
+INSERT INTO tenant_pattern_notification_channels (
+  tenant_id,
+  pattern_id,
+  channel,
+  enabled,
+  config_json,
+  use_tenant_default
+)
+SELECT
+  tpc.tenant_id,
+  tpc.pattern_id,
+  channel_value.channel,
+  FALSE,
+  '{}'::jsonb,
+  TRUE
+FROM tenant_pattern_configs tpc
+CROSS JOIN (
+  VALUES ('webhook'), ('slack'), ('telegram'), ('discord')
+) AS channel_value(channel)
+ON CONFLICT (tenant_id, pattern_id, channel) DO NOTHING;
 
 -- ============================================================================
 -- Post-Seeding Notes

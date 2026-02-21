@@ -227,6 +227,7 @@ pub struct AlertEvent {
     pub subject_type: Option<String>,
     pub subject_key: Option<String>,
     pub tenant_id: Option<String>,
+    pub pattern_id: String,
     pub chain: Chain,
     pub chain_slug: String,
     pub protocol: String,

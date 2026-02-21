@@ -216,6 +216,7 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
         subject_type: detection.subject_type.clone(),
         subject_key: detection.subject_key.clone(),
         tenant_id: Some(resolve_alert_tenant_id(detection.tenant_id.clone())),
+        pattern_id: detection.pattern_id.clone(),
         chain: detection.chain.clone(),
         chain_slug: detection.chain_slug.clone(),
         protocol: detection.protocol.clone(),
