@@ -8,61 +8,52 @@
 
 | Component | Binary | Primary Input | Primary Output | Notes |
 |---|---|---|---|---|
-| Indexer | `apps/indexer` | EVM RPC/WebSocket events | `defi-surv:normalized-events`, `defi-surv:reorg-notices` | Normalizes oracle and flash-loan candidate events. |
-| Detector | `apps/detector` | `defi-surv:normalized-events` | `defi-surv:detections` | Applies rule engine + scoring. |
-| Scorer | `apps/scorer` | Redis stream events | scored detections | Health-check capable worker for risk enrichment paths. |
-| Orchestrator (state manager) | `apps/orchestrator` | `defi-surv:detections`, `defi-surv:finality-updates` | `defi-surv:alerts`, `defi-surv:alerts:lifecycle` | Correlates detections, persists alerts, dispatches notifier calls. |
-| Finality | `apps/finality` | `defi-surv:normalized-events`, `defi-surv:reorg-notices` | `defi-surv:finality-updates` | Tracks confirmation depth and reorg impact. |
-| Market Indexer | `apps/market-indexer` | External market WS connectors | `defi-surv:market-quotes` | Controlled by `MARKET_DPEG_ENABLED`. |
-| Market Detector | `apps/market-detector` | `defi-surv:market-quotes` | `defi-surv:market-snapshots`, `defi-surv:detections` | Computes consensus DPEG outcomes and emits detections when enabled. |
+| Indexer | `apps/indexer` | EVM RPC/WebSocket, CEX/DEX feeds, Oracle sources | `defi-surv:unified-events` | Multi-source supervisor normalizing all event types into UnifiedEvent stream. |
+| Detector | `apps/detector` | `defi-surv:unified-events` | `defi-surv:detections` | Pattern registry (DpegPattern, FlashLoanPattern) evaluates events via DetectionPattern trait. |
+| Orchestrator | `apps/orchestrator` | `defi-surv:detections` | `defi-surv:alerts` | Correlates detections, applies risk scoring, persists alerts. |
+| Finality | `apps/finality` | Block headers, reorg monitoring | `defi-surv:finality-updates` | Tracks confirmation depth and detects blockchain reorganizations. |
 
 ## System Topology
 
 ```mermaid
 flowchart LR
-  RPC[EVM RPC / WS] --> IDX[indexer]
-  IDX --> NORM[(defi-surv:normalized-events)]
-  IDX --> REORG[(defi-surv:reorg-notices)]
-
-  NORM --> DET[detector]
+  EVM[EVM RPC/WS] --> IDX[indexer]
+  CEX[CEX APIs] --> IDX
+  DEX[DEX Feeds] --> IDX
+  ORACLE[Oracle Networks] --> IDX
+  
+  IDX --> UNIFIED[(defi-surv:unified-events)]
+  
+  UNIFIED --> DET[detector]
+  DET --> |Pattern Registry| DPEG[DpegPattern]
+  DET --> |Pattern Registry| FL[FlashLoanPattern]
+  
   DET --> DETS[(defi-surv:detections)]
-
-  NORM --> FIN[finality]
-  REORG --> FIN
-  FIN --> FUP[(defi-surv:finality-updates)]
-
+  
   DETS --> ORCH[orchestrator]
-  FUP --> ORCH
   ORCH --> ALERTS[(defi-surv:alerts)]
-  ORCH --> ALRTL[(defi-surv:alerts:lifecycle)]
-
-  MKT[Market WS sources] --> MIDX[market-indexer]
-  MIDX --> MQUOTE[(defi-surv:market-quotes)]
-  MQUOTE --> MDET[market-detector]
-  MDET --> MSNAP[(defi-surv:market-snapshots)]
-  MDET --> DETS
-
-  ORCH --> PG[(PostgreSQL)]
-  IDX --> PG
+  
+  IDX --> PG[(PostgreSQL)]
+  DET --> PG
+  ORCH --> PG
   FIN --> PG
-  MIDX --> PG
-  MDET --> PG
+  
+  HEADERS[Block Headers] --> FIN[finality]
+  FIN --> FUPDATES[(defi-surv:finality-updates)]
 ```
 
 ## Core Data Stores
 
 - PostgreSQL tables (via `infra/sql/*.sql`):
-  - `detections`, `alerts`, `alert_lifecycle_events`, `finality_state`
-  - DPEG extension: `market_quote_ticks`, `market_consensus_snapshots`, `dpeg_alert_state`, `connector_health_state`, `alert_delivery_attempts`
+  - Core: `detections`, `alerts`, `alert_lifecycle_events`, `finality_state`
+  - Pattern system: `tenant_data_sources`, `tenant_pattern_configs`, `pattern_state`, `pattern_snapshots`
+  - Tenant isolation: `detections.tenant_id`, `alerts.tenant_id`
+  - Quota management: `usage_events`, `alert_delivery_attempts`
 - Redis streams:
-  - `defi-surv:normalized-events`
-  - `defi-surv:reorg-notices`
-  - `defi-surv:finality-updates`
-  - `defi-surv:detections`
-  - `defi-surv:alerts`
-  - `defi-surv:alerts:lifecycle`
-  - `defi-surv:market-quotes`
-  - `defi-surv:market-snapshots`
+  - `defi-surv:unified-events` — All normalized events from indexer (EVM, CEX, DEX, Oracle)
+  - `defi-surv:detections` — Pattern detection results
+  - `defi-surv:alerts` — Alert lifecycle events
+  - `defi-surv:finality-updates` — Block confirmation tracking
 
 ## Deployment Model
 
@@ -78,5 +69,8 @@ Source of truth for service shape is `infra/service-catalog.yaml`.
 
 - Consumer groups are enabled by default for stream workers and support horizontal scaling.
 - Finality and orchestrator logic prevent premature confirmation and support reorg correction.
-- Market DPEG path separates quote ingestion and policy evaluation to isolate source instability from alert lifecycle.
+- Pattern registry in detector enables extensible detection logic via DetectionPattern trait.
+- Each pattern (DpegPattern, FlashLoanPattern) maintains isolated state in `pattern_state` and `pattern_snapshots` tables.
+- Patterns are configured per-tenant via `tenant_pattern_configs` for multi-tenant isolation.
+- Orchestrator enforces tenant monthly alert quota for non-critical alerts while allowing critical bypass.
 - Health endpoints are available when `HEALTH_CHECK_ENABLED=true` (`HEALTH_CHECK_PORT`, default `8080`).

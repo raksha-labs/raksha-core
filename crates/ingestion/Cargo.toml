@@ -11,12 +11,13 @@ dotenv.workspace = true
 event-schema = { path = "../event-schema" }
 common = { path = "../common" }
 ethers.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-state-manager = { path = "../state-manager" }
 tokio.workspace = true
 tokio-postgres.workspace = true
+tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

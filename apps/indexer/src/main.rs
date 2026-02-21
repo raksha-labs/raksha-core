@@ -6,16 +6,16 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
+use common::{ChainAdapter, DataSourceConfig};
+use dotenv::dotenv;
+use event_schema::{NormalizedEvent, ReorgNotice};
 use ingestion::{
     build_oracle_protocol_map, default_eth_oracles, parse_oracle_addresses,
     parse_oracle_addresses_csv, parse_protocol_category, EvmChainAdapter, EvmChainConfig,
     EvmMockAdapter, EvmProtocolConfigFile, FlashLoanSourceConfig, MockProtocol, ProtocolBinding,
     DEFAULT_FILTER_CHUNK_SIZE, DEFAULT_LOOKBACK_BLOCKS, DEFAULT_ORACLE_DECIMALS,
 };
-use chrono::Utc;
-use event_schema::{NormalizedEvent, ReorgNotice};
-use common::ChainAdapter;
-use dotenv::dotenv;
 use serde::de::DeserializeOwned;
 use state_manager::RedisStreamPublisher;
 use tokio_postgres::{Client, NoTls};

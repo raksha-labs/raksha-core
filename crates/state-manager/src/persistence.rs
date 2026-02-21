@@ -1,8 +1,11 @@
 use anyhow::Result;
-use event_schema::{AlertEvent, DetectionResult, MarketConsensusSnapshot, MarketQuoteEvent};
+use event_schema::{AlertEvent, DetectionResult, UnifiedEvent};
+use common::DataSourceConfig;
 use std::sync::Arc;
-use tokio_postgres::{Client, NoTls};
-use tracing::info;
+use tokio_postgres::{error::SqlState, Client, NoTls};
+use tracing::{info, warn};
+
+const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "glider";
 
 #[derive(Clone)]
 pub struct PostgresRepository {
@@ -66,15 +69,35 @@ impl PostgresRepository {
                     ADD COLUMN IF NOT EXISTS subject_type TEXT;
                 ALTER TABLE detections
                     ADD COLUMN IF NOT EXISTS subject_key TEXT;
+                ALTER TABLE detections
+                    ADD COLUMN IF NOT EXISTS tenant_id TEXT;
                 ALTER TABLE alerts
                     ADD COLUMN IF NOT EXISTS subject_type TEXT;
                 ALTER TABLE alerts
                     ADD COLUMN IF NOT EXISTS subject_key TEXT;
+                ALTER TABLE alerts
+                    ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+
+                UPDATE detections
+                SET tenant_id = COALESCE(NULLIF(payload->>'tenant_id', ''), 'glider')
+                WHERE tenant_id IS NULL;
+
+                UPDATE alerts
+                SET tenant_id = COALESCE(NULLIF(payload->>'tenant_id', ''), 'glider')
+                WHERE tenant_id IS NULL;
 
                 CREATE INDEX IF NOT EXISTS idx_detections_subject_created
                     ON detections (subject_type, subject_key, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_alerts_subject_created
                     ON alerts (subject_type, subject_key, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_detections_tenant_created
+                    ON detections (tenant_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_alerts_tenant_created
+                    ON alerts (tenant_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_alerts_tenant_lifecycle
+                    ON alerts (tenant_id, lifecycle_state, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_alerts_tenant_severity
+                    ON alerts (tenant_id, severity, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS alert_lifecycle_events (
                     id BIGSERIAL PRIMARY KEY,
@@ -106,58 +129,110 @@ impl PostgresRepository {
                 CREATE INDEX IF NOT EXISTS idx_alert_delivery_attempts_tenant
                     ON alert_delivery_attempts (tenant_id, attempted_at DESC);
 
-                CREATE TABLE IF NOT EXISTS market_quote_ticks (
-                    quote_id UUID PRIMARY KEY,
+                CREATE TABLE IF NOT EXISTS usage_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    chain_id BIGINT,
+                    quantity INTEGER NOT NULL DEFAULT 1,
+                    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_usage_events_tenant_recorded
+                    ON usage_events (tenant_id, recorded_at DESC);
+
+                CREATE TABLE IF NOT EXISTS data_sources (
+                    source_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_name TEXT NOT NULL,
+                    connection_config JSONB NOT NULL DEFAULT '{}',
+                    filters JSONB,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (source_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tenant_data_sources (
+                    tenant_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL REFERENCES data_sources(source_id),
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    override_config JSONB,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (tenant_id, source_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS patterns (
+                    pattern_id TEXT NOT NULL,
+                    pattern_name TEXT NOT NULL,
+                    description TEXT,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (pattern_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS pattern_configs (
+                    pattern_id TEXT NOT NULL REFERENCES patterns(pattern_id),
+                    config JSONB NOT NULL DEFAULT '{}',
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (pattern_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tenant_pattern_configs (
+                    tenant_id TEXT NOT NULL,
+                    pattern_id TEXT NOT NULL REFERENCES patterns(pattern_id),
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    config JSONB NOT NULL DEFAULT '{}',
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (tenant_id, pattern_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS raw_events (
+                    event_id TEXT NOT NULL,
                     tenant_id TEXT NOT NULL,
                     source_id TEXT NOT NULL,
-                    source_kind TEXT NOT NULL,
-                    source_name TEXT NOT NULL,
-                    market_key TEXT NOT NULL,
-                    source_symbol TEXT NOT NULL,
-                    price DOUBLE PRECISION NOT NULL,
-                    peg_target DOUBLE PRECISION NOT NULL,
-                    observed_at TIMESTAMPTZ NOT NULL,
+                    source_type TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
                     payload JSONB NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    chain_id BIGINT,
+                    block_number BIGINT,
+                    tx_hash TEXT,
+                    market_key TEXT,
+                    price DOUBLE PRECISION,
+                    observed_at TIMESTAMPTZ NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (event_id)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_market_quote_ticks_tenant_market_observed
-                    ON market_quote_ticks (tenant_id, market_key, observed_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_market_quote_ticks_source_observed
-                    ON market_quote_ticks (source_id, observed_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_raw_events_tenant_source_observed
+                    ON raw_events (tenant_id, source_id, observed_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_raw_events_tenant_event_type
+                    ON raw_events (tenant_id, event_type, observed_at DESC);
 
-                CREATE TABLE IF NOT EXISTS market_consensus_snapshots (
-                    snapshot_id UUID PRIMARY KEY,
+                CREATE TABLE IF NOT EXISTS pattern_state (
                     tenant_id TEXT NOT NULL,
-                    market_key TEXT NOT NULL,
-                    peg_target DOUBLE PRECISION NOT NULL,
-                    weighted_median_price DOUBLE PRECISION NOT NULL,
-                    divergence_pct DOUBLE PRECISION NOT NULL,
-                    source_count INTEGER NOT NULL,
-                    quorum_met BOOLEAN NOT NULL,
-                    breach_active BOOLEAN NOT NULL,
-                    severity TEXT,
-                    observed_at TIMESTAMPTZ NOT NULL,
-                    payload JSONB NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_market_consensus_snapshots_tenant_market_observed
-                    ON market_consensus_snapshots (tenant_id, market_key, observed_at DESC);
-
-                CREATE TABLE IF NOT EXISTS dpeg_alert_state (
-                    tenant_id TEXT NOT NULL,
-                    market_key TEXT NOT NULL,
-                    breach_started_at TIMESTAMPTZ,
-                    cooldown_until TIMESTAMPTZ,
-                    last_alerted_at TIMESTAMPTZ,
-                    last_divergence_pct DOUBLE PRECISION,
-                    last_severity TEXT,
+                    pattern_id TEXT NOT NULL,
+                    state_key TEXT NOT NULL,
+                    data JSONB NOT NULL DEFAULT '{}',
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    PRIMARY KEY (tenant_id, market_key)
+                    PRIMARY KEY (tenant_id, pattern_id, state_key)
                 );
 
-                CREATE TABLE IF NOT EXISTS connector_health_state (
+                CREATE TABLE IF NOT EXISTS pattern_snapshots (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    pattern_id TEXT NOT NULL,
+                    snapshot_key TEXT NOT NULL,
+                    data JSONB NOT NULL,
+                    score DOUBLE PRECISION,
+                    severity TEXT,
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_pattern_snapshots_tenant_pattern_observed
+                    ON pattern_snapshots (tenant_id, pattern_id, observed_at DESC);
+
+                CREATE TABLE IF NOT EXISTS data_source_health (
                     tenant_id TEXT NOT NULL,
                     source_id TEXT NOT NULL,
                     healthy BOOLEAN NOT NULL,
@@ -176,11 +251,12 @@ impl PostgresRepository {
 
     pub async fn save_detection(&self, detection: &DetectionResult) -> Result<()> {
         let payload = serde_json::to_value(detection)?;
+        let tenant_id = resolve_tenant_id(detection.tenant_id.as_deref());
         self.client
             .execute(
                 r#"
-                INSERT INTO detections (id, tx_hash, chain, protocol, subject_type, subject_key, severity, risk_score, payload)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                INSERT INTO detections (id, tx_hash, chain, protocol, subject_type, subject_key, tenant_id, severity, risk_score, payload)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (id) DO NOTHING
                 "#,
                 &[
@@ -190,6 +266,7 @@ impl PostgresRepository {
                     &detection.protocol,
                     &detection.subject_type,
                     &detection.subject_key,
+                    &tenant_id,
                     &format!("{:?}", detection.severity).to_lowercase(),
                     &detection.risk_score.score,
                     &payload,
@@ -201,17 +278,19 @@ impl PostgresRepository {
 
     pub async fn save_alert(&self, alert: &AlertEvent) -> Result<()> {
         let payload = serde_json::to_value(alert)?;
+        let tenant_id = resolve_tenant_id(alert.tenant_id.as_deref());
         self.client
             .execute(
                 r#"
-                INSERT INTO alerts (id, tx_hash, chain, chain_slug, protocol, subject_type, subject_key, lifecycle_state, severity, risk_score, payload)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                INSERT INTO alerts (id, tx_hash, chain, chain_slug, protocol, subject_type, subject_key, tenant_id, lifecycle_state, severity, risk_score, payload)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 ON CONFLICT (id) DO UPDATE
                 SET lifecycle_state = EXCLUDED.lifecycle_state,
                     severity = EXCLUDED.severity,
                     risk_score = EXCLUDED.risk_score,
                     subject_type = EXCLUDED.subject_type,
                     subject_key = EXCLUDED.subject_key,
+                    tenant_id = EXCLUDED.tenant_id,
                     payload = EXCLUDED.payload
                 "#,
                 &[
@@ -222,6 +301,7 @@ impl PostgresRepository {
                     &alert.protocol,
                     &alert.subject_type,
                     &alert.subject_key,
+                    &tenant_id,
                     &format!("{:?}", alert.lifecycle_state).to_lowercase(),
                     &format!("{:?}", alert.severity).to_lowercase(),
                     &alert.risk_score,
@@ -232,169 +312,192 @@ impl PostgresRepository {
         Ok(())
     }
 
-    pub async fn save_market_quote(&self, quote: &MarketQuoteEvent) -> Result<()> {
-        let payload = serde_json::to_value(quote)?;
-        self.client
-            .execute(
-                r#"
-                INSERT INTO market_quote_ticks (
-                    quote_id, tenant_id, source_id, source_kind, source_name,
-                    market_key, source_symbol, price, peg_target, observed_at, payload
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                ON CONFLICT (quote_id) DO NOTHING
-                "#,
-                &[
-                    &quote.quote_id,
-                    &quote.tenant_id,
-                    &quote.source_id,
-                    &quote.source_kind,
-                    &quote.source_name,
-                    &quote.market_key,
-                    &quote.source_symbol,
-                    &quote.price,
-                    &quote.peg_target,
-                    &quote.observed_at,
-                    &payload,
-                ],
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn save_market_snapshot(&self, snapshot: &MarketConsensusSnapshot) -> Result<()> {
-        let payload = serde_json::to_value(snapshot)?;
-        let severity = snapshot
-            .severity
-            .as_ref()
-            .map(|value| format!("{:?}", value).to_lowercase());
-        let source_count = snapshot.source_count as i32;
-        self.client
-            .execute(
-                r#"
-                INSERT INTO market_consensus_snapshots (
-                    snapshot_id, tenant_id, market_key, peg_target, weighted_median_price,
-                    divergence_pct, source_count, quorum_met, breach_active, severity,
-                    observed_at, payload
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                ON CONFLICT (snapshot_id) DO NOTHING
-                "#,
-                &[
-                    &snapshot.snapshot_id,
-                    &snapshot.tenant_id,
-                    &snapshot.market_key,
-                    &snapshot.peg_target,
-                    &snapshot.weighted_median_price,
-                    &snapshot.divergence_pct,
-                    &source_count,
-                    &snapshot.quorum_met,
-                    &snapshot.breach_active,
-                    &severity,
-                    &snapshot.observed_at,
-                    &payload,
-                ],
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn upsert_dpeg_alert_state(
-        &self,
-        tenant_id: &str,
-        market_key: &str,
-        breach_started_at: Option<chrono::DateTime<chrono::Utc>>,
-        cooldown_until: Option<chrono::DateTime<chrono::Utc>>,
-        last_alerted_at: Option<chrono::DateTime<chrono::Utc>>,
-        last_divergence_pct: Option<f64>,
-        last_severity: Option<&str>,
-    ) -> Result<()> {
-        self.client
-            .execute(
-                r#"
-                INSERT INTO dpeg_alert_state (
-                    tenant_id, market_key, breach_started_at, cooldown_until,
-                    last_alerted_at, last_divergence_pct, last_severity, updated_at
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-                ON CONFLICT (tenant_id, market_key) DO UPDATE
-                SET breach_started_at = EXCLUDED.breach_started_at,
-                    cooldown_until = EXCLUDED.cooldown_until,
-                    last_alerted_at = EXCLUDED.last_alerted_at,
-                    last_divergence_pct = EXCLUDED.last_divergence_pct,
-                    last_severity = EXCLUDED.last_severity,
-                    updated_at = NOW()
-                "#,
-                &[
-                    &tenant_id,
-                    &market_key,
-                    &breach_started_at,
-                    &cooldown_until,
-                    &last_alerted_at,
-                    &last_divergence_pct,
-                    &last_severity,
-                ],
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn load_dpeg_alert_state(
-        &self,
-        tenant_id: &str,
-        market_key: &str,
-    ) -> Result<Option<DpegAlertStateRow>> {
-        let row = self
-            .client
-            .query_opt(
-                r#"
-                SELECT tenant_id, market_key, breach_started_at, cooldown_until,
-                       last_alerted_at, last_divergence_pct, last_severity, updated_at
-                FROM dpeg_alert_state
-                WHERE tenant_id = $1 AND market_key = $2
-                "#,
-                &[&tenant_id, &market_key],
-            )
-            .await?;
-
-        let Some(row) = row else {
-            return Ok(None);
-        };
-
-        Ok(Some(DpegAlertStateRow {
-            tenant_id: row.get(0),
-            market_key: row.get(1),
-            breach_started_at: row.get(2),
-            cooldown_until: row.get(3),
-            last_alerted_at: row.get(4),
-            last_divergence_pct: row.get(5),
-            last_severity: row.get(6),
-            updated_at: row.get(7),
-        }))
-    }
-
-    pub async fn upsert_connector_health(
+    pub async fn update_source_health(
         &self,
         tenant_id: &str,
         source_id: &str,
         healthy: bool,
-        last_message_at: Option<chrono::DateTime<chrono::Utc>>,
-        last_error: Option<&str>,
+        error: Option<String>,
     ) -> Result<()> {
         self.client
             .execute(
                 r#"
-                INSERT INTO connector_health_state (
-                    tenant_id, source_id, healthy, last_message_at, last_error, updated_at
+                INSERT INTO data_source_health (
+                    tenant_id, source_id, healthy, last_error, updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, NOW())
+                VALUES ($1, $2, $3, $4, NOW())
                 ON CONFLICT (tenant_id, source_id) DO UPDATE
                 SET healthy = EXCLUDED.healthy,
-                    last_message_at = EXCLUDED.last_message_at,
                     last_error = EXCLUDED.last_error,
                     updated_at = NOW()
                 "#,
-                &[&tenant_id, &source_id, &healthy, &last_message_at, &last_error],
+                &[&tenant_id, &source_id, &healthy, &error],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_tenant_data_sources(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<DataSourceConfig>>> {
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT tds.tenant_id, ds.source_id, ds.source_type, ds.source_name,
+                       COALESCE(tds.override_config, ds.connection_config) AS connection_config,
+                       ds.filters, ds.enabled AND tds.enabled AS enabled
+                FROM tenant_data_sources tds
+                JOIN data_sources ds ON ds.source_id = tds.source_id
+                WHERE ds.enabled = TRUE AND tds.enabled = TRUE
+                ORDER BY tds.tenant_id, ds.source_id
+                "#,
+                &[],
+            )
+            .await?;
+
+        let mut map: std::collections::HashMap<String, Vec<DataSourceConfig>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let tenant_id: String = row.get(0);
+            let cfg = DataSourceConfig {
+                tenant_id: tenant_id.clone(),
+                source_id: row.get(1),
+                source_type: row.get(2),
+                source_name: row.get(3),
+                connection_config: row.get(4),
+                filters: row.get(5),
+                enabled: row.get(6),
+            };
+            map.entry(tenant_id).or_default().push(cfg);
+        }
+        Ok(map)
+    }
+
+    pub async fn load_tenant_pattern_configs(
+        &self,
+    ) -> Result<std::collections::HashMap<(String, String), serde_json::Value>> {
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT tpc.tenant_id, tpc.pattern_id, tpc.config
+                FROM tenant_pattern_configs tpc
+                JOIN patterns p ON p.pattern_id = tpc.pattern_id
+                WHERE p.enabled = TRUE AND tpc.enabled = TRUE
+                ORDER BY tpc.tenant_id, tpc.pattern_id
+                "#,
+                &[],
+            )
+            .await?;
+
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let tenant_id: String = row.get(0);
+            let pattern_id: String = row.get(1);
+            let config: serde_json::Value = row.get(2);
+            map.insert((tenant_id, pattern_id), config);
+        }
+        Ok(map)
+    }
+
+    pub async fn insert_raw_event(&self, event: &UnifiedEvent) -> Result<()> {
+        let payload = serde_json::to_value(event)?;
+        self.client
+            .execute(
+                r#"
+                INSERT INTO raw_events (
+                    event_id, tenant_id, source_id, source_type, event_type,
+                    payload, chain_id, block_number, tx_hash,
+                    market_key, price, observed_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                ON CONFLICT (event_id) DO NOTHING
+                "#,
+                &[
+                    &event.event_id,
+                    &event.tenant_id,
+                    &event.source_id,
+                    &format!("{:?}", event.source_type).to_lowercase(),
+                    &event.event_type,
+                    &payload,
+                    &event.chain_id,
+                    &event.block_number,
+                    &event.tx_hash,
+                    &event.market_key,
+                    &event.price,
+                    &event.timestamp,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_pattern_state(
+        &self,
+        tenant_id: &str,
+        pattern_id: &str,
+        state_key: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let row = self
+            .client
+            .query_opt(
+                r#"
+                SELECT data FROM pattern_state
+                WHERE tenant_id = $1 AND pattern_id = $2 AND state_key = $3
+                "#,
+                &[&tenant_id, &pattern_id, &state_key],
+            )
+            .await?;
+
+        Ok(row.map(|r| r.get(0)))
+    }
+
+    pub async fn upsert_pattern_state(
+        &self,
+        tenant_id: &str,
+        pattern_id: &str,
+        state_key: &str,
+        data: serde_json::Value,
+    ) -> Result<()> {
+        self.client
+            .execute(
+                r#"
+                INSERT INTO pattern_state (tenant_id, pattern_id, state_key, data, updated_at)
+                VALUES ($1, $2, $3, $4, NOW())
+                ON CONFLICT (tenant_id, pattern_id, state_key) DO UPDATE
+                SET data = EXCLUDED.data, updated_at = NOW()
+                "#,
+                &[&tenant_id, &pattern_id, &state_key, &data],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn insert_pattern_snapshot(
+        &self,
+        tenant_id: &str,
+        pattern_id: &str,
+        snapshot_key: &str,
+        data: serde_json::Value,
+        score: Option<f64>,
+        severity: Option<&str>,
+    ) -> Result<()> {
+        self.client
+            .execute(
+                r#"
+                INSERT INTO pattern_snapshots
+                    (tenant_id, pattern_id, snapshot_key, data, score, severity)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                "#,
+                &[
+                    &tenant_id,
+                    &pattern_id,
+                    &snapshot_key,
+                    &data,
+                    &score,
+                    &severity,
+                ],
             )
             .await?;
         Ok(())
@@ -478,113 +581,84 @@ impl PostgresRepository {
         Ok(Some(alert))
     }
 
-    pub async fn load_enabled_market_sources(&self) -> Result<Vec<MarketSourceConfigRow>> {
-        let rows = self
-            .client
-            .query(
+    pub async fn record_usage_event(
+        &self,
+        tenant_id: &str,
+        event_type: &str,
+        alert_type: &str,
+        chain_id: Option<i64>,
+        quantity: i32,
+    ) -> Result<()> {
+        let normalized_quantity = quantity.max(1);
+        self.client
+            .execute(
                 r#"
-                SELECT tenant_id, source_id, source_kind, source_name, ws_endpoint, metadata
-                FROM tenant_market_sources
-                WHERE enabled = TRUE
-                ORDER BY tenant_id, source_id
+                INSERT INTO usage_events
+                    (tenant_id, event_type, alert_type, chain_id, quantity, recorded_at)
+                VALUES ($1, $2, $3, $4, $5, NOW())
                 "#,
-                &[],
+                &[
+                    &tenant_id,
+                    &event_type,
+                    &alert_type,
+                    &chain_id,
+                    &normalized_quantity,
+                ],
             )
             .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|row| MarketSourceConfigRow {
-                tenant_id: row.get(0),
-                source_id: row.get(1),
-                source_kind: row.get(2),
-                source_name: row.get(3),
-                ws_endpoint: row.get(4),
-                metadata: row.get(5),
-            })
-            .collect())
+        Ok(())
     }
 
-    pub async fn load_enabled_market_pairs(&self) -> Result<Vec<MarketPairConfigRow>> {
-        let rows = self
+    pub async fn count_usage_event_quantity_for_current_month(
+        &self,
+        tenant_id: &str,
+        event_type: &str,
+    ) -> Result<i64> {
+        let row = self
             .client
-            .query(
+            .query_one(
                 r#"
-                SELECT tenant_id, source_id, market_key, source_symbol, peg_target
-                FROM tenant_market_pairs
-                WHERE enabled = TRUE
-                ORDER BY tenant_id, source_id, market_key
+                SELECT COALESCE(SUM(quantity), 0)::bigint AS total
+                FROM usage_events
+                WHERE tenant_id = $1
+                  AND event_type = $2
+                  AND recorded_at >= date_trunc('month', NOW())
                 "#,
-                &[],
+                &[&tenant_id, &event_type],
             )
             .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|row| MarketPairConfigRow {
-                tenant_id: row.get(0),
-                source_id: row.get(1),
-                market_key: row.get(2),
-                source_symbol: row.get(3),
-                peg_target: row.get(4),
-            })
-            .collect())
+        Ok(row.get::<_, i64>(0))
     }
 
-    pub async fn load_dpeg_policies(&self) -> Result<Vec<DpegPolicyConfigRow>> {
-        let rows = self
+    pub async fn load_tenant_monthly_alert_quota(&self, tenant_id: &str) -> Result<Option<i64>> {
+        let row = match self
             .client
-            .query(
+            .query_opt(
                 r#"
-                SELECT tenant_id, market_key, peg_target, min_sources, quorum_pct,
-                       sustained_window_ms, cooldown_sec, stale_timeout_ms, severity_bands
-                FROM tenant_dpeg_policies
-                ORDER BY tenant_id, market_key
+                SELECT max_alerts_per_month
+                FROM tenants
+                WHERE tenant_id = $1
                 "#,
-                &[],
+                &[&tenant_id],
             )
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
+                    warn!("tenants table not found while loading monthly alert quota");
+                    return Ok(None);
+                }
+                return Err(error.into());
+            }
+        };
 
-        Ok(rows
-            .into_iter()
-            .map(|row| DpegPolicyConfigRow {
-                tenant_id: row.get(0),
-                market_key: row.get(1),
-                peg_target: row.get(2),
-                min_sources: row.get::<_, i32>(3) as usize,
-                quorum_pct: row.get(4),
-                sustained_window_ms: row.get::<_, i32>(5) as i64,
-                cooldown_sec: row.get::<_, i32>(6) as i64,
-                stale_timeout_ms: row.get::<_, i32>(7) as i64,
-                severity_bands: row.get(8),
-            })
-            .collect())
-    }
+        let Some(row) = row else {
+            return Ok(None);
+        };
 
-    pub async fn load_dpeg_policy_sources(&self) -> Result<Vec<DpegPolicySourceConfigRow>> {
-        let rows = self
-            .client
-            .query(
-                r#"
-                SELECT tenant_id, market_key, source_id, weight, enabled, stale_timeout_ms
-                FROM tenant_dpeg_policy_sources
-                ORDER BY tenant_id, market_key, source_id
-                "#,
-                &[],
-            )
-            .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|row| DpegPolicySourceConfigRow {
-                tenant_id: row.get(0),
-                market_key: row.get(1),
-                source_id: row.get(2),
-                weight: row.get(3),
-                enabled: row.get(4),
-                stale_timeout_ms: row.get::<_, Option<i32>>(5).map(i64::from),
-            })
-            .collect())
+        let quota: Option<i32> = row.get(0);
+        Ok(quota.map(i64::from))
     }
 
     // Finality state persistence methods
@@ -638,6 +712,16 @@ impl PostgresRepository {
     }
 }
 
+fn resolve_tenant_id(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            std::env::var("ALERT_FALLBACK_TENANT_ID")
+                .unwrap_or_else(|_| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string())
+        })
+}
+
 #[derive(Debug)]
 pub struct FinalityStateRow {
     pub chain: String,
@@ -646,58 +730,4 @@ pub struct FinalityStateRow {
     pub blocks: serde_json::Value,
     pub states: serde_json::Value,
     pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug)]
-pub struct DpegAlertStateRow {
-    pub tenant_id: String,
-    pub market_key: String,
-    pub breach_started_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub cooldown_until: Option<chrono::DateTime<chrono::Utc>>,
-    pub last_alerted_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub last_divergence_pct: Option<f64>,
-    pub last_severity: Option<String>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MarketSourceConfigRow {
-    pub tenant_id: String,
-    pub source_id: String,
-    pub source_kind: String,
-    pub source_name: String,
-    pub ws_endpoint: String,
-    pub metadata: serde_json::Value,
-}
-
-#[derive(Debug, Clone)]
-pub struct MarketPairConfigRow {
-    pub tenant_id: String,
-    pub source_id: String,
-    pub market_key: String,
-    pub source_symbol: String,
-    pub peg_target: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct DpegPolicyConfigRow {
-    pub tenant_id: String,
-    pub market_key: String,
-    pub peg_target: f64,
-    pub min_sources: usize,
-    pub quorum_pct: f64,
-    pub sustained_window_ms: i64,
-    pub cooldown_sec: i64,
-    pub stale_timeout_ms: i64,
-    pub severity_bands: serde_json::Value,
-}
-
-#[derive(Debug, Clone)]
-pub struct DpegPolicySourceConfigRow {
-    pub tenant_id: String,
-    pub market_key: String,
-    pub source_id: String,
-    pub weight: f64,
-    pub enabled: bool,
-    pub stale_timeout_ms: Option<i64>,
 }

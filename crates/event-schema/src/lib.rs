@@ -3,11 +3,53 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+// ---------------------------------------------------------------------------
+// Unified event: the single event type that flows through the system.
+// All data sources (EVM chains, CEX, DEX, oracles, custom APIs) produce this.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceType {
+    EvmChain,
+    CexWebsocket,
+    DexApi,
+    OracleApi,
+    CustomApi,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedEvent {
+    pub event_id: String,
+    pub tenant_id: String,
+    pub source_id: String,
+    pub source_type: SourceType,
+    /// Fine-grained event kind: "transaction", "quote", "oracle_update", etc.
+    pub event_type: String,
+    pub timestamp: DateTime<Utc>,
+    /// Full raw payload from the data source.
+    pub payload: serde_json::Value,
+
+    // Optional chain context (EvmChain events)
+    pub chain_id: Option<i64>,
+    pub block_number: Option<i64>,
+    pub tx_hash: Option<String>,
+
+    // Optional market context (CEX/DEX/Oracle events)
+    pub market_key: Option<String>,
+    pub price: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Chain {
     Ethereum,
+    Arbitrum,
+    Optimism,
     Base,
+    Polygon,
+    Avalanche,
+    BSC,
     Offchain,
     Unknown,
 }
@@ -35,6 +77,7 @@ pub enum LifecycleState {
 pub enum AttackFamily {
     OracleManipulation,
     PegDeviation,
+    FlashLoan,
     FlashLoanManipulation,
     CrossChainMismatch,
     StalePriceExploitation,
@@ -75,6 +118,9 @@ pub enum SignalType {
     StalePriceDetected,
     DecimalPrecisionMismatch,
     NearMissPattern,
+    LoanVolumeSpike,
+    PriceDeviation,
+    ProfitExtracted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -113,42 +159,11 @@ pub struct NormalizedEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketQuoteEvent {
-    pub quote_id: Uuid,
-    pub tenant_id: String,
-    pub source_id: String,
-    pub source_kind: String,
-    pub source_name: String,
-    pub market_key: String,
-    pub source_symbol: String,
-    pub price: f64,
-    pub peg_target: f64,
-    pub observed_at: DateTime<Utc>,
-    pub metadata: HashMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketConsensusSnapshot {
-    pub snapshot_id: Uuid,
-    pub tenant_id: String,
-    pub market_key: String,
-    pub peg_target: f64,
-    pub weighted_median_price: f64,
-    pub divergence_pct: f64,
-    pub source_count: u32,
-    pub quorum_met: bool,
-    pub breach_active: bool,
-    pub severity: Option<Severity>,
-    pub observed_at: DateTime<Utc>,
-    pub metadata: HashMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectionSignal {
     pub signal_type: SignalType,
-    pub triggered: bool,
-    pub value: Option<f64>,
-    pub detail: String,
+    pub value: f64,
+    pub label: Option<String>,
+    pub source_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,9 +181,22 @@ pub struct RiskScore {
     pub attribution: Vec<Attribution>,
 }
 
+impl Default for RiskScore {
+    fn default() -> Self {
+        Self {
+            score: 0.0,
+            confidence: 0.0,
+            rationale: Vec::new(),
+            attribution: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectionResult {
     pub detection_id: Uuid,
+    /// Which pattern produced this detection (e.g. "dpeg", "flash_loan").
+    pub pattern_id: String,
     pub event_key: Option<String>,
     pub subject_type: Option<String>,
     pub subject_key: Option<String>,
@@ -179,15 +207,13 @@ pub struct DetectionResult {
     pub lifecycle_state: LifecycleState,
     pub requires_confirmation: bool,
     pub attack_family: AttackFamily,
-    pub near_miss: bool,
-    pub confidence: f64,
     pub severity: Severity,
+    pub description: Option<String>,
     pub triggered_rule_ids: Vec<String>,
     pub tx_hash: String,
-    pub block_number: u64,
+    pub block_number: i64,
     pub signals: Vec<DetectionSignal>,
     pub risk_score: RiskScore,
-    pub attribution: Vec<Attribution>,
     pub oracle_context: HashMap<String, serde_json::Value>,
     pub actions_recommended: Vec<String>,
     pub created_at: DateTime<Utc>,

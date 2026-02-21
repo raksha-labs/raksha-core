@@ -261,7 +261,12 @@ async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
 fn default_confirmation_depth_for_chain(chain: &Chain) -> u64 {
     let env_name = match chain {
         Chain::Ethereum => "ETH_CONFIRMATION_DEPTH",
+        Chain::Arbitrum => "ARB_CONFIRMATION_DEPTH",
+        Chain::Optimism => "OP_CONFIRMATION_DEPTH",
         Chain::Base => "BASE_CONFIRMATION_DEPTH",
+        Chain::Polygon => "POLYGON_CONFIRMATION_DEPTH",
+        Chain::Avalanche => "AVAX_CONFIRMATION_DEPTH",
+        Chain::BSC => "BSC_CONFIRMATION_DEPTH",
         Chain::Offchain => "OFFCHAIN_CONFIRMATION_DEPTH",
         Chain::Unknown => "CONFIRMATION_DEPTH",
     };

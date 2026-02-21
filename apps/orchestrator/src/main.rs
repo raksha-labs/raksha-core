@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::Duration};
 use notifier::NotifierGatewayClient;
 use anyhow::Result;
 use chrono::Utc;
-use event_schema::{AlertEvent, DetectionResult, LifecycleState};
+use event_schema::{AlertEvent, Chain, DetectionResult, LifecycleState, Severity};
 use common::ShutdownSignal;
 use dotenv::dotenv;
 use state_manager::RedisStreamPublisher;
@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 const DEFAULT_BATCH_SIZE: usize = 100;
 const DEFAULT_BLOCK_MS: usize = 1000;
-const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "default";
+const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "glider";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -108,8 +108,8 @@ async fn main() -> Result<()> {
             }
 
             let alert = alert_from_detection(&detection);
-            alerts_by_event_key.insert(event_key.to_string(), alert.clone());
-            dispatch_alert(&alert, &notifier_gateway, repository.as_ref(), &stream).await;
+            let dispatched = dispatch_alert(&alert, &notifier_gateway, repository.as_ref(), &stream).await;
+            alerts_by_event_key.insert(event_key.to_string(), dispatched);
             processed += 1;
 
             if use_consumer_group {
@@ -171,8 +171,9 @@ async fn main() -> Result<()> {
             let mut updated_alert = existing;
             updated_alert.lifecycle_state = update.lifecycle_state.clone();
             updated_alert.created_at = Utc::now();
-            alerts_by_event_key.insert(update.event_key.clone(), updated_alert.clone());
-            dispatch_alert(&updated_alert, &notifier_gateway, repository.as_ref(), &stream).await;
+            let dispatched =
+                dispatch_alert(&updated_alert, &notifier_gateway, repository.as_ref(), &stream).await;
+            alerts_by_event_key.insert(update.event_key.clone(), dispatched);
             processed += 1;
 
             if use_consumer_group {
@@ -233,7 +234,7 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
         attribution: detection.risk_score.attribution.clone(),
         blast_radius: Vec::new(),
         tx_hash: detection.tx_hash.clone(),
-        block_number: detection.block_number,
+        block_number: detection.block_number as u64,
         oracle_context: detection.oracle_context.clone(),
         actions_recommended: detection.actions_recommended.clone(),
         created_at: Utc::now(),
@@ -245,14 +246,60 @@ async fn dispatch_alert(
     notifier_gateway: &NotifierGatewayClient,
     repository: Option<&PostgresRepository>,
     stream: &RedisStreamPublisher,
-) {
-    match notifier_gateway.dispatch_alert(alert).await {
+) -> AlertEvent {
+    let mut normalized_alert = alert.clone();
+    let tenant_id = resolve_alert_tenant_id(normalized_alert.tenant_id.clone());
+    normalized_alert.tenant_id = Some(tenant_id.clone());
+
+    if let Some(repo) = repository {
+        if should_enforce_monthly_quota(&normalized_alert) {
+            match check_quota_exceeded(repo, &tenant_id).await {
+                Ok(Some((limit, consumed))) => {
+                    let mut suppressed = normalized_alert.clone();
+                    suppressed.lifecycle_state = LifecycleState::Suppressed;
+                    suppressed.created_at = Utc::now();
+                    suppressed.oracle_context.insert(
+                        "suppression_reason".to_string(),
+                        serde_json::json!("monthly_alert_quota_exceeded"),
+                    );
+                    suppressed.oracle_context.insert(
+                        "suppression_quota_limit".to_string(),
+                        serde_json::json!(limit),
+                    );
+                    suppressed.oracle_context.insert(
+                        "suppression_quota_used".to_string(),
+                        serde_json::json!(consumed),
+                    );
+
+                    persist_and_publish_alert(&suppressed, repository, stream).await;
+                    record_usage_event(
+                        repo,
+                        &tenant_id,
+                        "alert_suppressed_quota",
+                        &suppressed,
+                    )
+                    .await;
+                    return suppressed;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!(
+                        error = ?err,
+                        tenant_id = %tenant_id,
+                        "failed to evaluate monthly alert quota"
+                    );
+                }
+            }
+        }
+    }
+
+    match notifier_gateway.dispatch_alert(&normalized_alert).await {
         Ok(dispatch_result) => {
             if let Some(repo) = repository {
                 for result in &dispatch_result.results {
                     if let Err(err) = repo
                         .save_alert_delivery_attempt(
-                            &alert.alert_id.to_string(),
+                            &normalized_alert.alert_id.to_string(),
                             &dispatch_result.tenant_id,
                             &result.channel,
                             result.delivered,
@@ -282,6 +329,20 @@ async fn dispatch_alert(
         }
     }
 
+    persist_and_publish_alert(&normalized_alert, repository, stream).await;
+
+    if let Some(repo) = repository {
+        record_usage_event(repo, &tenant_id, "alert_fired", &normalized_alert).await;
+    }
+
+    normalized_alert
+}
+
+async fn persist_and_publish_alert(
+    alert: &AlertEvent,
+    repository: Option<&PostgresRepository>,
+    stream: &RedisStreamPublisher,
+) {
     if let Some(repo) = repository {
         if let Err(err) = repo.save_alert(alert).await {
             warn!(error = ?err, "failed to persist alert");
@@ -296,6 +357,81 @@ async fn dispatch_alert(
     }
     if let Err(err) = stream.publish_alert_lifecycle(alert).await {
         warn!(error = ?err, "failed to publish alert lifecycle stream event");
+    }
+}
+
+async fn check_quota_exceeded(
+    repository: &PostgresRepository,
+    tenant_id: &str,
+) -> Result<Option<(i64, i64)>> {
+    let Some(limit) = repository.load_tenant_monthly_alert_quota(tenant_id).await? else {
+        return Ok(None);
+    };
+    if limit < 0 {
+        return Ok(None);
+    }
+
+    let consumed = repository
+        .count_usage_event_quantity_for_current_month(tenant_id, "alert_fired")
+        .await?;
+    if consumed >= limit {
+        return Ok(Some((limit, consumed)));
+    }
+    Ok(None)
+}
+
+async fn record_usage_event(
+    repository: &PostgresRepository,
+    tenant_id: &str,
+    event_type: &str,
+    alert: &AlertEvent,
+) {
+    if let Err(err) = repository
+        .record_usage_event(
+            tenant_id,
+            event_type,
+            alert_type(alert),
+            alert_chain_id(alert),
+            1,
+        )
+        .await
+    {
+        warn!(
+            error = ?err,
+            event_type = event_type,
+            tenant_id = tenant_id,
+            "failed to persist usage event"
+        );
+    }
+}
+
+fn should_enforce_monthly_quota(alert: &AlertEvent) -> bool {
+    !matches!(alert.severity, Severity::Critical)
+        && matches!(
+            alert.lifecycle_state,
+            LifecycleState::Provisional | LifecycleState::Confirmed
+        )
+}
+
+fn alert_type(alert: &AlertEvent) -> &str {
+    let event_key = alert.event_key.as_deref().unwrap_or_default();
+    if event_key.starts_with("dpeg:") || alert.protocol.starts_with("market:") {
+        "dpeg"
+    } else {
+        "generic"
+    }
+}
+
+fn alert_chain_id(alert: &AlertEvent) -> Option<i64> {
+    match alert.chain {
+        Chain::Ethereum => Some(1),
+        Chain::Arbitrum => Some(42161),
+        Chain::Optimism => Some(10),
+        Chain::Base => Some(8453),
+        Chain::Polygon => Some(137),
+        Chain::Avalanche => Some(43114),
+        Chain::BSC => Some(56),
+        Chain::Offchain | Chain::Unknown => None,
     }
 }
 

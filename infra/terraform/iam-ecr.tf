@@ -121,10 +121,10 @@ resource "aws_iam_role_policy" "ecs_task_secrets" {
 # ECR Repositories
 resource "aws_ecr_repository" "services" {
   for_each = toset([
-    "ingestion",
-    "detection-engine",
-    "state-manager",
-    "notifier",
+    "indexer",
+    "detector",
+    "orchestrator",
+    "finality",
     "api-service",
     "auth-tenants",
     "config-service",

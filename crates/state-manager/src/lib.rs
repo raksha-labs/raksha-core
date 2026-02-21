@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use event_schema::{
-    AlertEvent, DetectionResult, FinalityUpdate, MarketConsensusSnapshot, MarketQuoteEvent,
-    NormalizedEvent, ReorgNotice,
+    AlertEvent, DetectionResult, FinalityUpdate, NormalizedEvent, ReorgNotice, UnifiedEvent,
 };
 use common::EventBus;
 use redis::{streams::StreamReadReply, FromRedisValue};
@@ -26,8 +25,7 @@ pub const STREAM_FINALITY_UPDATES: &str = "defi-surv:finality-updates";
 pub const STREAM_DETECTIONS: &str = "defi-surv:detections";
 pub const STREAM_ALERTS: &str = "defi-surv:alerts";
 pub const STREAM_ALERT_LIFECYCLE: &str = "defi-surv:alerts:lifecycle";
-pub const STREAM_MARKET_QUOTES: &str = "defi-surv:market-quotes";
-pub const STREAM_MARKET_SNAPSHOTS: &str = "defi-surv:market-snapshots";
+pub const STREAM_UNIFIED_EVENTS: &str = "defi-surv:unified-events";
 
 #[derive(Clone)]
 pub struct RedisStreamPublisher {
@@ -38,8 +36,7 @@ pub struct RedisStreamPublisher {
     detection_stream: String,
     alert_stream: String,
     alert_lifecycle_stream: String,
-    market_quote_stream: String,
-    market_snapshot_stream: String,
+    unified_events_stream: String,
 }
 
 impl RedisStreamPublisher {
@@ -52,8 +49,7 @@ impl RedisStreamPublisher {
             detection_stream: STREAM_DETECTIONS.to_string(),
             alert_stream: STREAM_ALERTS.to_string(),
             alert_lifecycle_stream: STREAM_ALERT_LIFECYCLE.to_string(),
-            market_quote_stream: STREAM_MARKET_QUOTES.to_string(),
-            market_snapshot_stream: STREAM_MARKET_SNAPSHOTS.to_string(),
+            unified_events_stream: STREAM_UNIFIED_EVENTS.to_string(),
         })
     }
 
@@ -91,13 +87,8 @@ impl RedisStreamPublisher {
             .await
     }
 
-    pub async fn publish_market_quote(&self, quote: &MarketQuoteEvent) -> Result<()> {
-        self.publish_struct(&self.market_quote_stream, quote).await
-    }
-
-    pub async fn publish_market_snapshot(&self, snapshot: &MarketConsensusSnapshot) -> Result<()> {
-        self.publish_struct(&self.market_snapshot_stream, snapshot)
-            .await
+    pub async fn publish_unified_event(&self, event: &UnifiedEvent) -> Result<()> {
+        self.publish_struct(&self.unified_events_stream, event).await
     }
 
     pub async fn healthcheck(&self) -> Result<()> {
@@ -160,23 +151,13 @@ impl RedisStreamPublisher {
             .await
     }
 
-    pub async fn read_market_quotes(
+    pub async fn read_unified_events(
         &self,
         last_id: &str,
         count: usize,
         block_ms: usize,
-    ) -> Result<Vec<(String, MarketQuoteEvent)>> {
-        self.read_payloads(&self.market_quote_stream, last_id, count, block_ms)
-            .await
-    }
-
-    pub async fn read_market_snapshots(
-        &self,
-        last_id: &str,
-        count: usize,
-        block_ms: usize,
-    ) -> Result<Vec<(String, MarketConsensusSnapshot)>> {
-        self.read_payloads(&self.market_snapshot_stream, last_id, count, block_ms)
+    ) -> Result<Vec<(String, UnifiedEvent)>> {
+        self.read_payloads(&self.unified_events_stream, last_id, count, block_ms)
             .await
     }
 
@@ -200,13 +181,8 @@ impl RedisStreamPublisher {
             .await
     }
 
-    pub async fn ensure_market_quotes_group(&self, group: &str) -> Result<()> {
-        self.ensure_consumer_group(&self.market_quote_stream, group)
-            .await
-    }
-
-    pub async fn ensure_market_snapshots_group(&self, group: &str) -> Result<()> {
-        self.ensure_consumer_group(&self.market_snapshot_stream, group)
+    pub async fn ensure_unified_events_group(&self, group: &str) -> Result<()> {
+        self.ensure_consumer_group(&self.unified_events_stream, group)
             .await
     }
 
@@ -266,32 +242,15 @@ impl RedisStreamPublisher {
         .await
     }
 
-    pub async fn read_market_quotes_group(
+    pub async fn read_unified_events_group(
         &self,
         group: &str,
         consumer: &str,
         count: usize,
         block_ms: usize,
-    ) -> Result<Vec<(String, MarketQuoteEvent)>> {
-        self.read_group_payloads(&self.market_quote_stream, group, consumer, count, block_ms)
+    ) -> Result<Vec<(String, UnifiedEvent)>> {
+        self.read_group_payloads(&self.unified_events_stream, group, consumer, count, block_ms)
             .await
-    }
-
-    pub async fn read_market_snapshots_group(
-        &self,
-        group: &str,
-        consumer: &str,
-        count: usize,
-        block_ms: usize,
-    ) -> Result<Vec<(String, MarketConsensusSnapshot)>> {
-        self.read_group_payloads(
-            &self.market_snapshot_stream,
-            group,
-            consumer,
-            count,
-            block_ms,
-        )
-        .await
     }
 
     pub async fn ack_normalized_event(&self, group: &str, entry_id: &str) -> Result<()> {
@@ -314,13 +273,8 @@ impl RedisStreamPublisher {
             .await
     }
 
-    pub async fn ack_market_quote(&self, group: &str, entry_id: &str) -> Result<()> {
-        self.ack_entry(&self.market_quote_stream, group, entry_id)
-            .await
-    }
-
-    pub async fn ack_market_snapshot(&self, group: &str, entry_id: &str) -> Result<()> {
-        self.ack_entry(&self.market_snapshot_stream, group, entry_id)
+    pub async fn ack_unified_event(&self, group: &str, entry_id: &str) -> Result<()> {
+        self.ack_entry(&self.unified_events_stream, group, entry_id)
             .await
     }
 

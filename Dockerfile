@@ -23,11 +23,8 @@ COPY apps ./apps
 RUN cargo build --release \
     -p indexer \
     -p detector \
-    -p scorer \
     -p orchestrator \
-    -p finality \
-    -p market-indexer \
-    -p market-detector
+    -p finality
 
 # Runtime stage - minimal image
 FROM debian:bookworm-slim
@@ -46,11 +43,8 @@ WORKDIR /app
 # Copy binaries from builder.
 COPY --from=builder /app/target/release/indexer /app/bin/indexer
 COPY --from=builder /app/target/release/detector /app/bin/detector
-COPY --from=builder /app/target/release/scorer /app/bin/scorer
 COPY --from=builder /app/target/release/orchestrator /app/bin/orchestrator
 COPY --from=builder /app/target/release/finality /app/bin/finality
-COPY --from=builder /app/target/release/market-indexer /app/bin/market-indexer
-COPY --from=builder /app/target/release/market-detector /app/bin/market-detector
 
 # Copy schemas and rules (needed for runtime validation)
 COPY schemas ./schemas

@@ -30,21 +30,6 @@ services:
       stage: 3
       prod: 5
 
-  - service_name: scorer
-    image_repo: defi-surv-scorer
-    container_port: 8083
-    health_path: /health
-    exposure: internal
-    deploy_strategy: rolling
-    scaling_class: worker_cpu_and_lag
-    cpu: 512
-    memory: 1024
-    command: ["/app/bin/scorer"]
-    desired_count:
-      test: 1
-      stage: 2
-      prod: 3
-
   - service_name: orchestrator
     image_repo: defi-surv-orchestrator
     container_port: 8084
@@ -74,33 +59,3 @@ services:
       test: 1
       stage: 1
       prod: 2
-
-  - service_name: market-indexer
-    image_repo: defi-surv-market-indexer
-    container_port: 8086
-    health_path: /health
-    exposure: internal
-    deploy_strategy: rolling
-    scaling_class: fixed
-    cpu: 512
-    memory: 1024
-    command: ["/app/bin/market-indexer"]
-    desired_count:
-      test: 1
-      stage: 1
-      prod: 2
-
-  - service_name: market-detector
-    image_repo: defi-surv-market-detector
-    container_port: 8087
-    health_path: /health
-    exposure: internal
-    deploy_strategy: rolling
-    scaling_class: worker_cpu_and_lag
-    cpu: 512
-    memory: 1024
-    command: ["/app/bin/market-detector"]
-    desired_count:
-      test: 1
-      stage: 2
-      prod: 3

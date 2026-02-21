@@ -18,6 +18,9 @@ pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerEr
 pub mod health_check;
 pub use health_check::{HealthCheckServer, HealthStatus, start_health_check_server};
 
+pub mod data_source;
+pub use data_source::DataSourceConfig;
+
 pub mod errors {
     use thiserror::Error;
 

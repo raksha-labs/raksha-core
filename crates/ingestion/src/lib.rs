@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod config;
+pub mod connector;
 pub mod decode_chainlink;
 pub mod decode_flashloan;
 pub mod mock;
@@ -7,6 +8,7 @@ pub mod normalize;
 pub mod protocol_map;
 
 pub use adapter::{EvmChainAdapter, RpcProviderStatus};
+pub use connector::{CexWebsocketConnector, DataSourceConnector, EvmChainConnector};
 pub use config::{
     default_protocol_category_for_chain, parse_protocol_category, EvmChainConfig,
     EvmProtocolConfig, EvmProtocolConfigFile, FlashLoanSourceConfig,
