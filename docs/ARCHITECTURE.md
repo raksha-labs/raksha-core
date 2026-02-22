@@ -13,6 +13,27 @@
 | Orchestrator | `apps/orchestrator` | `defi-surv:detections` | `defi-surv:alerts` | Correlates detections, applies risk scoring, persists alerts. |
 | Finality | `apps/finality` | Block headers, reorg monitoring | `defi-surv:finality-updates` | Tracks confirmation depth and detects blockchain reorganizations. |
 
+## DB-Driven Stream Supervisor (Indexer)
+
+- Stream feed runtime configuration is DB-driven via:
+  - `data_sources`
+  - `source_stream_configs`
+  - `source_stream_tenant_targets`
+- For DB-managed stream ingestion, indexer does not use YAML/rules for stream subscription/filter setup.
+- Effective activation for a stream worker requires:
+  - source enabled (`data_sources.enabled=true`)
+  - stream config enabled (`source_stream_configs.enabled=true`)
+  - at least one enabled tenant target in `source_stream_tenant_targets`
+- Reconciliation uses:
+  - `LISTEN source_stream_config_changed` for immediate reaction
+  - 30 second full resync fallback
+- Raw-first ordering is enforced for stream supervisor events:
+  1. parse payload
+  2. persist one global row in `source_feed_events`
+  3. fan out tenant-scoped `UnifiedEvent`s to Redis
+- `UnifiedEvent` schema remains unchanged; stream metadata is carried in payload (`raw_persisted`, `stream_config_id`, parser context).
+- `quote` and `trade` events are automatically purged after 5 minutes (rolling retention). Non-tick events such as `evm_log`/`swap` are not purged by this job.
+
 ## System Topology
 
 ```mermaid

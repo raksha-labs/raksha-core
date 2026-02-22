@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Local crates
+common = { path = "../../crates/common" }
 event-schema = { path = "../../crates/event-schema" }
 state-manager = { path = "../../crates/state-manager" }
 

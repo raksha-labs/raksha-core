@@ -33,9 +33,17 @@ export DATABASE_URL=postgres://postgres:postgres@localhost:5432/defi_surv
 export REDIS_URL=redis://localhost:6379
 export RULES_REPO_PATH=$(pwd)/rules
 export RUST_LOG=info
+export STREAM_SUPERVISOR_ENABLED=true
+export STREAM_PURGE_ENABLED=true
 ```
 
 For chain ingestion, also set `ETH_WS_URL` / `BASE_WS_URL` if you want live adapter mode.
+For DB-managed stream ingestion, configure rows in:
+- `data_sources`
+- `source_stream_configs`
+- `source_stream_tenant_targets`
+
+Indexer will automatically start/stop stream workers from DB config changes (no process restart required).
 
 ## 4. Run core workers
 
@@ -63,6 +71,8 @@ Database rows:
 docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM detections;"
 docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM alerts;"
 docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM pattern_snapshots;"
+docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT stream_config_id, source_id, event_type, observed_at FROM source_feed_events ORDER BY observed_at DESC LIMIT 20;"
+docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM source_feed_events WHERE event_type IN ('quote','trade') AND observed_at < NOW() - INTERVAL '5 minutes';"
 ```
 
 Optional worker health endpoints (if enabled):

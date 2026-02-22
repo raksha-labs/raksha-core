@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use common::start_health_check_server;
 use dotenv::dotenv;
 use state_manager::{PostgresRepository, RedisStreamPublisher};
 use tokio::{signal, time::interval};
@@ -33,6 +34,7 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| "info".into()),
         )
         .init();
+    let health_status = start_health_check_server("detector");
 
     let redis_url = std::env::var("REDIS_URL").context("REDIS_URL not set")?;
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL not set")?;
@@ -53,6 +55,14 @@ async fn main() -> Result<()> {
         .ensure_unified_events_group(CONSUMER_GROUP)
         .await
         .context("failed to ensure consumer group")?;
+
+    if let Some(status) = health_status.as_ref() {
+        let mut health = status.write().await;
+        health.redis_connected = true;
+        health.postgres_connected = true;
+        health.details = vec![format!("consumer_group={CONSUMER_GROUP}")];
+        health.is_ready = true;
+    }
 
     info!(
         consumer = %consumer_name,

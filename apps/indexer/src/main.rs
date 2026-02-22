@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use common::{ChainAdapter, DataSourceConfig};
+use common::{start_health_check_server, ChainAdapter};
 use dotenv::dotenv;
 use event_schema::{NormalizedEvent, ReorgNotice};
 use ingestion::{
@@ -17,9 +17,16 @@ use ingestion::{
     DEFAULT_FILTER_CHUNK_SIZE, DEFAULT_LOOKBACK_BLOCKS, DEFAULT_ORACLE_DECIMALS,
 };
 use serde::de::DeserializeOwned;
-use state_manager::RedisStreamPublisher;
+use state_manager::{PostgresRepository, RedisStreamPublisher};
 use tokio_postgres::{Client, NoTls};
 use tracing::{info, warn};
+
+mod stream_connector;
+mod stream_parser;
+mod stream_supervisor;
+mod stream_worker;
+
+use stream_supervisor::run_stream_supervisor;
 
 const DEFAULT_RULE_RELATIVE_ROOTS: [&str; 3] = [
     "./rules",      // Running from defi-surv-core/
@@ -551,6 +558,7 @@ async fn main() -> Result<()> {
         )
         .compact()
         .init();
+    let health_status = start_health_check_server("indexer");
 
     let mut adapters = build_adapters().await?;
     if adapters.is_empty() {
@@ -567,6 +575,59 @@ async fn main() -> Result<()> {
         warn!("REDIS_URL not set or unavailable; ingestion requires Redis Streams");
         return Ok(());
     };
+
+    let stream_supervisor_enabled = std::env::var("STREAM_SUPERVISOR_ENABLED")
+        .ok()
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let stream_purge_enabled = std::env::var("STREAM_PURGE_ENABLED")
+        .ok()
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if stream_supervisor_enabled {
+        match std::env::var("DATABASE_URL") {
+            Ok(database_url) => match PostgresRepository::from_database_url(&database_url).await {
+                Ok(repo) => {
+                    let stream_clone = stream.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = run_stream_supervisor(
+                            repo,
+                            stream_clone,
+                            database_url,
+                            stream_purge_enabled,
+                        )
+                        .await
+                        {
+                            warn!(error = ?err, "stream supervisor task terminated");
+                        }
+                    });
+                    info!(
+                        stream_purge_enabled,
+                        "db-driven stream supervisor started",
+                    );
+                }
+                Err(err) => warn!(
+                    error = ?err,
+                    "failed to initialize stream supervisor repository; supervisor disabled",
+                ),
+            },
+            Err(_) => warn!("DATABASE_URL not set; stream supervisor disabled"),
+        }
+    } else {
+        info!("db-driven stream supervisor disabled by STREAM_SUPERVISOR_ENABLED=false");
+    }
+
+    if let Some(status) = health_status.as_ref() {
+        let mut health = status.write().await;
+        health.redis_connected = true;
+        health.postgres_connected = std::env::var("DATABASE_URL").is_ok();
+        health.details = vec![
+            format!("chain_adapter_count={}", adapters.len()),
+            format!("stream_supervisor_enabled={stream_supervisor_enabled}"),
+            format!("stream_purge_enabled={stream_purge_enabled}"),
+        ];
+        health.is_ready = true;
+    }
 
     let poll_interval_secs = std::env::var("INGESTION_POLL_INTERVAL_SECS")
         .ok()

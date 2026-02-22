@@ -73,7 +73,7 @@ docker exec -i defi-surv-postgres psql -U postgres -d defi_surv < seed_data.sql
 - `data_source_health` - Health monitoring for data sources
 
 ### Events & Lifecycle
-- `raw_events` - Ingested raw events from all sources
+- `source_feed_events` - Global tenant-agnostic raw feed events from all configured streams
 - `alert_lifecycle_events` - Alert state transitions
 - `tenant_policies` - Tenant-level notification policies
 

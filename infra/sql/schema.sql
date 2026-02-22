@@ -7,6 +7,8 @@
 -- Run this file once on a new database to set up all tables and indexes.
 -- ============================================================================
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- ─── Core Detection & Alert Tables ──────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS detections (
@@ -206,6 +208,49 @@ CREATE TABLE IF NOT EXISTS tenant_data_sources (
 CREATE INDEX IF NOT EXISTS idx_tenant_data_sources_tenant
     ON tenant_data_sources (tenant_id);
 
+CREATE TABLE IF NOT EXISTS source_stream_configs (
+    stream_config_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_id TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
+    connector_mode TEXT NOT NULL CHECK (connector_mode IN ('websocket', 'rpc_logs', 'http_poll')),
+    stream_name TEXT NOT NULL,
+    subscription_key TEXT,
+    event_type TEXT NOT NULL,
+    parser_name TEXT NOT NULL,
+    market_key TEXT,
+    asset_pair TEXT,
+    filter_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    auth_secret_ref TEXT,
+    auth_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    payload_ts_path TEXT,
+    payload_ts_unit TEXT NOT NULL DEFAULT 'ms' CHECK (payload_ts_unit IN ('ms', 's', 'iso8601')),
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by TEXT,
+    updated_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_stream_configs_source_enabled
+    ON source_stream_configs (source_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_source_stream_configs_event_type
+    ON source_stream_configs (event_type);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_stream_configs_natural
+    ON source_stream_configs (source_id, stream_name, COALESCE(asset_pair, ''), COALESCE(subscription_key, ''));
+
+CREATE TABLE IF NOT EXISTS source_stream_tenant_targets (
+    stream_config_id UUID NOT NULL REFERENCES source_stream_configs(stream_config_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by TEXT,
+    updated_at TIMESTAMPTZ,
+    PRIMARY KEY (stream_config_id, tenant_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_stream_tenant_targets_tenant_enabled
+    ON source_stream_tenant_targets (tenant_id, enabled);
+
 -- ─── Pattern Catalog ─────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS patterns (
@@ -253,6 +298,30 @@ CREATE TABLE IF NOT EXISTS tenant_pattern_source_bindings (
 CREATE INDEX IF NOT EXISTS idx_tenant_pattern_source_bindings_tenant_pattern
     ON tenant_pattern_source_bindings (tenant_id, pattern_id);
 
+CREATE TABLE IF NOT EXISTS tenant_pattern_required_assets (
+    tenant_id  TEXT        NOT NULL,
+    pattern_id TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    market_key TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, pattern_id, market_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_required_assets_tenant_pattern
+    ON tenant_pattern_required_assets (tenant_id, pattern_id);
+
+CREATE TABLE IF NOT EXISTS source_required_pairs (
+    source_id              TEXT        NOT NULL,
+    market_key             TEXT        NOT NULL,
+    source_symbol          TEXT        NOT NULL,
+    required_tenant_count  INTEGER     NOT NULL DEFAULT 0,
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (source_id, market_key, source_symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_required_pairs_source_market
+    ON source_required_pairs (source_id, market_key);
+
 CREATE TABLE IF NOT EXISTS tenant_pattern_alert_policies (
     tenant_id          TEXT        NOT NULL,
     pattern_id         TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
@@ -286,30 +355,52 @@ CREATE INDEX IF NOT EXISTS idx_tenant_pattern_notification_channels_tenant
 
 -- ─── Raw Event Store ─────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS raw_events (
-    event_id     TEXT        NOT NULL,
-    tenant_id    TEXT        NOT NULL,
-    source_id    TEXT        NOT NULL,
-    source_type  TEXT        NOT NULL,
-    event_type   TEXT        NOT NULL,
-    payload      JSONB       NOT NULL,
-    chain_id     BIGINT,
-    block_number BIGINT,
-    tx_hash      TEXT,
-    market_key   TEXT,
-    price        DOUBLE PRECISION,
-    observed_at  TIMESTAMPTZ NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (event_id)
+CREATE TABLE IF NOT EXISTS source_feed_events (
+    raw_event_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    stream_config_id  UUID,
+    source_id         TEXT        NOT NULL,
+    source_type       TEXT        NOT NULL,
+    event_type        TEXT        NOT NULL,
+    event_id          TEXT,
+    market_key        TEXT,
+    asset_pair        TEXT,
+    chain_id          BIGINT,
+    block_number      BIGINT,
+    tx_hash           TEXT,
+    log_index         BIGINT,
+    topic0            TEXT,
+    price             DOUBLE PRECISION,
+    payload_event_ts  TIMESTAMPTZ,
+    received_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    observed_at       TIMESTAMPTZ NOT NULL,
+    parse_status      TEXT        NOT NULL CHECK (parse_status IN ('parsed', 'partial', 'raw_only', 'error')),
+    parse_error       TEXT,
+    payload           JSONB       NOT NULL,
+    normalized_fields JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    dedup_key         TEXT,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_raw_events_tenant_source_observed
-    ON raw_events (tenant_id, source_id, observed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_raw_events_tenant_event_type_observed
-    ON raw_events (tenant_id, event_type, observed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_raw_events_market_key_observed
-    ON raw_events (market_key, observed_at DESC)
+CREATE INDEX IF NOT EXISTS idx_source_feed_events_source_observed
+    ON source_feed_events (source_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_source_feed_events_source_market_observed
+    ON source_feed_events (source_id, market_key, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_source_feed_events_stream_observed
+    ON source_feed_events (stream_config_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_source_feed_events_event_type_observed
+    ON source_feed_events (event_type, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_source_feed_events_market_observed
+    ON source_feed_events (market_key, observed_at DESC)
     WHERE market_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_source_feed_events_tx
+    ON source_feed_events (tx_hash, log_index)
+    WHERE tx_hash IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_feed_events_event_id
+    ON source_feed_events (event_id)
+    WHERE event_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_feed_events_dedup
+    ON source_feed_events (dedup_key)
+    WHERE dedup_key IS NOT NULL;
 
 -- ─── Pattern State Persistence ───────────────────────────────────────────────
 

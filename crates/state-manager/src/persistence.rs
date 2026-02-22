@@ -1,11 +1,63 @@
-use anyhow::Result;
-use event_schema::{AlertEvent, DetectionResult, UnifiedEvent};
 use common::DataSourceConfig;
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use event_schema::{AlertEvent, DetectionResult, UnifiedEvent};
+use serde_json::Value;
 use std::sync::Arc;
 use tokio_postgres::{error::SqlState, Client, NoTls};
 use tracing::{info, warn};
 
 const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "glider";
+
+#[derive(Debug, Clone)]
+pub struct EffectiveStreamConfig {
+    pub stream_config_id: String,
+    pub source_id: String,
+    pub source_type: String,
+    pub source_name: String,
+    pub connection_config: Value,
+    pub connector_mode: String,
+    pub stream_name: String,
+    pub subscription_key: Option<String>,
+    pub event_type: String,
+    pub parser_name: String,
+    pub market_key: Option<String>,
+    pub asset_pair: Option<String>,
+    pub filter_config: Value,
+    pub auth_secret_ref: Option<String>,
+    pub auth_config: Value,
+    pub payload_ts_path: Option<String>,
+    pub payload_ts_unit: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamTenantTarget {
+    pub tenant_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceFeedEventRecord {
+    pub stream_config_id: Option<String>,
+    pub source_id: String,
+    pub source_type: String,
+    pub event_type: String,
+    pub event_id: Option<String>,
+    pub market_key: Option<String>,
+    pub asset_pair: Option<String>,
+    pub chain_id: Option<i64>,
+    pub block_number: Option<i64>,
+    pub tx_hash: Option<String>,
+    pub log_index: Option<i64>,
+    pub topic0: Option<String>,
+    pub price: Option<f64>,
+    pub payload_event_ts: Option<DateTime<Utc>>,
+    pub observed_at: DateTime<Utc>,
+    pub parse_status: String,
+    pub parse_error: Option<String>,
+    pub payload: Value,
+    pub normalized_fields: Value,
+    pub dedup_key: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct PostgresRepository {
@@ -37,6 +89,8 @@ impl PostgresRepository {
         self.client
             .batch_execute(
                 r#"
+                CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
                 CREATE TABLE IF NOT EXISTS detections (
                     id TEXT PRIMARY KEY,
                     tx_hash TEXT NOT NULL,
@@ -56,6 +110,7 @@ impl PostgresRepository {
                     chain TEXT NOT NULL,
                     chain_slug TEXT NOT NULL,
                     protocol TEXT NOT NULL,
+                    block_number BIGINT,
                     subject_type TEXT,
                     subject_key TEXT,
                     lifecycle_state TEXT NOT NULL,
@@ -70,6 +125,8 @@ impl PostgresRepository {
                 ALTER TABLE detections
                     ADD COLUMN IF NOT EXISTS subject_key TEXT;
                 ALTER TABLE detections
+                    ADD COLUMN IF NOT EXISTS payload JSONB;
+                ALTER TABLE detections
                     ADD COLUMN IF NOT EXISTS tenant_id TEXT;
                 ALTER TABLE detections
                     ADD COLUMN IF NOT EXISTS pattern_id TEXT;
@@ -78,9 +135,29 @@ impl PostgresRepository {
                 ALTER TABLE alerts
                     ADD COLUMN IF NOT EXISTS subject_key TEXT;
                 ALTER TABLE alerts
+                    ADD COLUMN IF NOT EXISTS payload JSONB;
+                ALTER TABLE alerts
+                    ADD COLUMN IF NOT EXISTS lifecycle_state TEXT;
+                ALTER TABLE alerts
                     ADD COLUMN IF NOT EXISTS tenant_id TEXT;
                 ALTER TABLE alerts
                     ADD COLUMN IF NOT EXISTS pattern_id TEXT;
+                ALTER TABLE alerts
+                    ADD COLUMN IF NOT EXISTS chain_slug TEXT;
+                ALTER TABLE alerts
+                    ADD COLUMN IF NOT EXISTS block_number BIGINT;
+
+                UPDATE detections
+                SET payload = '{}'::jsonb
+                WHERE payload IS NULL;
+                ALTER TABLE detections
+                    ALTER COLUMN payload SET NOT NULL;
+
+                UPDATE alerts
+                SET payload = '{}'::jsonb
+                WHERE payload IS NULL;
+                ALTER TABLE alerts
+                    ALTER COLUMN payload SET NOT NULL;
 
                 UPDATE detections
                 SET tenant_id = COALESCE(NULLIF(payload->>'tenant_id', ''), 'glider')
@@ -90,6 +167,10 @@ impl PostgresRepository {
                 SET tenant_id = COALESCE(NULLIF(payload->>'tenant_id', ''), 'glider')
                 WHERE tenant_id IS NULL;
 
+                UPDATE alerts
+                SET lifecycle_state = COALESCE(NULLIF(payload->>'lifecycle_state', ''), 'confirmed')
+                WHERE lifecycle_state IS NULL;
+
                 UPDATE detections
                 SET pattern_id = COALESCE(NULLIF(payload->>'pattern_id', ''), pattern_id)
                 WHERE pattern_id IS NULL;
@@ -97,6 +178,25 @@ impl PostgresRepository {
                 UPDATE alerts
                 SET pattern_id = COALESCE(NULLIF(payload->>'pattern_id', ''), pattern_id)
                 WHERE pattern_id IS NULL;
+
+                UPDATE alerts
+                SET chain_slug = COALESCE(
+                    NULLIF(payload->>'chain_slug', ''),
+                    NULLIF(LOWER(chain), ''),
+                    'unknown'
+                )
+                WHERE chain_slug IS NULL OR chain_slug = '';
+                UPDATE alerts
+                SET block_number = CASE
+                    WHEN payload->>'block_number' ~ '^-?[0-9]+$' THEN (payload->>'block_number')::bigint
+                    ELSE NULL
+                END
+                WHERE block_number IS NULL;
+
+                ALTER TABLE alerts
+                    ALTER COLUMN lifecycle_state SET NOT NULL;
+                ALTER TABLE alerts
+                    ALTER COLUMN chain_slug SET NOT NULL;
 
                 CREATE INDEX IF NOT EXISTS idx_detections_subject_created
                     ON detections (subject_type, subject_key, created_at DESC);
@@ -125,6 +225,38 @@ impl PostgresRepository {
                     payload JSONB NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+
+                ALTER TABLE alert_lifecycle_events
+                    ADD COLUMN IF NOT EXISTS lifecycle_state TEXT;
+                ALTER TABLE alert_lifecycle_events
+                    ADD COLUMN IF NOT EXISTS payload JSONB;
+                ALTER TABLE alert_lifecycle_events
+                    ADD COLUMN IF NOT EXISTS tx_hash TEXT;
+                ALTER TABLE alert_lifecycle_events
+                    ADD COLUMN IF NOT EXISTS block_number BIGINT;
+                UPDATE alert_lifecycle_events
+                SET payload = '{}'::jsonb
+                WHERE payload IS NULL;
+                ALTER TABLE alert_lifecycle_events
+                    ALTER COLUMN payload SET NOT NULL;
+                UPDATE alert_lifecycle_events
+                SET lifecycle_state = COALESCE(NULLIF(payload->>'lifecycle_state', ''), 'confirmed')
+                WHERE lifecycle_state IS NULL;
+                UPDATE alert_lifecycle_events
+                SET tx_hash = COALESCE(NULLIF(payload->>'tx_hash', ''), '')
+                WHERE tx_hash IS NULL;
+                UPDATE alert_lifecycle_events
+                SET block_number = CASE
+                    WHEN payload->>'block_number' ~ '^-?[0-9]+$' THEN (payload->>'block_number')::bigint
+                    ELSE 0
+                END
+                WHERE block_number IS NULL;
+                ALTER TABLE alert_lifecycle_events
+                    ALTER COLUMN lifecycle_state SET NOT NULL;
+                ALTER TABLE alert_lifecycle_events
+                    ALTER COLUMN tx_hash SET NOT NULL;
+                ALTER TABLE alert_lifecycle_events
+                    ALTER COLUMN block_number SET NOT NULL;
 
                 CREATE INDEX IF NOT EXISTS idx_alert_lifecycle_events_event_key
                     ON alert_lifecycle_events (event_key);
@@ -185,6 +317,49 @@ impl PostgresRepository {
                     PRIMARY KEY (tenant_id, source_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS source_stream_configs (
+                    stream_config_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    source_id TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
+                    connector_mode TEXT NOT NULL CHECK (connector_mode IN ('websocket', 'rpc_logs', 'http_poll')),
+                    stream_name TEXT NOT NULL,
+                    subscription_key TEXT,
+                    event_type TEXT NOT NULL,
+                    parser_name TEXT NOT NULL,
+                    market_key TEXT,
+                    asset_pair TEXT,
+                    filter_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    auth_secret_ref TEXT,
+                    auth_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    payload_ts_path TEXT,
+                    payload_ts_unit TEXT NOT NULL DEFAULT 'ms' CHECK (payload_ts_unit IN ('ms', 's', 'iso8601')),
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_by TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_by TEXT,
+                    updated_at TIMESTAMPTZ
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_source_stream_configs_source_enabled
+                    ON source_stream_configs (source_id, enabled);
+                CREATE INDEX IF NOT EXISTS idx_source_stream_configs_event_type
+                    ON source_stream_configs (event_type);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_source_stream_configs_natural
+                    ON source_stream_configs (source_id, stream_name, COALESCE(asset_pair, ''), COALESCE(subscription_key, ''));
+
+                CREATE TABLE IF NOT EXISTS source_stream_tenant_targets (
+                    stream_config_id UUID NOT NULL REFERENCES source_stream_configs(stream_config_id) ON DELETE CASCADE,
+                    tenant_id TEXT NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_by TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_by TEXT,
+                    updated_at TIMESTAMPTZ,
+                    PRIMARY KEY (stream_config_id, tenant_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_source_stream_tenant_targets_tenant_enabled
+                    ON source_stream_tenant_targets (tenant_id, enabled);
+
                 CREATE TABLE IF NOT EXISTS patterns (
                     pattern_id TEXT NOT NULL,
                     pattern_name TEXT NOT NULL,
@@ -227,6 +402,30 @@ impl PostgresRepository {
                 CREATE INDEX IF NOT EXISTS idx_tenant_pattern_source_bindings_tenant_pattern
                     ON tenant_pattern_source_bindings (tenant_id, pattern_id);
 
+                CREATE TABLE IF NOT EXISTS tenant_pattern_required_assets (
+                    tenant_id TEXT NOT NULL,
+                    pattern_id TEXT NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+                    market_key TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ,
+                    PRIMARY KEY (tenant_id, pattern_id, market_key)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tenant_pattern_required_assets_tenant_pattern
+                    ON tenant_pattern_required_assets (tenant_id, pattern_id);
+
+                CREATE TABLE IF NOT EXISTS source_required_pairs (
+                    source_id TEXT NOT NULL,
+                    market_key TEXT NOT NULL,
+                    source_symbol TEXT NOT NULL,
+                    required_tenant_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (source_id, market_key, source_symbol)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_source_required_pairs_source_market
+                    ON source_required_pairs (source_id, market_key);
+
                 CREATE TABLE IF NOT EXISTS tenant_pattern_alert_policies (
                     tenant_id TEXT NOT NULL,
                     pattern_id TEXT NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
@@ -252,27 +451,52 @@ impl PostgresRepository {
                     CHECK (channel IN ('webhook', 'slack', 'telegram', 'discord'))
                 );
 
-                CREATE TABLE IF NOT EXISTS raw_events (
-                    event_id TEXT NOT NULL,
-                    tenant_id TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS source_feed_events (
+                    raw_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    stream_config_id UUID,
                     source_id TEXT NOT NULL,
                     source_type TEXT NOT NULL,
                     event_type TEXT NOT NULL,
-                    payload JSONB NOT NULL,
+                    event_id TEXT,
+                    market_key TEXT,
+                    asset_pair TEXT,
                     chain_id BIGINT,
                     block_number BIGINT,
                     tx_hash TEXT,
-                    market_key TEXT,
+                    log_index BIGINT,
+                    topic0 TEXT,
                     price DOUBLE PRECISION,
+                    payload_event_ts TIMESTAMPTZ,
+                    received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     observed_at TIMESTAMPTZ NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    PRIMARY KEY (event_id)
+                    parse_status TEXT NOT NULL CHECK (parse_status IN ('parsed', 'partial', 'raw_only', 'error')),
+                    parse_error TEXT,
+                    payload JSONB NOT NULL,
+                    normalized_fields JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    dedup_key TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_raw_events_tenant_source_observed
-                    ON raw_events (tenant_id, source_id, observed_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_raw_events_tenant_event_type
-                    ON raw_events (tenant_id, event_type, observed_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_source_feed_events_source_observed
+                    ON source_feed_events (source_id, observed_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_source_feed_events_source_market_observed
+                    ON source_feed_events (source_id, market_key, observed_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_source_feed_events_stream_observed
+                    ON source_feed_events (stream_config_id, observed_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_source_feed_events_event_type_observed
+                    ON source_feed_events (event_type, observed_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_source_feed_events_market_observed
+                    ON source_feed_events (market_key, observed_at DESC)
+                    WHERE market_key IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_source_feed_events_tx
+                    ON source_feed_events (tx_hash, log_index)
+                    WHERE tx_hash IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_source_feed_events_event_id
+                    ON source_feed_events (event_id)
+                    WHERE event_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_source_feed_events_dedup
+                    ON source_feed_events (dedup_key)
+                    WHERE dedup_key IS NOT NULL;
 
                 CREATE TABLE IF NOT EXISTS pattern_state (
                     tenant_id TEXT NOT NULL,
@@ -348,12 +572,13 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO alerts (id, tx_hash, chain, chain_slug, protocol, subject_type, subject_key, tenant_id, pattern_id, lifecycle_state, severity, risk_score, payload)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                INSERT INTO alerts (id, tx_hash, chain, chain_slug, protocol, block_number, subject_type, subject_key, tenant_id, pattern_id, lifecycle_state, severity, risk_score, payload)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 ON CONFLICT (id) DO UPDATE
                 SET lifecycle_state = EXCLUDED.lifecycle_state,
                     severity = EXCLUDED.severity,
                     risk_score = EXCLUDED.risk_score,
+                    block_number = EXCLUDED.block_number,
                     subject_type = EXCLUDED.subject_type,
                     subject_key = EXCLUDED.subject_key,
                     tenant_id = EXCLUDED.tenant_id,
@@ -366,6 +591,7 @@ impl PostgresRepository {
                     &format!("{:?}", alert.chain).to_lowercase(),
                     &alert.chain_slug,
                     &alert.protocol,
+                    &(alert.block_number as i64),
                     &alert.subject_type,
                     &alert.subject_key,
                     &tenant_id,
@@ -469,36 +695,421 @@ impl PostgresRepository {
         Ok(map)
     }
 
+    pub async fn list_effective_stream_configs(&self) -> Result<Vec<EffectiveStreamConfig>> {
+        let rows = match self
+            .client
+            .query(
+                r#"
+                SELECT
+                    ssc.stream_config_id::text,
+                    ssc.source_id,
+                    ds.source_type,
+                    ds.source_name,
+                    ds.connection_config,
+                    ssc.connector_mode,
+                    ssc.stream_name,
+                    ssc.subscription_key,
+                    ssc.event_type,
+                    ssc.parser_name,
+                    ssc.market_key,
+                    ssc.asset_pair,
+                    ssc.filter_config,
+                    ssc.auth_secret_ref,
+                    ssc.auth_config,
+                    ssc.payload_ts_path,
+                    ssc.payload_ts_unit
+                FROM source_stream_configs ssc
+                JOIN data_sources ds
+                  ON ds.source_id = ssc.source_id
+                WHERE ds.enabled = TRUE
+                  AND ssc.enabled = TRUE
+                ORDER BY ssc.source_id, ssc.stream_name, ssc.asset_pair NULLS FIRST
+                "#,
+                &[],
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
+                    warn!("stream config tables not found while listing effective stream configs");
+                    return Ok(Vec::new());
+                }
+                return Err(error.into());
+            }
+        };
+
+        let mut configs = Vec::with_capacity(rows.len());
+        for row in rows {
+            configs.push(EffectiveStreamConfig {
+                stream_config_id: row.get(0),
+                source_id: row.get(1),
+                source_type: row.get(2),
+                source_name: row.get(3),
+                connection_config: row.get(4),
+                connector_mode: row.get(5),
+                stream_name: row.get(6),
+                subscription_key: row.get(7),
+                event_type: row.get(8),
+                parser_name: row.get(9),
+                market_key: row.get(10),
+                asset_pair: row.get(11),
+                filter_config: row.get(12),
+                auth_secret_ref: row.get(13),
+                auth_config: row.get(14),
+                payload_ts_path: row.get(15),
+                payload_ts_unit: row.get(16),
+            });
+        }
+        Ok(configs)
+    }
+
+    pub async fn list_stream_tenant_targets(
+        &self,
+        stream_config_id: &str,
+    ) -> Result<Vec<StreamTenantTarget>> {
+        let rows = match self
+            .client
+            .query(
+                r#"
+                SELECT tenant_id
+                FROM source_stream_tenant_targets
+                WHERE stream_config_id::text = $1
+                  AND enabled = TRUE
+                ORDER BY tenant_id
+                "#,
+                &[&stream_config_id],
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
+                    warn!("source_stream_tenant_targets table not found while listing targets");
+                    return Ok(Vec::new());
+                }
+                return Err(error.into());
+            }
+        };
+
+        let mut targets = Vec::with_capacity(rows.len());
+        for row in rows {
+            targets.push(StreamTenantTarget {
+                tenant_id: row.get(0),
+            });
+        }
+        Ok(targets)
+    }
+
+    pub async fn insert_source_feed_event_record(
+        &self,
+        record: &SourceFeedEventRecord,
+    ) -> Result<bool> {
+        let inserted = self
+            .client
+            .execute(
+                r#"
+                INSERT INTO source_feed_events (
+                    stream_config_id,
+                    source_id,
+                    source_type,
+                    event_type,
+                    event_id,
+                    market_key,
+                    asset_pair,
+                    chain_id,
+                    block_number,
+                    tx_hash,
+                    log_index,
+                    topic0,
+                    price,
+                    payload_event_ts,
+                    observed_at,
+                    parse_status,
+                    parse_error,
+                    payload,
+                    normalized_fields,
+                    dedup_key
+                )
+                VALUES (
+                    ($1)::text::uuid,
+                    $2,
+                    $3,
+                    $4,
+                    $5,
+                    $6,
+                    $7,
+                    $8,
+                    $9,
+                    $10,
+                    $11,
+                    $12,
+                    $13,
+                    $14,
+                    $15,
+                    $16,
+                    $17,
+                    $18,
+                    $19,
+                    $20
+                )
+                ON CONFLICT DO NOTHING
+                "#,
+                &[
+                    &record.stream_config_id.as_deref(),
+                    &record.source_id,
+                    &record.source_type,
+                    &record.event_type,
+                    &record.event_id,
+                    &record.market_key,
+                    &record.asset_pair,
+                    &record.chain_id,
+                    &record.block_number,
+                    &record.tx_hash,
+                    &record.log_index,
+                    &record.topic0,
+                    &record.price,
+                    &record.payload_event_ts,
+                    &record.observed_at,
+                    &record.parse_status,
+                    &record.parse_error,
+                    &record.payload,
+                    &record.normalized_fields,
+                    &record.dedup_key,
+                ],
+            )
+            .await?;
+
+        Ok(inserted > 0)
+    }
+
+    pub async fn purge_old_tick_events(&self, retention_seconds: i64) -> Result<u64> {
+        let seconds = retention_seconds.max(0);
+        let event_types = vec!["quote", "trade"];
+        let deleted = self
+            .client
+            .execute(
+                r#"
+                DELETE FROM source_feed_events
+                WHERE event_type = ANY($1)
+                  AND observed_at < NOW() - ($2::BIGINT * INTERVAL '1 second')
+                "#,
+                &[&event_types, &seconds],
+            )
+            .await?;
+        Ok(deleted)
+    }
+
+    pub async fn latest_market_price(
+        &self,
+        market_key: &str,
+        max_age_seconds: i64,
+    ) -> Result<Option<f64>> {
+        let freshness_seconds = max_age_seconds.max(1);
+        let row = match self
+            .client
+            .query_opt(
+                r#"
+                SELECT price
+                FROM source_feed_events
+                WHERE market_key = $1
+                  AND price IS NOT NULL
+                  AND parse_status IN ('parsed', 'partial')
+                  AND observed_at >= NOW() - ($2::BIGINT * INTERVAL '1 second')
+                ORDER BY observed_at DESC
+                LIMIT 1
+                "#,
+                &[&market_key, &freshness_seconds],
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
+                    warn!("source_feed_events table not found while reading market FX rate");
+                    return Ok(None);
+                }
+                return Err(error.into());
+            }
+        };
+
+        Ok(row.map(|record| record.get::<usize, f64>(0)))
+    }
+
     pub async fn insert_raw_event(&self, event: &UnifiedEvent) -> Result<()> {
+        self.insert_source_feed_event(event).await
+    }
+
+    pub async fn insert_source_feed_event(&self, event: &UnifiedEvent) -> Result<()> {
+        if !self.is_source_stream_ingest_enabled(&event.source_id).await? {
+            return Ok(());
+        }
+        if let Some(market_key) = event.market_key.as_deref() {
+            if !market_key.trim().is_empty()
+                && !self
+                    .is_required_source_market_pair(&event.source_id, market_key)
+                    .await?
+            {
+                return Ok(());
+            }
+        }
+
         let payload = serde_json::to_value(event)?;
+        let asset_pair = event
+            .payload
+            .get("s")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let topic0 = event
+            .payload
+            .get("topics")
+            .and_then(|value| value.as_array())
+            .and_then(|topics| topics.first())
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let log_index = parse_json_i64(event.payload.get("logIndex"));
+        let normalized_fields = serde_json::json!({
+            "market_key": event.market_key,
+            "price": event.price,
+            "asset_pair": asset_pair,
+            "topic0": topic0,
+            "log_index": log_index,
+        });
+
         self.client
             .execute(
                 r#"
-                INSERT INTO raw_events (
-                    event_id, tenant_id, source_id, source_type, event_type,
-                    payload, chain_id, block_number, tx_hash,
-                    market_key, price, observed_at
+                INSERT INTO source_feed_events (
+                    stream_config_id,
+                    source_id,
+                    source_type,
+                    event_type,
+                    event_id,
+                    market_key,
+                    asset_pair,
+                    chain_id,
+                    block_number,
+                    tx_hash,
+                    log_index,
+                    topic0,
+                    price,
+                    payload_event_ts,
+                    observed_at,
+                    parse_status,
+                    parse_error,
+                    payload,
+                    normalized_fields,
+                    dedup_key
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                ON CONFLICT (event_id) DO NOTHING
+                VALUES (
+                    NULL,
+                    $1,
+                    $2,
+                    $3,
+                    $4,
+                    $5,
+                    $6,
+                    $7,
+                    $8,
+                    $9,
+                    $10,
+                    $11,
+                    $12,
+                    $13,
+                    $13,
+                    'parsed',
+                    NULL,
+                    $14,
+                    $15,
+                    $16
+                )
+                ON CONFLICT DO NOTHING
                 "#,
                 &[
-                    &event.event_id,
-                    &event.tenant_id,
                     &event.source_id,
                     &format!("{:?}", event.source_type).to_lowercase(),
                     &event.event_type,
-                    &payload,
+                    &event.event_id,
+                    &event.market_key,
+                    &asset_pair,
                     &event.chain_id,
                     &event.block_number,
                     &event.tx_hash,
-                    &event.market_key,
+                    &log_index,
+                    &topic0,
                     &event.price,
                     &event.timestamp,
+                    &payload,
+                    &normalized_fields,
+                    &event.event_id,
                 ],
             )
             .await?;
         Ok(())
+    }
+
+    async fn is_required_source_market_pair(&self, source_id: &str, market_key: &str) -> Result<bool> {
+        let row = match self
+            .client
+            .query_opt(
+                r#"
+                SELECT 1
+                FROM source_required_pairs
+                WHERE source_id = $1
+                  AND market_key = $2
+                LIMIT 1
+                "#,
+                &[&source_id, &market_key],
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
+                    warn!("source_required_pairs table not found; skipping market-key filtering");
+                    return Ok(true);
+                }
+                return Err(error.into());
+            }
+        };
+
+        Ok(row.is_some())
+    }
+
+    async fn is_source_stream_ingest_enabled(&self, source_id: &str) -> Result<bool> {
+        let row = match self
+            .client
+            .query_opt(
+                r#"
+                SELECT 1
+                FROM data_sources ds
+                JOIN source_stream_configs ssc
+                  ON ssc.source_id = ds.source_id
+                 AND ssc.enabled = TRUE
+                JOIN source_stream_tenant_targets stt
+                  ON stt.stream_config_id = ssc.stream_config_id
+                 AND stt.enabled = TRUE
+                WHERE ds.source_id = $1
+                  AND ds.enabled = TRUE
+                LIMIT 1
+                "#,
+                &[&source_id],
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
+                    warn!(
+                        "source stream config tables not found; skipping source-level activation gate"
+                    );
+                    return Ok(true);
+                }
+                return Err(error.into());
+            }
+        };
+
+        Ok(row.is_some())
     }
 
     pub async fn load_pattern_state(
@@ -788,6 +1399,18 @@ fn resolve_tenant_id(raw: Option<&str>) -> String {
             std::env::var("ALERT_FALLBACK_TENANT_ID")
                 .unwrap_or_else(|_| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string())
         })
+}
+
+fn parse_json_i64(value: Option<&serde_json::Value>) -> Option<i64> {
+    let value = value?;
+    if let Some(number) = value.as_i64() {
+        return Some(number);
+    }
+    let text = value.as_str()?;
+    if let Some(hex) = text.strip_prefix("0x") {
+        return i64::from_str_radix(hex, 16).ok();
+    }
+    text.parse::<i64>().ok()
 }
 
 #[derive(Debug)]

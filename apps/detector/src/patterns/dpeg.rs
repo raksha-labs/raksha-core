@@ -14,7 +14,7 @@ use event_schema::{
     AttackFamily, Chain, DetectionResult, DetectionSignal, LifecycleState, RiskScore, Severity,
     SignalType, UnifiedEvent,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use state_manager::{PostgresRepository};
 use uuid::Uuid;
@@ -110,6 +110,7 @@ pub struct DpegSourceOverride {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DpegPolicy {
+    #[serde(default)]
     pub tenant_id: String,
     pub market_key: String,
     pub peg_target: f64,
@@ -124,8 +125,36 @@ pub struct DpegPolicy {
     pub source_filter: DpegSourceFilter,
     #[serde(default)]
     pub toggles: DpegToggles,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_source_overrides")]
     pub source_overrides: HashMap<String, DpegSourceOverride>,
+}
+
+fn deserialize_source_overrides<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, DpegSourceOverride>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Null => Ok(HashMap::new()),
+        Value::Object(map) => serde_json::from_value::<HashMap<String, DpegSourceOverride>>(
+            Value::Object(map),
+        )
+        .map_err(de::Error::custom),
+        Value::Array(items) => {
+            let parsed = serde_json::from_value::<Vec<DpegSourceOverride>>(Value::Array(items))
+                .map_err(de::Error::custom)?;
+            let mut mapped = HashMap::with_capacity(parsed.len());
+            for entry in parsed {
+                mapped.insert(entry.source_id.clone(), entry);
+            }
+            Ok(mapped)
+        }
+        _ => Err(de::Error::custom(
+            "source_overrides must be a JSON object or array",
+        )),
+    }
 }
 
 impl DpegPolicy {

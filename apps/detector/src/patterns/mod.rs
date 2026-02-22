@@ -83,6 +83,22 @@ impl PatternRegistry {
         repo: &PostgresRepository,
         stream: &RedisStreamPublisher,
     ) -> Result<()> {
+        let raw_persisted = event
+            .payload
+            .get("raw_persisted")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        if !raw_persisted {
+            if let Err(err) = repo.insert_raw_event(event).await {
+                tracing::warn!(
+                    event_id = %event.event_id,
+                    source_id = %event.source_id,
+                    error = ?err,
+                    "failed to persist source feed event"
+                );
+            }
+        }
+
         let now = Utc::now();
         for pattern in &mut self.patterns {
             match pattern.process_event(event, now, repo).await {

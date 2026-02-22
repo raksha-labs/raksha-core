@@ -4,7 +4,7 @@ use notifier::NotifierGatewayClient;
 use anyhow::Result;
 use chrono::Utc;
 use event_schema::{AlertEvent, Chain, DetectionResult, LifecycleState, Severity};
-use common::ShutdownSignal;
+use common::{start_health_check_server, ShutdownSignal};
 use dotenv::dotenv;
 use state_manager::RedisStreamPublisher;
 use state_manager::PostgresRepository;
@@ -25,6 +25,7 @@ async fn main() -> Result<()> {
         )
         .compact()
         .init();
+    let health_status = start_health_check_server("orchestrator");
 
     let Some(stream) = init_stream_publisher().await else {
         warn!("REDIS_URL not set or unavailable; state-manager requires Redis Streams");
@@ -72,6 +73,17 @@ async fn main() -> Result<()> {
             consumer = %stream_consumer,
             "state-manager stream consumer-group mode enabled"
         );
+    }
+
+    if let Some(status) = health_status.as_ref() {
+        let mut health = status.write().await;
+        health.redis_connected = true;
+        health.postgres_connected = repository.is_some();
+        health.details = vec![
+            format!("consumer_group_enabled={use_consumer_group}"),
+            format!("stream_group={stream_group}"),
+        ];
+        health.is_ready = true;
     }
 
     let mut alerts_by_event_key: HashMap<String, AlertEvent> = HashMap::new();
