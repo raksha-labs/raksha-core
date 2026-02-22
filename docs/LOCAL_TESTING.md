@@ -43,6 +43,9 @@ For DB-managed stream ingestion, configure rows in:
 - `source_stream_configs`
 - `source_stream_tenant_targets`
 
+If a stream endpoint template contains placeholders (for example `wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}`),
+set the value in `source_stream_configs.auth_config` (for example `{"alchemy_api_key":"<key>"}`) via admin UI/API.
+
 Indexer will automatically start/stop stream workers from DB config changes (no process restart required).
 
 ## 4. Run core workers
@@ -71,8 +74,8 @@ Database rows:
 docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM detections;"
 docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM alerts;"
 docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM pattern_snapshots;"
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT stream_config_id, source_id, event_type, observed_at FROM source_feed_events ORDER BY observed_at DESC LIMIT 20;"
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM source_feed_events WHERE event_type IN ('quote','trade') AND observed_at < NOW() - INTERVAL '5 minutes';"
+docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT stream_config_id, source_id, event_type, observed_at FROM raw_events ORDER BY observed_at DESC LIMIT 20;"
+docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM raw_events WHERE event_type IN ('quote','trade') AND observed_at < NOW() - INTERVAL '5 minutes';"
 ```
 
 Optional worker health endpoints (if enabled):

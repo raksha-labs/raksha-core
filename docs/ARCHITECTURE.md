@@ -29,7 +29,7 @@
   - 30 second full resync fallback
 - Raw-first ordering is enforced for stream supervisor events:
   1. parse payload
-  2. persist one global row in `source_feed_events`
+  2. persist one global row in `raw_events`
   3. fan out tenant-scoped `UnifiedEvent`s to Redis
 - `UnifiedEvent` schema remains unchanged; stream metadata is carried in payload (`raw_persisted`, `stream_config_id`, parser context).
 - `quote` and `trade` events are automatically purged after 5 minutes (rolling retention). Non-tick events such as `evm_log`/`swap` are not purged by this job.

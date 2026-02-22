@@ -37,6 +37,8 @@ pub struct RuntimeStreamConfig {
     pub source_type: String,
     pub source_name: String,
     pub connection_config: Value,
+    pub auth_secret_ref: Option<String>,
+    pub auth_config: Value,
     pub connector_mode: String,
     pub stream_name: String,
     pub subscription_key: Option<String>,
@@ -120,7 +122,7 @@ async fn run_websocket_loop(
     shutdown: &mut watch::Receiver<bool>,
     fx_cache: &mut FxRateCache,
 ) -> Result<()> {
-    let endpoint = endpoint_from_connection_config(&config.connection_config)?;
+    let endpoint = endpoint_from_runtime_config(config)?;
     let mut connector = WebsocketStreamConnector::new(
         endpoint,
         config.stream_name.clone(),
@@ -151,7 +153,7 @@ async fn run_rpc_logs_loop(
     shutdown: &mut watch::Receiver<bool>,
     fx_cache: &mut FxRateCache,
 ) -> Result<()> {
-    let endpoint = endpoint_from_connection_config(&config.connection_config)?;
+    let endpoint = endpoint_from_runtime_config(config)?;
     let mut connector = RpcLogsConnector::new(
         endpoint,
         config.filter_config.clone(),
@@ -186,7 +188,7 @@ async fn run_http_poll_loop(
     shutdown: &mut watch::Receiver<bool>,
     fx_cache: &mut FxRateCache,
 ) -> Result<()> {
-    let endpoint = endpoint_from_connection_config(&config.connection_config)?;
+    let endpoint = endpoint_from_runtime_config(config)?;
     let mut connector = HttpPollConnector::new(endpoint, Duration::from_secs(5));
     connector.connect().await?;
 
@@ -595,6 +597,11 @@ fn enrich_payload_for_unified(
     enriched
 }
 
+fn endpoint_from_runtime_config(config: &RuntimeStreamConfig) -> Result<String> {
+    let endpoint_template = endpoint_from_connection_config(&config.connection_config)?;
+    resolve_endpoint_template(&endpoint_template, &config.auth_config, config.auth_secret_ref.as_deref())
+}
+
 fn endpoint_from_connection_config(config: &Value) -> Result<String> {
     for key in ["ws_endpoint", "rpc_url", "ws_url", "endpoint", "http_url"] {
         if let Some(value) = config.get(key).and_then(Value::as_str) {
@@ -605,6 +612,102 @@ fn endpoint_from_connection_config(config: &Value) -> Result<String> {
         }
     }
     Err(anyhow!("missing source endpoint in connection_config"))
+}
+
+fn resolve_endpoint_template(
+    endpoint_template: &str,
+    auth_config: &Value,
+    auth_secret_ref: Option<&str>,
+) -> Result<String> {
+    let mut endpoint = endpoint_template.trim().to_string();
+
+    if let Some(auth_values) = auth_config.as_object() {
+        for (key, value) in auth_values {
+            if let Some(replacement) = auth_placeholder_value(value) {
+                endpoint = endpoint.replace(&format!("{{{key}}}"), &replacement);
+            }
+        }
+    }
+
+    if endpoint.contains("YOUR_ALCHEMY_KEY") {
+        if let Some(value) = extract_alchemy_key(auth_config) {
+            endpoint = endpoint.replace("YOUR_ALCHEMY_KEY", &value);
+        } else {
+            return Err(anyhow!(
+                "missing auth_config.alchemy_api_key (or auth_config.api_key) for endpoint template"
+            ));
+        }
+    }
+
+    let unresolved_placeholders = collect_unresolved_placeholders(&endpoint)
+        .into_iter()
+        .filter(|key| key != "subscription_key")
+        .collect::<Vec<_>>();
+    if !unresolved_placeholders.is_empty() {
+        return Err(anyhow!(
+            "missing auth_config values for endpoint template placeholders: {}{}",
+            unresolved_placeholders.join(", "),
+            auth_secret_ref
+                .map(|secret_ref| format!(" (auth_secret_ref={secret_ref})"))
+                .unwrap_or_default()
+        ));
+    }
+
+    Ok(endpoint)
+}
+
+fn auth_placeholder_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(boolean) => Some(boolean.to_string()),
+        _ => None,
+    }
+}
+
+fn extract_alchemy_key(auth_config: &Value) -> Option<String> {
+    let object = auth_config.as_object()?;
+    for key in ["alchemy_api_key", "api_key", "apikey"] {
+        let value = object.get(key)?;
+        if let Some(parsed) = auth_placeholder_value(value) {
+            return Some(parsed);
+        }
+    }
+    None
+}
+
+fn collect_unresolved_placeholders(endpoint: &str) -> Vec<String> {
+    let mut placeholders: Vec<String> = Vec::new();
+    let chars = endpoint.as_bytes();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != b'{' {
+            index += 1;
+            continue;
+        }
+        let Some(end_offset) = chars[index + 1..].iter().position(|value| *value == b'}') else {
+            break;
+        };
+        let end_index = index + 1 + end_offset;
+        if end_index > index + 1 {
+            let key = &endpoint[index + 1..end_index];
+            if key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+                let candidate = key.to_string();
+                if !placeholders.iter().any(|existing| existing == &candidate) {
+                    placeholders.push(candidate);
+                }
+            }
+        }
+        index = end_index + 1;
+    }
+    placeholders
 }
 
 fn map_source_type(source_type: &str) -> SourceType {
@@ -660,4 +763,56 @@ fn hash_payload_only(config: &RuntimeStreamConfig, payload: &Value, observed_at:
     hasher.update(b"|");
     hasher.update(payload.to_string().as_bytes());
     hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_endpoint_template_replaces_auth_tokens() {
+        let endpoint = resolve_endpoint_template(
+            "wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}",
+            &json!({ "alchemy_api_key": "abc123" }),
+            None,
+        )
+        .expect("endpoint should resolve");
+        assert_eq!(endpoint, "wss://eth-mainnet.g.alchemy.com/v2/abc123");
+    }
+
+    #[test]
+    fn resolve_endpoint_template_supports_legacy_alchemy_token() {
+        let endpoint = resolve_endpoint_template(
+            "wss://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY",
+            &json!({ "alchemy_api_key": "legacy-key" }),
+            None,
+        )
+        .expect("legacy endpoint should resolve");
+        assert_eq!(endpoint, "wss://eth-mainnet.g.alchemy.com/v2/legacy-key");
+    }
+
+    #[test]
+    fn resolve_endpoint_template_allows_subscription_placeholder() {
+        let endpoint = resolve_endpoint_template(
+            "wss://api.example.com/ws/{subscription_key}",
+            &json!({}),
+            None,
+        )
+        .expect("subscription placeholder should be deferred");
+        assert_eq!(endpoint, "wss://api.example.com/ws/{subscription_key}");
+    }
+
+    #[test]
+    fn resolve_endpoint_template_errors_on_missing_auth_placeholder() {
+        let error = resolve_endpoint_template(
+            "wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}",
+            &json!({}),
+            Some("vault://alchemy/prod"),
+        )
+        .expect_err("missing placeholder should error");
+
+        let message = error.to_string();
+        assert!(message.contains("alchemy_api_key"));
+        assert!(message.contains("auth_secret_ref=vault://alchemy/prod"));
+    }
 }

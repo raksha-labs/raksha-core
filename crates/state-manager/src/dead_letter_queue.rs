@@ -50,28 +50,26 @@ impl DeadLetterQueue {
 
     /// Initialize the DLQ schema
     pub async fn init_schema(&self) -> Result<()> {
-        self.client
-            .batch_execute(
+        let exists = self
+            .client
+            .query_opt(
                 r#"
-                CREATE TABLE IF NOT EXISTS dead_letter_queue (
-                    id TEXT PRIMARY KEY,
-                    stream_name TEXT NOT NULL,
-                    entry_id TEXT NOT NULL,
-                    payload JSONB NOT NULL,
-                    error_message TEXT NOT NULL,
-                    retry_count INT NOT NULL DEFAULT 0,
-                    first_failure_at TIMESTAMPTZ NOT NULL,
-                    last_failure_at TIMESTAMPTZ NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    INDEX idx_dlq_stream (stream_name),
-                    INDEX idx_dlq_created (created_at),
-                    INDEX idx_dlq_retries (retry_count)
-                );
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = 'dead_letter_queue'
                 "#,
+                &[],
             )
             .await?;
 
-        info!("dead letter queue schema initialized");
+        if exists.is_none() {
+            anyhow::bail!(
+                "missing core schema table: dead_letter_queue. Run SQL bootstrap (schema.sql + seed_data.sql)"
+            );
+        }
+
+        info!("dead letter queue schema validated");
         Ok(())
     }
 
