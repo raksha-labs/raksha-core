@@ -375,7 +375,7 @@ impl SlackSink {
         };
 
         let payload = json!({
-            "text": format!("{} DeFi Alert: {} on {}",
+            "text": format!("{} Raksha Alert: {} on {}",
                 severity_emoji, alert.protocol, format!("{:?}", alert.chain)),
             "blocks": [
                 {
@@ -588,7 +588,7 @@ impl DiscordSink {
         self.client
             .post(url)
             .json(&json!({
-                "content": format!("DeFi Surveillance Alert for {}", alert.protocol),
+                "content": format!("Raksha Alert for {}", alert.protocol),
                 "embeds": [embed]
             }))
             .send()

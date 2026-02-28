@@ -1,6 +1,6 @@
 # raksha-core
 
-Rust data-plane workspace — the event-processing and detection runtime for the DeFi surveillance platform.
+Rust data-plane workspace — the event-processing and detection runtime for the Raksha platform.
 
 ## Architecture overview
 

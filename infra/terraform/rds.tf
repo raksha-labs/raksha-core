@@ -17,7 +17,7 @@ resource "random_password" "db_password" {
 # Store DB password in Secrets Manager
 resource "aws_secretsmanager_secret" "db_password" {
   name        = "raksha-db-password-${var.environment}"
-  description = "PostgreSQL master password for DeFi Surveillance"
+  description = "PostgreSQL master password for Raksha"
 
   tags = var.tags
 }

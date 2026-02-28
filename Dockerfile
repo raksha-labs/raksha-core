@@ -1,4 +1,4 @@
-# Multi-stage build for Rust DeFi Surveillance services.
+# Multi-stage build for Rust Raksha services.
 # Local Docker stack binaries: indexer + detector.
 
 FROM rust:slim AS builder

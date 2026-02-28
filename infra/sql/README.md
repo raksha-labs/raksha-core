@@ -1,6 +1,6 @@
 # Database Schema
 
-This directory contains the SQL files for the DeFi Surveillance database.
+This directory contains the SQL files for the Raksha database.
 
 ## Files
 

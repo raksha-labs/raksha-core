@@ -1,4 +1,4 @@
-# DeFi Surv Terraform Infrastructure
+# Raksha Terraform Infrastructure
 
 This directory is the new IaC baseline for phased AWS deployment:
 

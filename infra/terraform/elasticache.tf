@@ -9,7 +9,7 @@ resource "aws_elasticache_subnet_group" "main" {
 # ElastiCache Redis Replication Group
 resource "aws_elasticache_replication_group" "main" {
   replication_group_id = "raksha-redis"
-  description         = "Redis cluster for DeFi Surveillance event streams"
+  description         = "Redis cluster for Raksha event streams"
 
   engine               = "redis"
   engine_version       = "7.1"

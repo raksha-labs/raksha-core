@@ -97,7 +97,7 @@ jobs:
           TF_DIR="infra/terraform/environments/${{ inputs.environment }}"
           CLUSTER_NAME=$(terraform -chdir="${TF_DIR}" output -raw cluster_name)
           CORE_CONTRACT_VERSION=$(aws ssm get-parameter \
-            --name "/defi-surv/${{ inputs.environment }}/core/contract_version" \
+            --name "/raksha/${{ inputs.environment }}/core/contract_version" \
             --region "${{ inputs.aws_region }}" \
             --query 'Parameter.Value' \
             --output text)

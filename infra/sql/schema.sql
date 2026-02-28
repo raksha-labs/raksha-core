@@ -1,5 +1,5 @@
 -- ============================================================================
--- DeFi Surveillance - Clean Bootstrap Schema (Create-Only)
+-- Raksha - Clean Bootstrap Schema (Create-Only)
 -- ============================================================================
 -- Fresh-install schema for local/dev bootstrap.
 -- No migration-style ALTER/UPDATE blocks are included here.

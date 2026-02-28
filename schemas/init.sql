@@ -1,4 +1,4 @@
--- DeFi Surveillance Database Schema
+-- Raksha Database Schema
 -- Version: 0.1.0
 -- Created: 2026-02-06
 

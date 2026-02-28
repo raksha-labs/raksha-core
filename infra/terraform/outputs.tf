@@ -1,6 +1,6 @@
 output "ecs_cluster_name" {
   value       = aws_ecs_cluster.raksha.name
-  description = "ECS cluster used for DeFi surveillance services"
+  description = "ECS cluster used for Raksha services"
 }
 
 output "ecs_cluster_arn" {

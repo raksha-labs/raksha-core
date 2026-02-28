@@ -1,5 +1,5 @@
 -- ============================================================================
--- DeFi Surveillance - Seed Data
+-- Raksha - Seed Data
 -- ============================================================================
 -- This file seeds the database with initial patterns, data sources, and
 -- example tenant configuration for the default "glider" tenant.

@@ -62,7 +62,7 @@ jobs:
       - name: Trigger platform deployment dispatch
         env:
           GH_TOKEN: ${{ secrets.PLATFORM_REPO_DISPATCH_TOKEN }}
-          TARGET_REPO: defi-surv/defi-surv-platform
+          TARGET_REPO: raksha-labs/raksha-platform
           TARGET_ENV: ${{ inputs.target_environment }}
           CORE_IMAGE_TAG: ${{ inputs.image_tag }}
           CORE_CONTRACT_VERSION: ${{ needs.deploy.outputs.core_contract_version }}
