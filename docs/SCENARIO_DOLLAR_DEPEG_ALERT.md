@@ -14,7 +14,7 @@ Detect sustained depeg on a dollar-pegged market (e.g., `USDC/USD`) using the `D
   - `pattern_state` — Runtime pattern state management
   - `pattern_snapshots` — Historical pattern evaluation snapshots
 
-These configuration tables are normally created/managed by `defi-surv-platform` `config-service`.
+These configuration tables are normally created/managed by `raksha-platform` `config-service`.
 
 ## Architecture Overview
 
@@ -66,22 +66,22 @@ sequenceDiagram
 
 1. Unified event stream is active:
 ```bash
-docker exec -it defi-surv-redis redis-cli XINFO STREAM defi-surv:unified-events
+docker exec -it raksha-redis redis-cli XINFO STREAM raksha:unified-events
 ```
 
 2. Pattern snapshots are being generated:
 ```bash
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT tenant_id, pattern_name, snapshot_data, created_at FROM pattern_snapshots WHERE pattern_name='dpeg' ORDER BY created_at DESC LIMIT 20;"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT tenant_id, pattern_name, snapshot_data, created_at FROM pattern_snapshots WHERE pattern_name='dpeg' ORDER BY created_at DESC LIMIT 20;"
 ```
 
 3. DPEG detections are emitted when breach criteria are met:
 ```bash
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT id, protocol, severity, payload->'signals' AS signals, created_at FROM detections WHERE attack_family='PegDeviation' ORDER BY created_at DESC LIMIT 20;"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT id, protocol, severity, payload->'signals' AS signals, created_at FROM detections WHERE attack_family='PegDeviation' ORDER BY created_at DESC LIMIT 20;"
 ```
 
 4. Alert lifecycle tracking:
 ```bash
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT id, tenant_id, lifecycle_state, severity, created_at FROM alerts ORDER BY created_at DESC LIMIT 20;"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT id, tenant_id, lifecycle_state, severity, created_at FROM alerts ORDER BY created_at DESC LIMIT 20;"
 ```
 
 ## Default Policy Behavior

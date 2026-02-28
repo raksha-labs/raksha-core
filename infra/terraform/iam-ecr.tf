@@ -1,6 +1,6 @@
 # ECS Task Execution Role
 resource "aws_iam_role" "ecs_task_execution" {
-  name = "defi-surv-ecs-task-execution-role"
+  name = "raksha-ecs-task-execution-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -25,7 +25,7 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
 
 # Custom policy for Secrets Manager and ECR
 resource "aws_iam_role_policy" "ecs_task_execution_custom" {
-  name = "defi-surv-ecs-task-execution-custom"
+  name = "raksha-ecs-task-execution-custom"
   role = aws_iam_role.ecs_task_execution.id
 
   policy = jsonencode({
@@ -41,7 +41,7 @@ resource "aws_iam_role_policy" "ecs_task_execution_custom" {
           aws_secretsmanager_secret.database_url.arn,
           aws_secretsmanager_secret.redis_url.arn,
           aws_secretsmanager_secret.db_password.arn,
-          "arn:aws:secretsmanager:${var.aws_region}:*:secret:defi-surv-*"
+          "arn:aws:secretsmanager:${var.aws_region}:*:secret:raksha-*"
         ]
       },
       {
@@ -60,7 +60,7 @@ resource "aws_iam_role_policy" "ecs_task_execution_custom" {
 
 # ECS Task Role (for application permissions)
 resource "aws_iam_role" "ecs_task" {
-  name = "defi-surv-ecs-task-role"
+  name = "raksha-ecs-task-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -80,7 +80,7 @@ resource "aws_iam_role" "ecs_task" {
 
 # Allow ECS tasks to write logs
 resource "aws_iam_role_policy" "ecs_task_cloudwatch" {
-  name = "defi-surv-ecs-task-cloudwatch"
+  name = "raksha-ecs-task-cloudwatch"
   role = aws_iam_role.ecs_task.id
 
   policy = jsonencode({
@@ -93,7 +93,7 @@ resource "aws_iam_role_policy" "ecs_task_cloudwatch" {
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "arn:aws:logs:${var.aws_region}:*:log-group:/ecs/defi-surv/*"
+        Resource = "arn:aws:logs:${var.aws_region}:*:log-group:/ecs/raksha/*"
       }
     ]
   })
@@ -101,7 +101,7 @@ resource "aws_iam_role_policy" "ecs_task_cloudwatch" {
 
 # Allow ECS tasks to access Secrets Manager
 resource "aws_iam_role_policy" "ecs_task_secrets" {
-  name = "defi-surv-ecs-task-secrets"
+  name = "raksha-ecs-task-secrets"
   role = aws_iam_role.ecs_task.id
 
   policy = jsonencode({
@@ -112,7 +112,7 @@ resource "aws_iam_role_policy" "ecs_task_secrets" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
-        Resource = "arn:aws:secretsmanager:${var.aws_region}:*:secret:defi-surv-*"
+        Resource = "arn:aws:secretsmanager:${var.aws_region}:*:secret:raksha-*"
       }
     ]
   })
@@ -133,7 +133,7 @@ resource "aws_ecr_repository" "services" {
     "policy-manager"
   ])
 
-  name                 = "defi-surv-${each.key}"
+  name                 = "raksha-${each.key}"
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {

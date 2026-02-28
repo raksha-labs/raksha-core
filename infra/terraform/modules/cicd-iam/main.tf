@@ -45,14 +45,14 @@ resource "aws_iam_openid_connect_provider" "github" {
 }
 
 resource "aws_iam_role" "images" {
-  name               = "defi-surv-${var.environment}-github-images-role"
+  name               = "raksha-${var.environment}-github-images-role"
   assume_role_policy = local.trust_policy
 
   tags = var.tags
 }
 
 resource "aws_iam_role_policy" "images" {
-  name = "defi-surv-${var.environment}-github-images-policy"
+  name = "raksha-${var.environment}-github-images-policy"
   role = aws_iam_role.images.id
 
   policy = jsonencode({
@@ -79,14 +79,14 @@ resource "aws_iam_role_policy" "images" {
 }
 
 resource "aws_iam_role" "infra" {
-  name               = "defi-surv-${var.environment}-github-infra-role"
+  name               = "raksha-${var.environment}-github-infra-role"
   assume_role_policy = local.trust_policy
 
   tags = var.tags
 }
 
 resource "aws_iam_role_policy" "infra" {
-  name = "defi-surv-${var.environment}-github-infra-policy"
+  name = "raksha-${var.environment}-github-infra-policy"
   role = aws_iam_role.infra.id
 
   policy = jsonencode({
@@ -127,14 +127,14 @@ resource "aws_iam_role_policy" "infra" {
 }
 
 resource "aws_iam_role" "deploy" {
-  name               = "defi-surv-${var.environment}-github-deploy-role"
+  name               = "raksha-${var.environment}-github-deploy-role"
   assume_role_policy = local.trust_policy
 
   tags = var.tags
 }
 
 resource "aws_iam_role_policy" "deploy" {
-  name = "defi-surv-${var.environment}-github-deploy-policy"
+  name = "raksha-${var.environment}-github-deploy-policy"
   role = aws_iam_role.deploy.id
 
   policy = jsonencode({

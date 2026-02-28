@@ -3,7 +3,7 @@ provider "aws" {
 
   default_tags {
     tags = merge({
-      Project     = "defi-surv"
+      Project     = "raksha"
       Environment = var.environment
       ManagedBy   = "terraform"
     }, var.tags)
@@ -16,7 +16,7 @@ locals {
     for svc in local.service_catalog_raw.services :
     svc.service_name => svc
   }
-  secret_prefix = "defi-surv/${var.environment}"
+  secret_prefix = "raksha/${var.environment}"
 }
 
 resource "random_password" "test_db" {
@@ -151,7 +151,7 @@ locals {
 }
 
 resource "aws_ssm_parameter" "core_database_url_secret_arn" {
-  name      = "/defi-surv/${var.environment}/core/database_url_secret_arn"
+  name      = "/raksha/${var.environment}/core/database_url_secret_arn"
   type      = "String"
   value     = local.database_url_secret_arn
   overwrite = true
@@ -159,7 +159,7 @@ resource "aws_ssm_parameter" "core_database_url_secret_arn" {
 }
 
 resource "aws_ssm_parameter" "core_redis_url_secret_arn" {
-  name      = "/defi-surv/${var.environment}/core/redis_url_secret_arn"
+  name      = "/raksha/${var.environment}/core/redis_url_secret_arn"
   type      = "String"
   value     = local.redis_url_secret_arn
   overwrite = true
@@ -167,7 +167,7 @@ resource "aws_ssm_parameter" "core_redis_url_secret_arn" {
 }
 
 resource "aws_ssm_parameter" "core_service_discovery_namespace" {
-  name      = "/defi-surv/${var.environment}/core/service_discovery_namespace"
+  name      = "/raksha/${var.environment}/core/service_discovery_namespace"
   type      = "String"
   value     = module.compute.service_discovery_namespace_name
   overwrite = true
@@ -175,7 +175,7 @@ resource "aws_ssm_parameter" "core_service_discovery_namespace" {
 }
 
 resource "aws_ssm_parameter" "core_cluster_name" {
-  name      = "/defi-surv/${var.environment}/core/cluster_name"
+  name      = "/raksha/${var.environment}/core/cluster_name"
   type      = "String"
   value     = module.compute.cluster_name
   overwrite = true
@@ -183,7 +183,7 @@ resource "aws_ssm_parameter" "core_cluster_name" {
 }
 
 resource "aws_ssm_parameter" "core_contract_version" {
-  name      = "/defi-surv/${var.environment}/core/contract_version"
+  name      = "/raksha/${var.environment}/core/contract_version"
   type      = "String"
   value     = local.core_contract_version
   overwrite = true
@@ -196,7 +196,7 @@ module "cost_controls" {
   environment           = var.environment
   budget_limit_usd      = var.budget_limit_usd
   alert_email_addresses = var.alarm_emails
-  name_prefix           = "defi-surv"
+  name_prefix           = "raksha"
   tags                  = var.tags
 }
 

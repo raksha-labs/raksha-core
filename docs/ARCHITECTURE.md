@@ -2,16 +2,16 @@
 
 ## Purpose
 
-`defi-surv-core` is the event-processing and detection runtime. It ingests chain/market signals, evaluates detection logic, manages lifecycle transitions, and emits alerts through shared transport/state.
+`raksha-core` is the event-processing and detection runtime. It ingests chain/market signals, evaluates detection logic, manages lifecycle transitions, and emits alerts through shared transport/state.
 
 ## Runtime Components
 
 | Component | Binary | Primary Input | Primary Output | Notes |
 |---|---|---|---|---|
-| Indexer | `apps/indexer` | EVM RPC/WebSocket, CEX/DEX feeds, Oracle sources | `defi-surv:unified-events` | Multi-source supervisor normalizing all event types into UnifiedEvent stream. |
-| Detector | `apps/detector` | `defi-surv:unified-events` | `defi-surv:detections` | Pattern registry (DpegPattern, FlashLoanPattern) evaluates events via DetectionPattern trait. |
-| Orchestrator | `apps/orchestrator` | `defi-surv:detections` | `defi-surv:alerts` | Correlates detections, applies risk scoring, persists alerts. |
-| Finality | `apps/finality` | Block headers, reorg monitoring | `defi-surv:finality-updates` | Tracks confirmation depth and detects blockchain reorganizations. |
+| Indexer | `apps/indexer` | EVM RPC/WebSocket, CEX/DEX feeds, Oracle sources | `raksha:unified-events` | Multi-source supervisor normalizing all event types into UnifiedEvent stream. |
+| Detector | `apps/detector` | `raksha:unified-events` | `raksha:detections` | Pattern registry (DpegPattern, FlashLoanPattern) evaluates events via DetectionPattern trait. |
+| Orchestrator | `apps/orchestrator` | `raksha:detections` | `raksha:alerts` | Correlates detections, applies risk scoring, persists alerts. |
+| Finality | `apps/finality` | Block headers, reorg monitoring | `raksha:finality-updates` | Tracks confirmation depth and detects blockchain reorganizations. |
 
 ## DB-Driven Stream Supervisor (Indexer)
 
@@ -44,16 +44,16 @@ flowchart LR
   DEX[DEX Feeds] --> IDX
   ORACLE[Oracle Networks] --> IDX
   
-  IDX --> UNIFIED[(defi-surv:unified-events)]
+  IDX --> UNIFIED[(raksha:unified-events)]
   
   UNIFIED --> DET[detector]
   DET --> |Pattern Registry| DPEG[DpegPattern]
   DET --> |Pattern Registry| FL[FlashLoanPattern]
   
-  DET --> DETS[(defi-surv:detections)]
+  DET --> DETS[(raksha:detections)]
   
   DETS --> ORCH[orchestrator]
-  ORCH --> ALERTS[(defi-surv:alerts)]
+  ORCH --> ALERTS[(raksha:alerts)]
   
   IDX --> PG[(PostgreSQL)]
   DET --> PG
@@ -61,7 +61,7 @@ flowchart LR
   FIN --> PG
   
   HEADERS[Block Headers] --> FIN[finality]
-  FIN --> FUPDATES[(defi-surv:finality-updates)]
+  FIN --> FUPDATES[(raksha:finality-updates)]
 ```
 
 ## Core Data Stores
@@ -73,10 +73,10 @@ flowchart LR
   - Tenant isolation: `detections.tenant_id`, `alerts.tenant_id`
   - Quota management: `usage_events`, `alert_delivery_attempts`
 - Redis streams:
-  - `defi-surv:unified-events` — All normalized events from indexer (EVM, CEX, DEX, Oracle)
-  - `defi-surv:detections` — Pattern detection results
-  - `defi-surv:alerts` — Alert lifecycle events
-  - `defi-surv:finality-updates` — Block confirmation tracking
+  - `raksha:unified-events` — All normalized events from indexer (EVM, CEX, DEX, Oracle)
+  - `raksha:detections` — Pattern detection results
+  - `raksha:alerts` — Alert lifecycle events
+  - `raksha:finality-updates` — Block confirmation tracking
 
 ## Deployment Model
 

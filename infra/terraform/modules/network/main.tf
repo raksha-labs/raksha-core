@@ -14,7 +14,7 @@ resource "aws_vpc" "main" {
   enable_dns_support   = true
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-vpc"
+    Name = "raksha-${var.environment}-vpc"
   })
 }
 
@@ -22,7 +22,7 @@ resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-igw"
+    Name = "raksha-${var.environment}-igw"
   })
 }
 
@@ -34,7 +34,7 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-public-${count.index + 1}"
+    Name = "raksha-${var.environment}-public-${count.index + 1}"
     Tier = "public"
   })
 }
@@ -46,7 +46,7 @@ resource "aws_subnet" "private" {
   availability_zone = local.selected_azs[count.index]
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-private-${count.index + 1}"
+    Name = "raksha-${var.environment}-private-${count.index + 1}"
     Tier = "private"
   })
 }
@@ -56,7 +56,7 @@ resource "aws_eip" "nat" {
   domain = "vpc"
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-nat-eip-${count.index + 1}"
+    Name = "raksha-${var.environment}-nat-eip-${count.index + 1}"
   })
 }
 
@@ -66,7 +66,7 @@ resource "aws_nat_gateway" "main" {
   subnet_id     = aws_subnet.public[var.nat_gateway_per_az ? count.index : 0].id
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-nat-${count.index + 1}"
+    Name = "raksha-${var.environment}-nat-${count.index + 1}"
   })
 
   depends_on = [aws_internet_gateway.main]
@@ -81,7 +81,7 @@ resource "aws_route_table" "public" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-public-rt"
+    Name = "raksha-${var.environment}-public-rt"
   })
 }
 
@@ -90,7 +90,7 @@ resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-private-rt-${count.index + 1}"
+    Name = "raksha-${var.environment}-private-rt-${count.index + 1}"
   })
 }
 

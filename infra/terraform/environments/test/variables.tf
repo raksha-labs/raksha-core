@@ -142,7 +142,7 @@ variable "db_instance_class" {
 variable "db_name" {
   description = "Database name"
   type        = string
-  default     = "defi_surv"
+  default     = "raksha"
 }
 
 variable "db_username" {
@@ -178,13 +178,13 @@ variable "admin_ingress_cidrs" {
 variable "github_org" {
   description = "GitHub organization"
   type        = string
-  default     = "defi-surv"
+  default     = "raksha-labs"
 }
 
 variable "github_repo" {
   description = "GitHub repository"
   type        = string
-  default     = "defi-surv-core"
+  default     = "raksha-core"
 }
 
 variable "github_allowed_branches" {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://defi-surv/schemas/detection_result.schema.json",
+  "$id": "https://raksha/schemas/detection_result.schema.json",
   "title": "DetectionResult",
   "type": "object",
   "required": [

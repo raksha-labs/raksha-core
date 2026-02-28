@@ -25,7 +25,7 @@ variable "db_instance_class" {
 variable "db_name" {
   type        = string
   description = "PostgreSQL database name"
-  default     = "defi_surv"
+  default     = "raksha"
 }
 
 variable "db_username" {
@@ -63,7 +63,7 @@ variable "tags" {
   type        = map(string)
   description = "Common tags for all resources"
   default = {
-    Project     = "defi-surv"
+    Project     = "raksha"
     ManagedBy   = "terraform"
     Environment = "production"
   }

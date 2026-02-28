@@ -13,7 +13,7 @@ terraform {
 
   # Recommended: Use S3 backend for state management
   # backend "s3" {
-  #   bucket         = "defi-surv-terraform-state"
+  #   bucket         = "raksha-terraform-state"
   #   key            = "production/terraform.tfstate"
   #   region         = "eu-west-1"
   #   encrypt        = true
@@ -30,8 +30,8 @@ provider "aws" {
 }
 
 # ECS Cluster with Container Insights
-resource "aws_ecs_cluster" "defi_surv" {
-  name = "defi-surv-${var.environment}"
+resource "aws_ecs_cluster" "raksha" {
+  name = "raksha-${var.environment}"
 
   setting {
     name  = "containerInsights"
@@ -56,7 +56,7 @@ resource "aws_cloudwatch_log_group" "services" {
     "policy-manager"
   ])
 
-  name              = "/ecs/defi-surv/${each.key}"
+  name              = "/ecs/raksha/${each.key}"
   retention_in_days = 14
 
   tags = merge(var.tags, {

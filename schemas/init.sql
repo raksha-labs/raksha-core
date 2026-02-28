@@ -257,5 +257,5 @@ GROUP BY rule_id, chain
 ORDER BY execution_count DESC;
 
 -- Grant permissions (adjust as needed)
--- GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO defi_surv_user;
--- GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO defi_surv_user;
+-- GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO raksha_user;
+-- GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO raksha_user;

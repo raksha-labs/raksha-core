@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://defi-surv/schemas/normalized_event.schema.json",
+  "$id": "https://raksha/schemas/normalized_event.schema.json",
   "title": "NormalizedEvent",
   "type": "object",
   "required": [

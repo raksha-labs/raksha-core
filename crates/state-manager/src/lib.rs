@@ -19,13 +19,13 @@ pub use finality::*;
 pub use persistence::*;
 pub use dead_letter_queue::*;
 
-pub const STREAM_NORMALIZED_EVENTS: &str = "defi-surv:normalized-events";
-pub const STREAM_REORG_NOTICES: &str = "defi-surv:reorg-notices";
-pub const STREAM_FINALITY_UPDATES: &str = "defi-surv:finality-updates";
-pub const STREAM_DETECTIONS: &str = "defi-surv:detections";
-pub const STREAM_ALERTS: &str = "defi-surv:alerts";
-pub const STREAM_ALERT_LIFECYCLE: &str = "defi-surv:alerts:lifecycle";
-pub const STREAM_UNIFIED_EVENTS: &str = "defi-surv:unified-events";
+pub const STREAM_NORMALIZED_EVENTS: &str = "raksha:normalized-events";
+pub const STREAM_REORG_NOTICES: &str = "raksha:reorg-notices";
+pub const STREAM_FINALITY_UPDATES: &str = "raksha:finality-updates";
+pub const STREAM_DETECTIONS: &str = "raksha:detections";
+pub const STREAM_ALERTS: &str = "raksha:alerts";
+pub const STREAM_ALERT_LIFECYCLE: &str = "raksha:alerts:lifecycle";
+pub const STREAM_UNIFIED_EVENTS: &str = "raksha:unified-events";
 
 #[derive(Clone)]
 pub struct RedisStreamPublisher {

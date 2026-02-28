@@ -69,13 +69,13 @@ docker compose logs -f indexer
 **Manual application** (if needed):
 
 ```bash
-docker compose exec -i postgres psql -U postgres -d defi_surv < sql/schema.sql
-docker compose exec -i postgres psql -U postgres -d defi_surv < sql/seed_data.sql
+docker compose exec -i postgres psql -U postgres -d raksha < sql/schema.sql
+docker compose exec -i postgres psql -U postgres -d raksha < sql/seed_data.sql
 ```
 
 See [sql/README.md](./sql/README.md) for complete schema documentation
-docker compose exec -i postgres psql -U postgres -d defi_surv < sql/schema.sql
-docker compose exec -i postgres psql -U postgres -d defi_surv < sql/seed_data.sql
+docker compose exec -i postgres psql -U postgres -d raksha < sql/schema.sql
+docker compose exec -i postgres psql -U postgres -d raksha < sql/seed_data.sql
 ```
 
 See [sql/README.md](./sql/README.md) for schema details.

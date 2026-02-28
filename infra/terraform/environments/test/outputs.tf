@@ -49,6 +49,6 @@ output "github_deploy_role_arn" {
 }
 
 output "core_contract_ssm_prefix" {
-  value       = "/defi-surv/${var.environment}/core"
+  value       = "/raksha/${var.environment}/core"
   description = "SSM prefix for core deployment contract"
 }

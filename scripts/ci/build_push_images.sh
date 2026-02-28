@@ -18,7 +18,7 @@ REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 log "logging in to ECR ${REGISTRY}"
 aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
 
-BUNDLE_IMAGE="defi-surv-core-bundle:${IMAGE_TAG}"
+BUNDLE_IMAGE="raksha-core-bundle:${IMAGE_TAG}"
 log "building shared core runtime image from Dockerfile"
 docker build -f "${REPO_ROOT}/Dockerfile" -t "${BUNDLE_IMAGE}" "${REPO_ROOT}"
 
@@ -29,7 +29,7 @@ while IFS= read -r service; do
     continue
   fi
 
-  repo="defi-surv-${service}"
+  repo="raksha-${service}"
   if ! aws ecr describe-repositories --repository-names "${repo}" --region "${AWS_REGION}" >/dev/null 2>&1; then
     log "creating missing ECR repository ${repo}"
     aws ecr create-repository --repository-name "${repo}" --image-scanning-configuration scanOnPush=true --region "${AWS_REGION}" >/dev/null

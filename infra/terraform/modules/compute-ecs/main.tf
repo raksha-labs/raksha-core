@@ -49,7 +49,7 @@ locals {
       health_path    = "/"
       command        = []
       environment = [
-        { name = "POSTGRES_DB", value = "defi_surv" },
+        { name = "POSTGRES_DB", value = "raksha" },
         { name = "POSTGRES_USER", value = "defi_admin" },
         { name = "POSTGRES_PASSWORD", value = "defi_test_password" }
       ]
@@ -99,7 +99,7 @@ locals {
 }
 
 resource "aws_ecs_cluster" "this" {
-  name = "defi-surv-${var.environment}"
+  name = "raksha-${var.environment}"
 
   setting {
     name  = "containerInsights"
@@ -151,7 +151,7 @@ resource "aws_ecr_lifecycle_policy" "services" {
 }
 
 resource "aws_iam_role" "ecs_task_execution" {
-  name = "defi-surv-${var.environment}-ecs-task-execution-role"
+  name = "raksha-${var.environment}-ecs-task-execution-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -175,7 +175,7 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution_managed" {
 }
 
 resource "aws_iam_role_policy" "ecs_task_execution_custom" {
-  name = "defi-surv-${var.environment}-ecs-task-execution-custom"
+  name = "raksha-${var.environment}-ecs-task-execution-custom"
   role = aws_iam_role.ecs_task_execution.id
 
   policy = jsonencode({
@@ -198,14 +198,14 @@ resource "aws_iam_role_policy" "ecs_task_execution_custom" {
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "arn:aws:logs:${var.aws_region}:*:log-group:/ecs/defi-surv/*"
+        Resource = "arn:aws:logs:${var.aws_region}:*:log-group:/ecs/raksha/*"
       }
     ]
   })
 }
 
 resource "aws_iam_role" "ecs_task" {
-  name = "defi-surv-${var.environment}-ecs-task-role"
+  name = "raksha-${var.environment}-ecs-task-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -224,7 +224,7 @@ resource "aws_iam_role" "ecs_task" {
 }
 
 resource "aws_iam_role_policy" "ecs_task" {
-  name = "defi-surv-${var.environment}-ecs-task-policy"
+  name = "raksha-${var.environment}-ecs-task-policy"
   role = aws_iam_role.ecs_task.id
 
   policy = jsonencode({
@@ -242,8 +242,8 @@ resource "aws_iam_role_policy" "ecs_task" {
 }
 
 resource "aws_service_discovery_private_dns_namespace" "this" {
-  name        = "defi-surv-${var.environment}.local"
-  description = "Private DNS namespace for defi-surv internal service communication"
+  name        = "raksha-${var.environment}.local"
+  description = "Private DNS namespace for raksha internal service communication"
   vpc         = var.vpc_id
 
   tags = var.tags
@@ -273,7 +273,7 @@ resource "aws_service_discovery_service" "main" {
 resource "aws_lb" "public" {
   count = length(local.public_services) > 0 ? 1 : 0
 
-  name               = "defi-surv-${var.environment}-public"
+  name               = "raksha-${var.environment}-public"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [var.alb_public_sg_id]
@@ -283,7 +283,7 @@ resource "aws_lb" "public" {
   idle_timeout                     = 60
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-public-alb"
+    Name = "raksha-${var.environment}-public-alb"
   })
 }
 
@@ -360,7 +360,7 @@ resource "aws_lb_listener_rule" "public_api_paths" {
 resource "aws_lb" "admin_internal" {
   count = var.admin_access_mode == "private-only" && length(local.admin_services) > 0 ? 1 : 0
 
-  name               = "defi-surv-${var.environment}-admin"
+  name               = "raksha-${var.environment}-admin"
   internal           = true
   load_balancer_type = "application"
   security_groups    = [var.alb_admin_internal_sg_id]
@@ -369,7 +369,7 @@ resource "aws_lb" "admin_internal" {
   enable_cross_zone_load_balancing = true
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-admin-alb"
+    Name = "raksha-${var.environment}-admin-alb"
   })
 }
 
@@ -429,7 +429,7 @@ resource "aws_lb_listener_rule" "admin_api_paths" {
 resource "aws_ecs_task_definition" "service" {
   for_each = local.services
 
-  family                   = "defi-surv-${var.environment}-${each.key}"
+  family                   = "raksha-${var.environment}-${each.key}"
   requires_compatibilities = var.compute_mode == "ec2" ? ["EC2"] : ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = tostring(local.cpu_memory[each.key].cpu)
@@ -454,7 +454,7 @@ resource "aws_ecs_task_definition" "service" {
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          awslogs-group         = "/ecs/defi-surv/${var.environment}/${each.key}"
+          awslogs-group         = "/ecs/raksha/${var.environment}/${each.key}"
           awslogs-region        = var.aws_region
           awslogs-stream-prefix = "ecs"
         }
@@ -468,7 +468,7 @@ resource "aws_ecs_task_definition" "service" {
 resource "aws_ecs_service" "service" {
   for_each = local.services
 
-  name                   = "defi-surv-${var.environment}-${each.key}"
+  name                   = "raksha-${var.environment}-${each.key}"
   cluster                = aws_ecs_cluster.this.id
   task_definition        = aws_ecs_task_definition.service[each.key].arn
   desired_count          = local.desired_counts[each.key]
@@ -546,7 +546,7 @@ resource "aws_ecs_service" "service" {
 resource "aws_ecs_task_definition" "test_data" {
   for_each = local.test_data_services
 
-  family                   = "defi-surv-${var.environment}-${each.key}"
+  family                   = "raksha-${var.environment}-${each.key}"
   requires_compatibilities = var.compute_mode == "ec2" ? ["EC2"] : ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = "256"
@@ -565,7 +565,7 @@ resource "aws_ecs_task_definition" "test_data" {
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          awslogs-group         = "/ecs/defi-surv/${var.environment}/${each.key}"
+          awslogs-group         = "/ecs/raksha/${var.environment}/${each.key}"
           awslogs-region        = var.aws_region
           awslogs-stream-prefix = "ecs"
         }
@@ -579,7 +579,7 @@ resource "aws_ecs_task_definition" "test_data" {
 resource "aws_ecs_service" "test_data" {
   for_each = local.test_data_services
 
-  name                   = "defi-surv-${var.environment}-${each.key}"
+  name                   = "raksha-${var.environment}-${each.key}"
   cluster                = aws_ecs_cluster.this.id
   task_definition        = aws_ecs_task_definition.test_data[each.key].arn
   desired_count          = 1
@@ -618,7 +618,7 @@ data "aws_ssm_parameter" "ecs_optimized_ami" {
 resource "aws_iam_role" "ecs_instance" {
   count = var.compute_mode == "ec2" ? 1 : 0
 
-  name = "defi-surv-${var.environment}-ecs-instance-role"
+  name = "raksha-${var.environment}-ecs-instance-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -653,14 +653,14 @@ resource "aws_iam_role_policy_attachment" "ecs_instance_role_ssm" {
 resource "aws_iam_instance_profile" "ecs_instance" {
   count = var.compute_mode == "ec2" ? 1 : 0
 
-  name = "defi-surv-${var.environment}-ecs-instance-profile"
+  name = "raksha-${var.environment}-ecs-instance-profile"
   role = aws_iam_role.ecs_instance[0].name
 }
 
 resource "aws_launch_template" "ecs" {
   count = var.compute_mode == "ec2" ? 1 : 0
 
-  name_prefix   = "defi-surv-${var.environment}-ecs-"
+  name_prefix   = "raksha-${var.environment}-ecs-"
   image_id      = data.aws_ssm_parameter.ecs_optimized_ami[0].value
   instance_type = var.ec2_instance_type
 
@@ -688,7 +688,7 @@ resource "aws_launch_template" "ecs" {
 resource "aws_autoscaling_group" "ecs" {
   count = var.compute_mode == "ec2" ? 1 : 0
 
-  name                      = "defi-surv-${var.environment}-ecs-asg"
+  name                      = "raksha-${var.environment}-ecs-asg"
   min_size                  = var.ec2_min_capacity
   max_size                  = var.ec2_max_capacity
   desired_capacity          = var.ec2_desired_capacity
@@ -704,7 +704,7 @@ resource "aws_autoscaling_group" "ecs" {
 
   tag {
     key                 = "Name"
-    value               = "defi-surv-${var.environment}-ecs-instance"
+    value               = "raksha-${var.environment}-ecs-instance"
     propagate_at_launch = true
   }
 
@@ -718,7 +718,7 @@ resource "aws_autoscaling_group" "ecs" {
 resource "aws_ecs_capacity_provider" "ec2" {
   count = var.compute_mode == "ec2" ? 1 : 0
 
-  name = "defi-surv-${var.environment}-ec2-cp"
+  name = "raksha-${var.environment}-ec2-cp"
 
   auto_scaling_group_provider {
     auto_scaling_group_arn = aws_autoscaling_group.ecs[0].arn

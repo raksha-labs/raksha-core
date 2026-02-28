@@ -1,6 +1,6 @@
 # Application Load Balancer
 resource "aws_lb" "main" {
-  name               = "defi-surv-alb"
+  name               = "raksha-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
@@ -11,13 +11,13 @@ resource "aws_lb" "main" {
   enable_cross_zone_load_balancing = true
 
   tags = merge(var.tags, {
-    Name = "defi-surv-alb"
+    Name = "raksha-alb"
   })
 }
 
 # Target Group for API Service
 resource "aws_lb_target_group" "api_service" {
-  name        = "defi-surv-api-service"
+  name        = "raksha-api-service"
   port        = 3001
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -70,11 +70,11 @@ resource "aws_lb_listener" "http" {
 
 # ACM Certificate (placeholder - update with your domain)
 resource "aws_acm_certificate" "main" {
-  domain_name       = "api.defi-surv.example.com"
+  domain_name       = "api.raksha.example.com"
   validation_method = "DNS"
 
   tags = merge(var.tags, {
-    Name = "defi-surv-api-cert"
+    Name = "raksha-api-cert"
   })
 
   lifecycle {
@@ -84,7 +84,7 @@ resource "aws_acm_certificate" "main" {
 
 # WAF Web ACL for ALB
 resource "aws_wafv2_web_acl" "main" {
-  name  = "defi-surv-waf"
+  name  = "raksha-waf"
   scope = "REGIONAL"
 
   default_action {
@@ -137,7 +137,7 @@ resource "aws_wafv2_web_acl" "main" {
 
   visibility_config {
     cloudwatch_metrics_enabled = true
-    metric_name                = "defi-surv-waf"
+    metric_name                = "raksha-waf"
     sampled_requests_enabled   = true
   }
 

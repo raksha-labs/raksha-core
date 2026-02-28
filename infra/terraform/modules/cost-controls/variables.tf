@@ -17,7 +17,7 @@ variable "alert_email_addresses" {
 variable "name_prefix" {
   description = "Prefix for budget and anomaly monitor names"
   type        = string
-  default     = "defi-surv"
+  default     = "raksha"
 }
 
 variable "tags" {

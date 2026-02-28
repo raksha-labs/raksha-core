@@ -32,44 +32,44 @@ This directory contains the SQL files for the DeFi Surveillance database.
 
 ```bash
 # 1. Create database
-psql -U postgres -c "CREATE DATABASE defi_surv;"
+psql -U postgres -c "CREATE DATABASE raksha;"
 
 # 2. Apply schema
-psql -U postgres -d defi_surv -f schema.sql
+psql -U postgres -d raksha -f schema.sql
 
 # 3. Load seed data
-psql -U postgres -d defi_surv -f seed_data.sql
+psql -U postgres -d raksha -f seed_data.sql
 ```
 
 ### For Existing Installation Upgrade:
 
 ```bash
-psql -U postgres -d defi_surv -f upgrade_poll_interval_ms.sql
-psql -U postgres -d defi_surv -f upgrade_generic_incidents.sql
+psql -U postgres -d raksha -f upgrade_poll_interval_ms.sql
+psql -U postgres -d raksha -f upgrade_generic_incidents.sql
 ```
 
 ### With Docker:
 
 ```bash
 # Copy SQL files into running postgres container
-docker cp schema.sql defi-surv-postgres:/tmp/schema.sql
-docker cp seed_data.sql defi-surv-postgres:/tmp/seed_data.sql
+docker cp schema.sql raksha-postgres:/tmp/schema.sql
+docker cp seed_data.sql raksha-postgres:/tmp/seed_data.sql
 
 # Execute schema
-docker exec -i defi-surv-postgres psql -U postgres -d defi_surv -f /tmp/schema.sql
+docker exec -i raksha-postgres psql -U postgres -d raksha -f /tmp/schema.sql
 
 # Execute seed data
-docker exec -i defi-surv-postgres psql -U postgres -d defi_surv -f /tmp/seed_data.sql
+docker exec -i raksha-postgres psql -U postgres -d raksha -f /tmp/seed_data.sql
 ```
 
 ### Alternative Docker Method (via stdin):
 
 ```bash
 # Apply schema
-docker exec -i defi-surv-postgres psql -U postgres -d defi_surv < schema.sql
+docker exec -i raksha-postgres psql -U postgres -d raksha < schema.sql
 
 # Apply seed data
-docker exec -i defi-surv-postgres psql -U postgres -d defi_surv < seed_data.sql
+docker exec -i raksha-postgres psql -U postgres -d raksha < seed_data.sql
 ```
 
 ## Schema Overview

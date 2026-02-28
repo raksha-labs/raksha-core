@@ -29,9 +29,9 @@ mod stream_worker;
 use stream_supervisor::run_stream_supervisor;
 
 const DEFAULT_RULE_RELATIVE_ROOTS: [&str; 3] = [
-    "./rules",      // Running from defi-surv-core/
-    "../rules",     // Running from defi-surv-core/apps/
-    "../../rules",  // Running from defi-surv-core/apps/indexer/
+    "./rules",      // Running from raksha-core/
+    "../rules",     // Running from raksha-core/apps/
+    "../../rules",  // Running from raksha-core/apps/indexer/
 ];
 const DEFAULT_INGESTION_POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_INGESTION_BLOCK_BATCH_SIZE: u64 = 8;

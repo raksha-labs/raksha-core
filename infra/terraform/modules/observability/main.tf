@@ -5,7 +5,7 @@ locals {
 resource "aws_cloudwatch_log_group" "service" {
   for_each = toset(var.service_names)
 
-  name              = "/ecs/defi-surv/${var.environment}/${each.key}"
+  name              = "/ecs/raksha/${var.environment}/${each.key}"
   retention_in_days = var.log_retention_days
 
   tags = merge(var.tags, {
@@ -15,7 +15,7 @@ resource "aws_cloudwatch_log_group" "service" {
 
 resource "aws_cloudwatch_dashboard" "main" {
   count          = var.enable_dashboard ? 1 : 0
-  dashboard_name = "defi-surv-${var.environment}"
+  dashboard_name = "raksha-${var.environment}"
 
   dashboard_body = jsonencode({
     widgets = [
@@ -54,7 +54,7 @@ resource "aws_cloudwatch_dashboard" "main" {
 resource "aws_cloudwatch_metric_alarm" "ecs_cpu_high" {
   for_each = toset(var.service_names)
 
-  alarm_name          = "defi-surv-${var.environment}-${each.key}-cpu-high"
+  alarm_name          = "raksha-${var.environment}-${each.key}-cpu-high"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 3
   metric_name         = "CPUUtilization"
@@ -77,7 +77,7 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu_high" {
 resource "aws_cloudwatch_metric_alarm" "ecs_memory_high" {
   for_each = toset(var.service_names)
 
-  alarm_name          = "defi-surv-${var.environment}-${each.key}-memory-high"
+  alarm_name          = "raksha-${var.environment}-${each.key}-memory-high"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 3
   metric_name         = "MemoryUtilization"

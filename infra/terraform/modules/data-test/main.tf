@@ -4,10 +4,10 @@ locals {
 }
 
 resource "aws_s3_bucket" "test_backup" {
-  bucket_prefix = "defi-surv-${var.environment}-backup-"
+  bucket_prefix = "raksha-${var.environment}-backup-"
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-backup"
+    Name = "raksha-${var.environment}-backup"
   })
 }
 

@@ -24,7 +24,7 @@ require_env TF_BACKEND_DYNAMODB_TABLE
 
 REPO_NAME=$(basename "${REPO_ROOT}")
 TF_BACKEND_REGION="${TF_BACKEND_REGION:-${AWS_REGION:-eu-west-1}}"
-TF_STATE_KEY="${TF_STATE_KEY:-${TF_BACKEND_KEY_PREFIX:-defi-surv}/${REPO_NAME}/${ENVIRONMENT}/terraform.tfstate}"
+TF_STATE_KEY="${TF_STATE_KEY:-${TF_BACKEND_KEY_PREFIX:-raksha}/${REPO_NAME}/${ENVIRONMENT}/terraform.tfstate}"
 
 init_args=(
   -chdir="${TF_DIR}"

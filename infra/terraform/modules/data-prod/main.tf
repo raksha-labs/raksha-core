@@ -9,26 +9,26 @@ resource "random_password" "redis_auth_token" {
 }
 
 resource "aws_kms_key" "data" {
-  description             = "KMS key for defi-surv ${var.environment} data tier"
+  description             = "KMS key for raksha ${var.environment} data tier"
   deletion_window_in_days = 30
   enable_key_rotation     = true
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-data-kms"
+    Name = "raksha-${var.environment}-data-kms"
   })
 }
 
 resource "aws_db_subnet_group" "main" {
-  name       = "defi-surv-${var.environment}-db-subnet-group"
+  name       = "raksha-${var.environment}-db-subnet-group"
   subnet_ids = var.private_subnet_ids
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-db-subnet-group"
+    Name = "raksha-${var.environment}-db-subnet-group"
   })
 }
 
 resource "aws_db_instance" "main" {
-  identifier     = "defi-surv-${var.environment}-db"
+  identifier     = "raksha-${var.environment}-db"
   engine         = "postgres"
   engine_version = "15.5"
   instance_class = var.db_instance_class
@@ -55,22 +55,22 @@ resource "aws_db_instance" "main" {
   skip_final_snapshot = !var.db_deletion_protection
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-postgres"
+    Name = "raksha-${var.environment}-postgres"
   })
 }
 
 resource "aws_elasticache_subnet_group" "main" {
-  name       = "defi-surv-${var.environment}-cache-subnet-group"
+  name       = "raksha-${var.environment}-cache-subnet-group"
   subnet_ids = var.private_subnet_ids
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-cache-subnet-group"
+    Name = "raksha-${var.environment}-cache-subnet-group"
   })
 }
 
 resource "aws_elasticache_replication_group" "main" {
-  replication_group_id       = "defi-surv-${var.environment}-redis"
-  description                = "Redis replication group for defi-surv ${var.environment}"
+  replication_group_id       = "raksha-${var.environment}-redis"
+  description                = "Redis replication group for raksha ${var.environment}"
   engine                     = "redis"
   engine_version             = "7.1"
   node_type                  = var.cache_node_type
@@ -89,7 +89,7 @@ resource "aws_elasticache_replication_group" "main" {
   snapshot_retention_limit = 7
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-redis"
+    Name = "raksha-${var.environment}-redis"
   })
 }
 

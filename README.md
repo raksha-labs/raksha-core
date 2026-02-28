@@ -1,4 +1,4 @@
-# defi-surv-core
+# raksha-core
 
 Rust data-plane workspace — the event-processing and detection runtime for the DeFi surveillance platform.
 
@@ -11,19 +11,19 @@ EVM chains / CEX / DEX / Oracles
       [indexer]          ← DB-driven multi-source supervisor
           │  publishes UnifiedEvent
           ▼
-  defi-surv:unified-events  (Redis Stream)
+  raksha:unified-events  (Redis Stream)
           │
           ▼
       [detector]         ← pattern registry (DPEG, Flash-Loan, …)
           │  publishes DetectionResult
           ▼
-  defi-surv:detections
+  raksha:detections
           │
           ▼
    [orchestrator]        ← lifecycle, quota enforcement, notifier dispatch
           │  publishes AlertEvent
           ▼
-  defi-surv:alerts
+  raksha:alerts
 ```
 
 ## Workspace crates
@@ -73,7 +73,7 @@ Key variables:
 
 ## Local Docker stack (recommended)
 
-From the repository root (`defi-surv-core/`):
+From the repository root (`raksha-core/`):
 
 ```bash
 # Optional — enables live EVM ingestion; omit to run in mock mode
@@ -96,10 +96,10 @@ for f in infra/sql/001_init.sql \
           infra/sql/004_multi_tenant_dpeg_alerting.sql \
           infra/sql/005_unified_pattern_architecture.sql \
           infra/sql/006_seed_patterns.sql; do
-  docker exec -i defi-surv-postgres psql -U postgres -d defi_surv < "$f"
+  docker exec -i raksha-postgres psql -U postgres -d raksha < "$f"
 done
 # Run 007 only after the new pipeline is confirmed healthy:
-# docker exec -i defi-surv-postgres psql -U postgres -d defi_surv < infra/sql/007_cleanup_legacy_tables.sql
+# docker exec -i raksha-postgres psql -U postgres -d raksha < infra/sql/007_cleanup_legacy_tables.sql
 ```
 
 ## Run checks

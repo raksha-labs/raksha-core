@@ -1,4 +1,4 @@
-# AGENTS.md (defi-surv-core)
+# AGENTS.md (raksha-core)
 
 AI tool guidance for the **core data-plane** repository.
 

@@ -97,7 +97,7 @@ variable "alb_admin_internal_sg_id" {
 }
 
 variable "secret_prefix" {
-  description = "Secret prefix, for example defi-surv/test"
+  description = "Secret prefix, for example raksha/test"
   type        = string
 }
 

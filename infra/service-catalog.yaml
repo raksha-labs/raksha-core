@@ -1,7 +1,7 @@
 version: 1
 services:
   - service_name: indexer
-    image_repo: defi-surv-indexer
+    image_repo: raksha-indexer
     container_port: 8081
     health_path: /health
     exposure: internal
@@ -16,7 +16,7 @@ services:
       prod: 2
 
   - service_name: detector
-    image_repo: defi-surv-detector
+    image_repo: raksha-detector
     container_port: 8082
     health_path: /health
     exposure: internal
@@ -31,7 +31,7 @@ services:
       prod: 5
 
   - service_name: orchestrator
-    image_repo: defi-surv-orchestrator
+    image_repo: raksha-orchestrator
     container_port: 8084
     health_path: /health
     exposure: internal
@@ -46,7 +46,7 @@ services:
       prod: 3
 
   - service_name: finality
-    image_repo: defi-surv-finality
+    image_repo: raksha-finality
     container_port: 8085
     health_path: /health
     exposure: internal

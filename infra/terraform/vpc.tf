@@ -5,7 +5,7 @@ resource "aws_vpc" "main" {
   enable_dns_support   = true
 
   tags = merge(var.tags, {
-    Name = "defi-surv-vpc"
+    Name = "raksha-vpc"
   })
 }
 
@@ -14,7 +14,7 @@ resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
   tags = merge(var.tags, {
-    Name = "defi-surv-igw"
+    Name = "raksha-igw"
   })
 }
 
@@ -27,7 +27,7 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = merge(var.tags, {
-    Name = "defi-surv-public-${count.index + 1}"
+    Name = "raksha-public-${count.index + 1}"
     Type = "public"
   })
 }
@@ -40,7 +40,7 @@ resource "aws_subnet" "private" {
   availability_zone = data.aws_availability_zones.available.names[count.index]
 
   tags = merge(var.tags, {
-    Name = "defi-surv-private-${count.index + 1}"
+    Name = "raksha-private-${count.index + 1}"
     Type = "private"
   })
 }
@@ -51,7 +51,7 @@ resource "aws_eip" "nat" {
   domain = "vpc"
 
   tags = merge(var.tags, {
-    Name = "defi-surv-nat-eip-${count.index + 1}"
+    Name = "raksha-nat-eip-${count.index + 1}"
   })
 }
 
@@ -61,7 +61,7 @@ resource "aws_nat_gateway" "main" {
   subnet_id     = aws_subnet.public[count.index].id
 
   tags = merge(var.tags, {
-    Name = "defi-surv-nat-${count.index + 1}"
+    Name = "raksha-nat-${count.index + 1}"
   })
 
   depends_on = [aws_internet_gateway.main]
@@ -77,7 +77,7 @@ resource "aws_route_table" "public" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-public-rt"
+    Name = "raksha-public-rt"
   })
 }
 
@@ -91,7 +91,7 @@ resource "aws_route_table" "private" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-private-rt-${count.index + 1}"
+    Name = "raksha-private-rt-${count.index + 1}"
   })
 }
 

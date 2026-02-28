@@ -6,7 +6,7 @@
 - Docker + Docker Compose
 - `psql` optional (we use `docker exec` commands below)
 
-Repository root for commands: `defi-surv-core/`.
+Repository root for commands: `raksha-core/`.
 
 ## 1. Start local dependencies
 
@@ -15,21 +15,21 @@ docker compose -f infra/local/docker-compose.yml up -d
 ```
 
 This starts:
-- Postgres (`localhost:5432`, db `defi_surv`, user `postgres`, password `postgres`)
+- Postgres (`localhost:5432`, db `raksha`, user `postgres`, password `postgres`)
 - Redis (`localhost:6379`)
 
 ## 2. Apply schema migrations
 
 ```bash
 for f in infra/sql/001_init.sql infra/sql/002_lifecycle_tenant.sql; do
-  docker exec -i defi-surv-postgres psql -U postgres -d defi_surv < "$f"
+  docker exec -i raksha-postgres psql -U postgres -d raksha < "$f"
 done
 ```
 
 ## 3. Export runtime env
 
 ```bash
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/defi_surv
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/raksha
 export REDIS_URL=redis://localhost:6379
 export RULES_REPO_PATH=$(pwd)/rules
 export RUST_LOG=info
@@ -64,18 +64,18 @@ cargo run -p finality
 Redis stream activity:
 
 ```bash
-docker exec -it defi-surv-redis redis-cli XINFO STREAM defi-surv:unified-events
-docker exec -it defi-surv-redis redis-cli XINFO STREAM defi-surv:detections
+docker exec -it raksha-redis redis-cli XINFO STREAM raksha:unified-events
+docker exec -it raksha-redis redis-cli XINFO STREAM raksha:detections
 ```
 
 Database rows:
 
 ```bash
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM detections;"
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM alerts;"
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM pattern_snapshots;"
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT stream_config_id, source_id, event_type, observed_at FROM raw_events ORDER BY observed_at DESC LIMIT 20;"
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT count(*) FROM raw_events WHERE event_type IN ('quote','trade') AND observed_at < NOW() - INTERVAL '5 minutes';"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT count(*) FROM detections;"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT count(*) FROM alerts;"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT count(*) FROM pattern_snapshots;"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT stream_config_id, source_id, event_type, observed_at FROM raw_events ORDER BY observed_at DESC LIMIT 20;"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT count(*) FROM raw_events WHERE event_type IN ('quote','trade') AND observed_at < NOW() - INTERVAL '5 minutes';"
 ```
 
 Optional worker health endpoints (if enabled):
@@ -114,4 +114,4 @@ docker compose -f infra/local/docker-compose.yml down -v
 
 ## Notes for split-repo setup
 
-When `defi-surv-core` and `defi-surv-platform` run independently, keep database ports distinct if both stacks run on the same machine. If you wire platform control APIs to core data, point `CONTROL_CORE_DATABASE_URL` (platform) to this core Postgres instance.
+When `raksha-core` and `raksha-platform` run independently, keep database ports distinct if both stacks run on the same machine. If you wire platform control APIs to core data, point `CONTROL_CORE_DATABASE_URL` (platform) to this core Postgres instance.

@@ -1,9 +1,9 @@
 services:
   postgres:
     image: postgres:15-alpine
-    container_name: defi-surv-postgres
+    container_name: raksha-postgres
     environment:
-      POSTGRES_DB: defi_surv
+      POSTGRES_DB: raksha
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
     ports:
@@ -19,11 +19,11 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - defi-surv
+      - raksha
 
   redis:
     image: redis:7-alpine
-    container_name: defi-surv-redis
+    container_name: raksha-redis
     ports:
       - "6379:6379"
     volumes:
@@ -35,17 +35,17 @@ services:
       timeout: 3s
       retries: 5
     networks:
-      - defi-surv
+      - raksha
 
   indexer:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: defi-surv-core:local
-    container_name: defi-surv-indexer
+    image: raksha-core:local
+    container_name: raksha-indexer
     command: ["/app/bin/indexer"]
     environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/defi_surv
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/raksha
       REDIS_URL: redis://redis:6379
       RULES_REPO_PATH: /app/rules
       RUST_LOG: info
@@ -63,17 +63,17 @@ services:
         condition: service_healthy
     restart: unless-stopped
     networks:
-      - defi-surv
+      - raksha
 
   detector:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: defi-surv-core:local
-    container_name: defi-surv-detector
+    image: raksha-core:local
+    container_name: raksha-detector
     command: ["/app/bin/detector"]
     environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/defi_surv
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/raksha
       REDIS_URL: redis://redis:6379
       RULES_REPO_PATH: /app/rules
       RUST_LOG: info
@@ -89,17 +89,17 @@ services:
         condition: service_started
     restart: unless-stopped
     networks:
-      - defi-surv
+      - raksha
 
   orchestrator:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: defi-surv-core:local
-    container_name: defi-surv-orchestrator
+    image: raksha-core:local
+    container_name: raksha-orchestrator
     command: ["/app/bin/orchestrator"]
     environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/defi_surv
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/raksha
       REDIS_URL: redis://redis:6379
       RUST_LOG: info
     depends_on:
@@ -111,17 +111,17 @@ services:
         condition: service_started
     restart: unless-stopped
     networks:
-      - defi-surv
+      - raksha
 
   finality:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: defi-surv-core:local
-    container_name: defi-surv-finality
+    image: raksha-core:local
+    container_name: raksha-finality
     command: ["/app/bin/finality"]
     environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/defi_surv
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/raksha
       REDIS_URL: redis://redis:6379
       RUST_LOG: info
       ETH_WS_URL: ${ETH_WS_URL:-}
@@ -132,17 +132,17 @@ services:
         condition: service_healthy
     restart: unless-stopped
     networks:
-      - defi-surv
+      - raksha
 
   simlab:
     build:
-      context: ../../../defi-surv-simlab
+      context: ../../../raksha-simlab
       dockerfile: docker/Dockerfile
-    image: defi-surv-simlab:local
-    container_name: defi-surv-simlab
+    image: raksha-simlab:local
+    container_name: raksha-simlab
     command: ["run", "batch", "--chain", "ethereum", "--sink", "dual"]
     environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/defi_surv
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/raksha
       REDIS_URL: redis://redis:6379/0
       SIMLAB_SCENARIOS_DIR: /app/scenarios
       SIMLAB_DEFAULT_SINK: dual
@@ -154,16 +154,16 @@ services:
         condition: service_healthy
     restart: "no"
     networks:
-      - defi-surv
+      - raksha
     profiles:
       - simlab
 
   simlab-rpc:
     build:
-      context: ../../../defi-surv-simlab
+      context: ../../../raksha-simlab
       dockerfile: docker/Dockerfile
-    image: defi-surv-simlab:local
-    container_name: defi-surv-simlab-rpc
+    image: raksha-simlab:local
+    container_name: raksha-simlab-rpc
     command:
       [
         "serve",
@@ -181,14 +181,14 @@ services:
       PYTHONUNBUFFERED: "1"
     restart: unless-stopped
     networks:
-      - defi-surv
+      - raksha
     profiles:
       - simlab-rpc
 
   # Optional: Redis Commander for debugging
   redis-commander:
     image: rediscommander/redis-commander:latest
-    container_name: defi-surv-redis-commander
+    container_name: raksha-redis-commander
     environment:
       - REDIS_HOSTS=local:redis:6379
     ports:
@@ -196,16 +196,16 @@ services:
     depends_on:
       - redis
     networks:
-      - defi-surv
+      - raksha
     profiles:
       - debug
 
   # Optional: pgAdmin for database management
   pgadmin:
     image: dpage/pgadmin4:latest
-    container_name: defi-surv-pgadmin
+    container_name: raksha-pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@defi-surv.local
+      PGADMIN_DEFAULT_EMAIL: admin@raksha.local
       PGADMIN_DEFAULT_PASSWORD: admin
       PGADMIN_CONFIG_SERVER_MODE: 'False'
     ports:
@@ -213,7 +213,7 @@ services:
     depends_on:
       - postgres
     networks:
-      - defi-surv
+      - raksha
     profiles:
       - debug
 
@@ -224,5 +224,5 @@ volumes:
     driver: local
 
 networks:
-  defi-surv:
+  raksha:
     driver: bridge

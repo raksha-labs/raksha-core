@@ -70,8 +70,8 @@ cargo test -p risk-scorer
 3. Validate detection stream/table updates:
 
 ```bash
-docker exec -it defi-surv-redis redis-cli XINFO STREAM defi-surv:detections
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT id, tx_hash, protocol, severity, attack_family, created_at FROM detections WHERE attack_family='FlashLoan' ORDER BY created_at DESC LIMIT 20;"
+docker exec -it raksha-redis redis-cli XINFO STREAM raksha:detections
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT id, tx_hash, protocol, severity, attack_family, created_at FROM detections WHERE attack_family='FlashLoan' ORDER BY created_at DESC LIMIT 20;"
 ```
 
 ### 3. Pattern state verification
@@ -79,7 +79,7 @@ docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT id, 
 Check pattern snapshots and state persistence:
 
 ```bash
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT tenant_id, pattern_name, snapshot_data FROM pattern_snapshots WHERE pattern_name='flash_loan' ORDER BY created_at DESC LIMIT 10;"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT tenant_id, pattern_name, snapshot_data FROM pattern_snapshots WHERE pattern_name='flash_loan' ORDER BY created_at DESC LIMIT 10;"
 ```
 
 ## Operational Failure Modes

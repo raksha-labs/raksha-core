@@ -1,10 +1,10 @@
 # RDS Subnet Group
 resource "aws_db_subnet_group" "main" {
-  name       = "defi-surv-db-subnet-group"
+  name       = "raksha-db-subnet-group"
   subnet_ids = aws_subnet.private[*].id
 
   tags = merge(var.tags, {
-    Name = "defi-surv-db-subnet-group"
+    Name = "raksha-db-subnet-group"
   })
 }
 
@@ -16,7 +16,7 @@ resource "random_password" "db_password" {
 
 # Store DB password in Secrets Manager
 resource "aws_secretsmanager_secret" "db_password" {
-  name        = "defi-surv-db-password-${var.environment}"
+  name        = "raksha-db-password-${var.environment}"
   description = "PostgreSQL master password for DeFi Surveillance"
 
   tags = var.tags
@@ -29,7 +29,7 @@ resource "aws_secretsmanager_secret_version" "db_password" {
 
 # RDS PostgreSQL Instance
 resource "aws_db_instance" "main" {
-  identifier     = "defi-surv-db"
+  identifier     = "raksha-db"
   engine         = "postgres"
   engine_version = "15.5"
   instance_class = var.db_instance_class
@@ -55,18 +55,18 @@ resource "aws_db_instance" "main" {
   enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
   
   skip_final_snapshot       = false
-  final_snapshot_identifier = "defi-surv-db-final-snapshot-${formatdate("YYYY-MM-DD-hhmm", timestamp())}"
+  final_snapshot_identifier = "raksha-db-final-snapshot-${formatdate("YYYY-MM-DD-hhmm", timestamp())}"
   
   deletion_protection = true
 
   tags = merge(var.tags, {
-    Name = "defi-surv-postgres"
+    Name = "raksha-postgres"
   })
 }
 
 # Store full DATABASE_URL in Secrets Manager
 resource "aws_secretsmanager_secret" "database_url" {
-  name        = "defi-surv-database-url-${var.environment}"
+  name        = "raksha-database-url-${var.environment}"
   description = "Full PostgreSQL connection string"
 
   tags = var.tags

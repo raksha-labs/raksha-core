@@ -1,6 +1,6 @@
 # Security Group for ALB
 resource "aws_security_group" "alb" {
-  name        = "defi-surv-alb-sg"
+  name        = "raksha-alb-sg"
   description = "Security group for Application Load Balancer"
   vpc_id      = aws_vpc.main.id
 
@@ -29,13 +29,13 @@ resource "aws_security_group" "alb" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-alb-sg"
+    Name = "raksha-alb-sg"
   })
 }
 
 # Security Group for ECS Tasks
 resource "aws_security_group" "ecs_tasks" {
-  name        = "defi-surv-ecs-tasks-sg"
+  name        = "raksha-ecs-tasks-sg"
   description = "Security group for ECS tasks"
   vpc_id      = aws_vpc.main.id
 
@@ -64,13 +64,13 @@ resource "aws_security_group" "ecs_tasks" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-ecs-tasks-sg"
+    Name = "raksha-ecs-tasks-sg"
   })
 }
 
 # Security Group for RDS
 resource "aws_security_group" "rds" {
-  name        = "defi-surv-rds-sg"
+  name        = "raksha-rds-sg"
   description = "Security group for RDS PostgreSQL"
   vpc_id      = aws_vpc.main.id
 
@@ -91,13 +91,13 @@ resource "aws_security_group" "rds" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-rds-sg"
+    Name = "raksha-rds-sg"
   })
 }
 
 # Security Group for ElastiCache
 resource "aws_security_group" "elasticache" {
-  name        = "defi-surv-elasticache-sg"
+  name        = "raksha-elasticache-sg"
   description = "Security group for ElastiCache Redis"
   vpc_id      = aws_vpc.main.id
 
@@ -118,6 +118,6 @@ resource "aws_security_group" "elasticache" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-elasticache-sg"
+    Name = "raksha-elasticache-sg"
   })
 }

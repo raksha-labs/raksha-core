@@ -143,7 +143,7 @@ impl AppConfig {
 
         let state_manager = PersistenceConfig {
             postgres_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgresql://localhost/defi_surv".to_string()),
+                .unwrap_or_else(|_| "postgresql://localhost/raksha".to_string()),
             max_connections: env::var("DB_MAX_CONNECTIONS")
                 .ok()
                 .and_then(|v| v.parse().ok())

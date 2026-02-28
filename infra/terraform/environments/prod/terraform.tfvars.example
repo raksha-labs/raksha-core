@@ -9,8 +9,8 @@ public_certificate_arn  = "arn:aws:acm:eu-west-1:123456789012:certificate/replac
 enable_waf              = true
 image_tag               = "v1.0.0"
 
-github_org              = "defi-surv"
-github_repo             = "defi-surv-core"
+github_org              = "raksha-labs"
+github_repo             = "raksha-core"
 github_allowed_branches = ["master", "release/*"]
 
 create_oidc_provider    = false

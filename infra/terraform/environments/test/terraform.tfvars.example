@@ -7,8 +7,8 @@ alarm_emails          = ["you@example.com"]
 admin_access_mode     = "private-only"
 image_tag             = "master-latest"
 
-github_org            = "defi-surv"
-github_repo           = "defi-surv-core"
+github_org            = "raksha-labs"
+github_repo           = "raksha-core"
 github_allowed_branches = ["master"]
 
 # Set this to true only in one environment/account when bootstrapping OIDC.

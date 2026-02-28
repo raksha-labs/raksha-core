@@ -1,5 +1,5 @@
 resource "aws_security_group" "alb_public" {
-  name        = "defi-surv-${var.environment}-alb-public-sg"
+  name        = "raksha-${var.environment}-alb-public-sg"
   description = "Public ALB security group"
   vpc_id      = var.vpc_id
 
@@ -28,13 +28,13 @@ resource "aws_security_group" "alb_public" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-alb-public-sg"
+    Name = "raksha-${var.environment}-alb-public-sg"
   })
 }
 
 resource "aws_security_group" "alb_admin_internal" {
   count       = var.enable_internal_admin_alb ? 1 : 0
-  name        = "defi-surv-${var.environment}-alb-admin-internal-sg"
+  name        = "raksha-${var.environment}-alb-admin-internal-sg"
   description = "Internal admin ALB security group"
   vpc_id      = var.vpc_id
 
@@ -55,12 +55,12 @@ resource "aws_security_group" "alb_admin_internal" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-alb-admin-internal-sg"
+    Name = "raksha-${var.environment}-alb-admin-internal-sg"
   })
 }
 
 resource "aws_security_group" "ecs_tasks" {
-  name        = "defi-surv-${var.environment}-ecs-tasks-sg"
+  name        = "raksha-${var.environment}-ecs-tasks-sg"
   description = "ECS task ENI security group"
   vpc_id      = var.vpc_id
 
@@ -100,12 +100,12 @@ resource "aws_security_group" "ecs_tasks" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-ecs-tasks-sg"
+    Name = "raksha-${var.environment}-ecs-tasks-sg"
   })
 }
 
 resource "aws_security_group" "ecs_instances" {
-  name        = "defi-surv-${var.environment}-ecs-instances-sg"
+  name        = "raksha-${var.environment}-ecs-instances-sg"
   description = "ECS EC2 container instance security group"
   vpc_id      = var.vpc_id
 
@@ -126,12 +126,12 @@ resource "aws_security_group" "ecs_instances" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-ecs-instances-sg"
+    Name = "raksha-${var.environment}-ecs-instances-sg"
   })
 }
 
 resource "aws_security_group" "database" {
-  name        = "defi-surv-${var.environment}-db-sg"
+  name        = "raksha-${var.environment}-db-sg"
   description = "Database access security group"
   vpc_id      = var.vpc_id
 
@@ -152,12 +152,12 @@ resource "aws_security_group" "database" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-db-sg"
+    Name = "raksha-${var.environment}-db-sg"
   })
 }
 
 resource "aws_security_group" "redis" {
-  name        = "defi-surv-${var.environment}-redis-sg"
+  name        = "raksha-${var.environment}-redis-sg"
   description = "Redis access security group"
   vpc_id      = var.vpc_id
 
@@ -178,6 +178,6 @@ resource "aws_security_group" "redis" {
   }
 
   tags = merge(var.tags, {
-    Name = "defi-surv-${var.environment}-redis-sg"
+    Name = "raksha-${var.environment}-redis-sg"
   })
 }

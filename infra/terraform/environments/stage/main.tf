@@ -3,7 +3,7 @@ provider "aws" {
 
   default_tags {
     tags = merge({
-      Project     = "defi-surv"
+      Project     = "raksha"
       Environment = var.environment
       ManagedBy   = "terraform"
     }, var.tags)
@@ -16,7 +16,7 @@ locals {
     for svc in local.service_catalog_raw.services :
     svc.service_name => svc
   }
-  secret_prefix = "defi-surv/${var.environment}"
+  secret_prefix = "raksha/${var.environment}"
 }
 
 module "network" {
@@ -129,7 +129,7 @@ locals {
 resource "aws_ssm_parameter" "core_database_url_secret_arn" {
   count = var.enable_managed_data ? 1 : 0
 
-  name      = "/defi-surv/${var.environment}/core/database_url_secret_arn"
+  name      = "/raksha/${var.environment}/core/database_url_secret_arn"
   type      = "String"
   value     = local.database_url_secret_arn
   overwrite = true
@@ -139,7 +139,7 @@ resource "aws_ssm_parameter" "core_database_url_secret_arn" {
 resource "aws_ssm_parameter" "core_redis_url_secret_arn" {
   count = var.enable_managed_data ? 1 : 0
 
-  name      = "/defi-surv/${var.environment}/core/redis_url_secret_arn"
+  name      = "/raksha/${var.environment}/core/redis_url_secret_arn"
   type      = "String"
   value     = local.redis_url_secret_arn
   overwrite = true
@@ -147,7 +147,7 @@ resource "aws_ssm_parameter" "core_redis_url_secret_arn" {
 }
 
 resource "aws_ssm_parameter" "core_service_discovery_namespace" {
-  name      = "/defi-surv/${var.environment}/core/service_discovery_namespace"
+  name      = "/raksha/${var.environment}/core/service_discovery_namespace"
   type      = "String"
   value     = module.compute.service_discovery_namespace_name
   overwrite = true
@@ -155,7 +155,7 @@ resource "aws_ssm_parameter" "core_service_discovery_namespace" {
 }
 
 resource "aws_ssm_parameter" "core_cluster_name" {
-  name      = "/defi-surv/${var.environment}/core/cluster_name"
+  name      = "/raksha/${var.environment}/core/cluster_name"
   type      = "String"
   value     = module.compute.cluster_name
   overwrite = true
@@ -163,7 +163,7 @@ resource "aws_ssm_parameter" "core_cluster_name" {
 }
 
 resource "aws_ssm_parameter" "core_contract_version" {
-  name      = "/defi-surv/${var.environment}/core/contract_version"
+  name      = "/raksha/${var.environment}/core/contract_version"
   type      = "String"
   value     = local.core_contract_version
   overwrite = true
@@ -173,7 +173,7 @@ resource "aws_ssm_parameter" "core_contract_version" {
 resource "aws_wafv2_web_acl" "public" {
   count = var.enable_waf && module.compute.public_alb_arn != null ? 1 : 0
 
-  name  = "defi-surv-${var.environment}-waf"
+  name  = "raksha-${var.environment}-waf"
   scope = "REGIONAL"
 
   default_action {
@@ -197,7 +197,7 @@ resource "aws_wafv2_web_acl" "public" {
 
     visibility_config {
       cloudwatch_metrics_enabled = true
-      metric_name                = "defi-surv-${var.environment}-rate-limit"
+      metric_name                = "raksha-${var.environment}-rate-limit"
       sampled_requests_enabled   = true
     }
   }
@@ -219,14 +219,14 @@ resource "aws_wafv2_web_acl" "public" {
 
     visibility_config {
       cloudwatch_metrics_enabled = true
-      metric_name                = "defi-surv-${var.environment}-common-rules"
+      metric_name                = "raksha-${var.environment}-common-rules"
       sampled_requests_enabled   = true
     }
   }
 
   visibility_config {
     cloudwatch_metrics_enabled = true
-    metric_name                = "defi-surv-${var.environment}-waf"
+    metric_name                = "raksha-${var.environment}-waf"
     sampled_requests_enabled   = true
   }
 
@@ -246,7 +246,7 @@ module "cost_controls" {
   environment           = var.environment
   budget_limit_usd      = var.budget_limit_usd
   alert_email_addresses = var.alarm_emails
-  name_prefix           = "defi-surv"
+  name_prefix           = "raksha"
   tags                  = var.tags
 }
 

@@ -4,14 +4,14 @@ variable "environment" {
 }
 
 variable "secret_prefix" {
-  description = "Secret prefix, for example defi-surv/test"
+  description = "Secret prefix, for example raksha/test"
   type        = string
 }
 
 variable "db_name" {
   description = "Database name"
   type        = string
-  default     = "defi_surv"
+  default     = "raksha"
 }
 
 variable "db_username" {

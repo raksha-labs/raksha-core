@@ -30,7 +30,7 @@ while IFS= read -r service; do
     continue
   fi
 
-  ecs_service="defi-surv-${ENVIRONMENT}-${service}"
+  ecs_service="raksha-${ENVIRONMENT}-${service}"
   log "forcing deployment ${ecs_service}"
   aws ecs update-service \
     --cluster "${CLUSTER_NAME}" \

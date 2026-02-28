@@ -1,6 +1,6 @@
 # ElastiCache Subnet Group
 resource "aws_elasticache_subnet_group" "main" {
-  name       = "defi-surv-cache-subnet-group"
+  name       = "raksha-cache-subnet-group"
   subnet_ids = aws_subnet.private[*].id
 
   tags = var.tags
@@ -8,7 +8,7 @@ resource "aws_elasticache_subnet_group" "main" {
 
 # ElastiCache Redis Replication Group
 resource "aws_elasticache_replication_group" "main" {
-  replication_group_id = "defi-surv-redis"
+  replication_group_id = "raksha-redis"
   description         = "Redis cluster for DeFi Surveillance event streams"
 
   engine               = "redis"
@@ -35,13 +35,13 @@ resource "aws_elasticache_replication_group" "main" {
   auto_minor_version_upgrade = true
 
   tags = merge(var.tags, {
-    Name = "defi-surv-redis"
+    Name = "raksha-redis"
   })
 }
 
 # Store Redis URL in Secrets Manager
 resource "aws_secretsmanager_secret" "redis_url" {
-  name        = "defi-surv-redis-url-${var.environment}"
+  name        = "raksha-redis-url-${var.environment}"
   description = "Redis connection string"
 
   tags = var.tags

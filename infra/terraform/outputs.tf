@@ -1,10 +1,10 @@
 output "ecs_cluster_name" {
-  value       = aws_ecs_cluster.defi_surv.name
+  value       = aws_ecs_cluster.raksha.name
   description = "ECS cluster used for DeFi surveillance services"
 }
 
 output "ecs_cluster_arn" {
-  value       = aws_ecs_cluster.defi_surv.arn
+  value       = aws_ecs_cluster.raksha.arn
   description = "ARN of the ECS cluster"
 }
 

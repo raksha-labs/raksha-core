@@ -1,6 +1,6 @@
 # Local Testing Quick Start
 
-This guide shows you how to run defi-surv-core locally with Docker Compose.
+This guide shows you how to run raksha-core locally with Docker Compose.
 
 ## Prerequisites
 
@@ -10,7 +10,7 @@ This guide shows you how to run defi-surv-core locally with Docker Compose.
 ## Step 1: Configure Environment
 
 ```bash
-cd defi-surv-core/infra
+cd raksha-core/infra
 
 # Copy the environment template
 cp .env.example .env
@@ -59,15 +59,15 @@ docker compose logs -f indexer
 
 ### Check database is initialized:
 ```bash
-docker compose exec postgres psql -U postgres -d defi_surv -c "\dt"
-docker compose exec postgres psql -U postgres -d defi_surv -c "SELECT * FROM patterns;"
+docker compose exec postgres psql -U postgres -d raksha -c "\dt"
+docker compose exec postgres psql -U postgres -d raksha -c "SELECT * FROM patterns;"
 ```
 
 ### Check Redis streams:
 ```bash
 # Should see events flowing through
-docker compose exec redis redis-cli XINFO STREAM defi-surv:unified-events
-docker compose exec redis redis-cli XINFO STREAM defi-surv:detections
+docker compose exec redis redis-cli XINFO STREAM raksha:unified-events
+docker compose exec redis redis-cli XINFO STREAM raksha:detections
 ```
 
 ## What You Should See
@@ -180,7 +180,7 @@ docker compose --profile debug up -d
 
 Access:
 - **Redis Commander**: http://localhost:8081
-- **pgAdmin**: http://localhost:8080 (email: admin@defi-surv.local, password: admin)
+- **pgAdmin**: http://localhost:8080 (email: admin@raksha.local, password: admin)
 
 ## Next Steps
 

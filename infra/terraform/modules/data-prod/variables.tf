@@ -4,7 +4,7 @@ variable "environment" {
 }
 
 variable "secret_prefix" {
-  description = "Secret prefix, for example defi-surv/prod"
+  description = "Secret prefix, for example raksha/prod"
   type        = string
 }
 
@@ -44,7 +44,7 @@ variable "db_max_allocated_storage" {
 variable "db_name" {
   description = "Database name"
   type        = string
-  default     = "defi_surv"
+  default     = "raksha"
 }
 
 variable "db_username" {
