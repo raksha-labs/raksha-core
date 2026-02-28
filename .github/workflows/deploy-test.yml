@@ -2,7 +2,7 @@ name: Deploy Test Environment
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'infra/**'
       - 'apps/**'

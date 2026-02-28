@@ -2,7 +2,7 @@ name: Build and Push Core Images
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags:
       - 'v*'
     paths:
@@ -34,6 +34,6 @@ jobs:
       aws_region: eu-west-1
       service_filter: ${{ github.event.inputs.service_filter || '' }}
       image_tag: ${{ format('sha-{0}', github.sha) }}
-      push_latest: ${{ github.ref == 'refs/heads/main' }}
+      push_latest: ${{ github.ref == 'refs/heads/master' }}
     secrets:
       aws_role_arn: ${{ secrets.AWS_IMAGES_ROLE_ARN }}

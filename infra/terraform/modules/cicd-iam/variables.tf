@@ -16,7 +16,7 @@ variable "github_repo" {
 variable "github_allowed_branches" {
   description = "Allowed branch names for OIDC role assumption"
   type        = list(string)
-  default     = ["main"]
+  default     = ["master"]
 }
 
 variable "allow_pull_request" {

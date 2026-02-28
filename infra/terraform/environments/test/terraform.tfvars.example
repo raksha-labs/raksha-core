@@ -5,11 +5,11 @@ enable_managed_data   = false
 budget_limit_usd      = 100
 alarm_emails          = ["you@example.com"]
 admin_access_mode     = "private-only"
-image_tag             = "main-latest"
+image_tag             = "master-latest"
 
 github_org            = "defi-surv"
 github_repo           = "defi-surv-core"
-github_allowed_branches = ["main"]
+github_allowed_branches = ["master"]
 
 # Set this to true only in one environment/account when bootstrapping OIDC.
 create_oidc_provider  = false

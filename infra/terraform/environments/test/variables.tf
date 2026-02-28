@@ -190,7 +190,7 @@ variable "github_repo" {
 variable "github_allowed_branches" {
   description = "Branches allowed to assume OIDC roles"
   type        = list(string)
-  default     = ["main"]
+  default     = ["master"]
 }
 
 variable "create_oidc_provider" {
