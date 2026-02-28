@@ -381,7 +381,7 @@ fn build_detection(
         fl.chain_slug,
     );
 
-        DetectionResult {
+    DetectionResult {
         detection_id: Uuid::new_v4(),
         pattern_id: PATTERN_ID.to_string(),
         event_key: Some(format!("flash_loan:{}:{}:{}", event.tenant_id, rule.rule_id, tx_hash)),
@@ -414,6 +414,9 @@ fn build_detection(
             },
         ],
         risk_score: RiskScore::default(),
+        incident_transition: None,
+        context_classification: None,
+        confidence_breakdown: std::collections::HashMap::new(),
         oracle_context: std::collections::HashMap::new(),
         actions_recommended: vec![
             "Pause affected protocol pools immediately.".to_string(),

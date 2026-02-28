@@ -1,0 +1,51 @@
+name: Reusable Image Build
+
+on:
+  workflow_call:
+    inputs:
+      aws_region:
+        required: false
+        type: string
+        default: eu-west-1
+      service_filter:
+        required: false
+        type: string
+        default: ''
+      image_tag:
+        required: false
+        type: string
+        default: ''
+      push_latest:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      aws_role_arn:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Build and push images
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          SERVICE_FILTER: ${{ inputs.service_filter }}
+          IMAGE_TAG: ${{ inputs.image_tag != '' && inputs.image_tag || format('sha-{0}', github.sha) }}
+          PUSH_LATEST: ${{ inputs.push_latest }}
+        run: |
+          scripts/ci/build_push_images.sh

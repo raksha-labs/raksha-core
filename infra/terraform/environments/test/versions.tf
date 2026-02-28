@@ -12,6 +12,6 @@ terraform {
     }
   }
 
-  # Configure backend per account/environment, for example S3 + DynamoDB locking.
-  # backend "s3" {}
+  # Configure backend via -backend-config at init time.
+  backend "s3" {}
 }

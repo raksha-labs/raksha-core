@@ -3,11 +3,12 @@ use std::{collections::HashMap, time::Duration};
 use notifier::NotifierGatewayClient;
 use anyhow::Result;
 use chrono::Utc;
-use event_schema::{AlertEvent, Chain, DetectionResult, LifecycleState, Severity};
+use event_schema::{
+    AlertEvent, Chain, DetectionResult, FinalityStatus, IncidentTransition, LifecycleState, Severity,
+};
 use common::{start_health_check_server, ShutdownSignal};
 use dotenv::dotenv;
-use state_manager::RedisStreamPublisher;
-use state_manager::PostgresRepository;
+use state_manager::{IncidentKey, IncidentRecord, PostgresRepository, RedisStreamPublisher};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -120,6 +121,7 @@ async fn main() -> Result<()> {
             }
 
             let alert = alert_from_detection(&detection);
+            let alert = attach_incident_context(alert, &detection, repository.as_ref()).await;
             let dispatched = dispatch_alert(&alert, &notifier_gateway, repository.as_ref(), &stream).await;
             alerts_by_event_key.insert(event_key.to_string(), dispatched);
             processed += 1;
@@ -182,7 +184,61 @@ async fn main() -> Result<()> {
 
             let mut updated_alert = existing;
             updated_alert.lifecycle_state = update.lifecycle_state.clone();
+            updated_alert.finality_status = match update.lifecycle_state {
+                LifecycleState::Confirmed => FinalityStatus::Finalized,
+                LifecycleState::Retracted => FinalityStatus::Tentative,
+                _ => updated_alert.finality_status,
+            };
             updated_alert.created_at = Utc::now();
+
+            if let Some(repo) = repository.as_ref() {
+                if let Some(incident_id) = updated_alert.incident_id.as_deref() {
+                    let severity_text = format!("{:?}", updated_alert.severity).to_lowercase();
+                    let (transition, status, closes_incident, reason) = match update.lifecycle_state {
+                        LifecycleState::Retracted => ("retract", "retracted", true, "finality_reorg_retraction"),
+                        LifecycleState::Confirmed => ("update", "active", false, "finality_confirmation"),
+                        _ => ("update", "active", false, "finality_update"),
+                    };
+                    if let Err(error) = repo
+                        .update_incident_state(
+                            incident_id,
+                            status,
+                            &severity_text,
+                            updated_alert.created_at,
+                            closes_incident,
+                        )
+                        .await
+                    {
+                        warn!(
+                            error = ?error,
+                            incident_id = incident_id,
+                            "failed to update incident state from finality update"
+                        );
+                    }
+                    if let Err(error) = repo
+                        .append_incident_event(
+                            incident_id,
+                            transition,
+                            None,
+                            Some(status),
+                            Some(reason),
+                            serde_json::json!({
+                                "event_key": update.event_key,
+                                "lifecycle_state": format!("{:?}", update.lifecycle_state).to_lowercase(),
+                                "block_number": update.block_number,
+                            }),
+                            updated_alert.created_at,
+                        )
+                        .await
+                    {
+                        warn!(
+                            error = ?error,
+                            incident_id = incident_id,
+                            "failed to append incident event from finality update"
+                        );
+                    }
+                }
+            }
             let dispatched =
                 dispatch_alert(&updated_alert, &notifier_gateway, repository.as_ref(), &stream).await;
             alerts_by_event_key.insert(update.event_key.clone(), dispatched);
@@ -233,9 +289,11 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
         chain_slug: detection.chain_slug.clone(),
         protocol: detection.protocol.clone(),
         lifecycle_state: detection.lifecycle_state.clone(),
+        finality_status: FinalityStatus::Tentative,
         severity: detection.severity.clone(),
         risk_score: detection.risk_score.score,
         confidence: detection.risk_score.confidence,
+        confidence_breakdown: detection.confidence_breakdown.clone(),
         rule_ids: detection.triggered_rule_ids.clone(),
         channel_routes: vec![
             "webhook".to_string(),
@@ -246,11 +304,173 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
         dedup_key: detection.event_key.clone(),
         attribution: detection.risk_score.attribution.clone(),
         blast_radius: Vec::new(),
+        exposure_summary: std::collections::HashMap::new(),
         tx_hash: detection.tx_hash.clone(),
         block_number: detection.block_number as u64,
         oracle_context: detection.oracle_context.clone(),
         actions_recommended: detection.actions_recommended.clone(),
         created_at: Utc::now(),
+    }
+}
+
+async fn attach_incident_context(
+    mut alert: AlertEvent,
+    detection: &DetectionResult,
+    repository: Option<&PostgresRepository>,
+) -> AlertEvent {
+    let Some(repo) = repository else {
+        return alert;
+    };
+
+    let tenant_id = resolve_alert_tenant_id(alert.tenant_id.clone());
+    let transition = detection
+        .incident_transition
+        .clone()
+        .unwrap_or(IncidentTransition::Trigger);
+    let transition_str = incident_transition_str(&transition);
+    let incident_status = incident_status_for_transition(&transition);
+    let closes_incident = matches!(transition, IncidentTransition::Resolve | IncidentTransition::Retract);
+    let now = Utc::now();
+    let key = IncidentKey {
+        tenant_id: &tenant_id,
+        pattern_id: &detection.pattern_id,
+        subject_type: detection.subject_type.as_deref(),
+        subject_key: detection.subject_key.as_deref(),
+        chain_slug: &detection.chain_slug,
+    };
+
+    let incident = match repo.find_active_incident(key).await {
+        Ok(Some(existing)) => {
+            existing
+        }
+        Ok(None) => {
+            let created = IncidentRecord {
+                incident_id: Uuid::new_v4().to_string(),
+                tenant_id: tenant_id.clone(),
+                pattern_id: detection.pattern_id.clone(),
+                subject_type: detection.subject_type.clone(),
+                subject_key: detection.subject_key.clone(),
+                chain_slug: detection.chain_slug.clone(),
+                status: incident_status.to_string(),
+                current_severity: format!("{:?}", detection.severity).to_lowercase(),
+            };
+            if let Err(error) = repo.create_incident(&created, now).await {
+                warn!(
+                    error = ?error,
+                    tenant_id = %tenant_id,
+                    pattern_id = %detection.pattern_id,
+                    "failed to create incident"
+                );
+            }
+            created
+        }
+        Err(error) => {
+            warn!(
+                error = ?error,
+                tenant_id = %tenant_id,
+                pattern_id = %detection.pattern_id,
+                "failed to find active incident"
+            );
+            return alert;
+        }
+    };
+
+    alert.incident_id = Some(incident.incident_id.clone());
+    let severity_text = format!("{:?}", detection.severity).to_lowercase();
+    if let Err(error) = repo
+        .update_incident_state(
+            &incident.incident_id,
+            incident_status,
+            &severity_text,
+            now,
+            closes_incident,
+        )
+        .await
+    {
+        warn!(
+            error = ?error,
+            incident_id = %incident.incident_id,
+            "failed to update incident state"
+        );
+    }
+
+    let event_payload = serde_json::json!({
+        "pattern_id": &detection.pattern_id,
+        "severity": severity_text,
+        "event_key": &detection.event_key,
+        "context_classification": &detection.context_classification,
+        "confidence_breakdown": &detection.confidence_breakdown,
+    });
+    if let Err(error) = repo
+        .append_incident_event(
+            &incident.incident_id,
+            transition_str,
+            Some(incident.status.as_str()),
+            Some(incident_status),
+            detection.description.as_deref(),
+            event_payload,
+            now,
+        )
+        .await
+    {
+        warn!(
+            error = ?error,
+            incident_id = %incident.incident_id,
+            "failed to append incident event"
+        );
+    }
+
+    let classification = detection
+        .context_classification
+        .as_ref()
+        .map(|value| match value {
+            event_schema::ContextClassification::Isolated => "isolated",
+            event_schema::ContextClassification::Systemic => "systemic",
+            event_schema::ContextClassification::None => "none",
+        });
+    if let Err(error) = repo
+        .append_incident_context_snapshot(
+            &incident.incident_id,
+            classification,
+            Some(detection.risk_score.score),
+            Some(detection.risk_score.confidence),
+            serde_json::json!({
+                "confidence_breakdown": &detection.confidence_breakdown,
+                "signals": &detection.signals,
+            }),
+            now,
+        )
+        .await
+    {
+        warn!(
+            error = ?error,
+            incident_id = %incident.incident_id,
+            "failed to append incident context snapshot"
+        );
+    }
+
+    alert
+}
+
+fn incident_transition_str(value: &IncidentTransition) -> &'static str {
+    match value {
+        IncidentTransition::Trigger => "trigger",
+        IncidentTransition::Escalate => "escalate",
+        IncidentTransition::Deescalate => "deescalate",
+        IncidentTransition::Resolve => "resolve",
+        IncidentTransition::Retract => "retract",
+        IncidentTransition::Update => "update",
+    }
+}
+
+fn incident_status_for_transition(value: &IncidentTransition) -> &'static str {
+    match value {
+        IncidentTransition::Trigger => "triggered",
+        IncidentTransition::Escalate => "active",
+        IncidentTransition::Deescalate => "active",
+        IncidentTransition::Update => "active",
+        IncidentTransition::Resolve => "resolved",
+        IncidentTransition::Retract => "retracted",
     }
 }
 

@@ -11,8 +11,8 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use event_schema::{
-    AttackFamily, Chain, DetectionResult, DetectionSignal, LifecycleState, RiskScore, Severity,
-    SignalType, UnifiedEvent,
+    AttackFamily, Chain, ContextClassification, DetectionResult, DetectionSignal, IncidentTransition,
+    LifecycleState, RiskScore, Severity, SignalType, UnifiedEvent,
 };
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -98,6 +98,12 @@ impl DpegSourceFilter {
 pub struct DpegToggles {
     #[serde(default)]
     pub oracle_confirmation: bool,
+    #[serde(default)]
+    pub volume_confirmation: bool,
+    #[serde(default)]
+    pub contagion_detection: bool,
+    #[serde(default)]
+    pub liquidity_depth_check: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,11 +128,39 @@ pub struct DpegPolicy {
     #[serde(default)]
     pub severity_bands: DpegSeverityBands,
     #[serde(default)]
+    pub severity_bands_isolated: Option<DpegSeverityBands>,
+    #[serde(default)]
+    pub severity_bands_systemic: Option<DpegSeverityBands>,
+    #[serde(default = "default_isolated_floor_pct")]
+    pub isolated_floor_pct: f64,
+    #[serde(default = "default_systemic_floor_pct")]
+    pub systemic_floor_pct: f64,
+    #[serde(default = "default_deescalation_blocks")]
+    pub deescalation_blocks: i64,
+    #[serde(default = "default_resolution_blocks")]
+    pub resolution_blocks: i64,
+    #[serde(default)]
     pub source_filter: DpegSourceFilter,
     #[serde(default)]
     pub toggles: DpegToggles,
     #[serde(default, deserialize_with = "deserialize_source_overrides")]
     pub source_overrides: HashMap<String, DpegSourceOverride>,
+}
+
+fn default_isolated_floor_pct() -> f64 {
+    0.5
+}
+
+fn default_systemic_floor_pct() -> f64 {
+    0.01
+}
+
+fn default_deescalation_blocks() -> i64 {
+    5
+}
+
+fn default_resolution_blocks() -> i64 {
+    30
 }
 
 fn deserialize_source_overrides<'de, D>(
@@ -177,6 +211,18 @@ impl DpegPolicy {
         if self.stale_timeout_ms <= 0 {
             return Err(anyhow!("stale_timeout_ms must be > 0"));
         }
+        if self.isolated_floor_pct <= 0.0 {
+            return Err(anyhow!("isolated_floor_pct must be > 0"));
+        }
+        if self.systemic_floor_pct <= 0.0 {
+            return Err(anyhow!("systemic_floor_pct must be > 0"));
+        }
+        if self.deescalation_blocks <= 0 {
+            return Err(anyhow!("deescalation_blocks must be > 0"));
+        }
+        if self.resolution_blocks <= 0 {
+            return Err(anyhow!("resolution_blocks must be > 0"));
+        }
         Ok(())
     }
 
@@ -214,6 +260,33 @@ impl DpegPolicy {
             .count();
         if configured_enabled == 0 { self.min_sources } else { configured_enabled }
     }
+
+    fn isolated_bands(&self) -> DpegSeverityBands {
+        self.severity_bands_isolated
+            .clone()
+            .or_else(|| {
+                if self.severity_bands.medium > 0.0 {
+                    Some(self.severity_bands.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(DpegSeverityBands {
+                medium: 0.5,
+                high: 1.0,
+                critical: 5.0,
+            })
+    }
+
+    fn systemic_bands(&self) -> DpegSeverityBands {
+        self.severity_bands_systemic
+            .clone()
+            .unwrap_or(DpegSeverityBands {
+                medium: 0.01,
+                high: 0.25,
+                critical: 0.25,
+            })
+    }
 }
 
 // ─── Cached quote + state ─────────────────────────────────────────────────────
@@ -233,6 +306,10 @@ struct DpegAlertState {
     pub last_alerted_at: Option<DateTime<Utc>>,
     pub last_divergence_pct: Option<f64>,
     pub last_severity: Option<String>,
+    pub last_classification: Option<String>,
+    pub trigger_floor_pct: Option<f64>,
+    pub below_severity_blocks: i64,
+    pub below_trigger_blocks: i64,
 }
 
 // ─── Pattern impl ─────────────────────────────────────────────────────────────
@@ -246,6 +323,41 @@ pub struct DpegPattern {
     quote_cache: HashMap<(String, String), HashMap<String, QuoteInput>>,
     /// (tenant_id, market_key) → in-memory alert state
     state_cache: HashMap<(String, String), DpegAlertState>,
+}
+
+impl DpegPattern {
+    fn classify_context(&self, policy: &DpegPolicy, now: DateTime<Utc>) -> ContextClassification {
+        if !policy.toggles.contagion_detection {
+            return ContextClassification::Isolated;
+        }
+
+        let tenant_id = policy.tenant_id.as_str();
+        let mut systemic_markets = 0usize;
+        for ((candidate_tenant, candidate_market), candidate_policy) in &self.policies {
+            if candidate_tenant != tenant_id {
+                continue;
+            }
+            if !candidate_market.to_ascii_uppercase().ends_with("/USD") {
+                continue;
+            }
+            let Some(quotes) = self
+                .quote_cache
+                .get(&(candidate_tenant.clone(), candidate_market.clone()))
+            else {
+                continue;
+            };
+            let quote_values = quotes.values().cloned().collect::<Vec<_>>();
+            if let Some(divergence_pct) = market_divergence_pct(candidate_policy, &quote_values, now) {
+                if divergence_pct >= policy.systemic_floor_pct {
+                    systemic_markets += 1;
+                }
+            }
+            if systemic_markets >= 2 {
+                return ContextClassification::Systemic;
+            }
+        }
+        ContextClassification::Isolated
+    }
 }
 
 #[async_trait]
@@ -340,15 +452,22 @@ impl DetectionPattern for DpegPattern {
 
         let current_state = self.state_cache.get(&policy_key).cloned().unwrap_or_default();
         let quotes: Vec<QuoteInput> = market_quotes.values().cloned().collect();
-        let outcome = evaluate_policy(&policy, &quotes, &current_state, now)?;
+        let classification = self.classify_context(&policy, now);
+        let outcome = evaluate_policy(&policy, &quotes, &current_state, now, classification)?;
 
         // Persist snapshot regardless of whether an alert fired.
         let snapshot_data = serde_json::json!({
             "weighted_median_price": outcome.snapshot.weighted_median_price,
             "divergence_pct": outcome.snapshot.divergence_pct,
             "source_count": outcome.snapshot.source_count,
+            "eligible_source_count": outcome.snapshot.eligible_source_count,
             "quorum_met": outcome.snapshot.quorum_met,
             "breach_active": outcome.snapshot.breach_active,
+            "oracle_confirmed": outcome.snapshot.oracle_confirmed,
+            "context_classification": outcome.snapshot.classification,
+            "trigger_floor_pct": outcome.snapshot.trigger_floor_pct,
+            "confidence_breakdown": outcome.snapshot.confidence_breakdown,
+            "incident_transition": outcome.transition,
             "peg_target": policy.peg_target,
         });
         let severity_str = outcome
@@ -377,8 +496,14 @@ impl DetectionPattern for DpegPattern {
 
         // Emit detection if needed.
         if outcome.should_emit_alert {
-            if let Some(severity) = outcome.snapshot.severity.clone() {
-                return Ok(Some(build_detection(&policy, &outcome.snapshot, severity, now)));
+            if let Some(severity) = outcome.emitted_severity.clone() {
+                return Ok(Some(build_detection(
+                    &policy,
+                    &outcome.snapshot,
+                    severity,
+                    outcome.transition,
+                    now,
+                )));
             }
         }
 
@@ -395,6 +520,10 @@ struct ConsensusSnapshot {
     eligible_source_count: usize,
     quorum_met: bool,
     breach_active: bool,
+    oracle_confirmed: bool,
+    classification: ContextClassification,
+    trigger_floor_pct: f64,
+    confidence_breakdown: HashMap<String, f64>,
     severity: Option<Severity>,
 }
 
@@ -402,6 +531,8 @@ struct EvaluationOutcome {
     snapshot: ConsensusSnapshot,
     should_emit_alert: bool,
     next_state: DpegAlertState,
+    transition: Option<IncidentTransition>,
+    emitted_severity: Option<Severity>,
 }
 
 fn evaluate_policy(
@@ -409,8 +540,10 @@ fn evaluate_policy(
     quotes: &[QuoteInput],
     current_state: &DpegAlertState,
     now: DateTime<Utc>,
+    classification: ContextClassification,
 ) -> Result<EvaluationOutcome> {
     let mut weighted_points = Vec::<(f64, f64)>::new();
+    let mut eligible_quotes = Vec::<QuoteInput>::new();
     for quote in quotes {
         if !policy.source_enabled(&quote.source_id, &quote.source_kind) {
             continue;
@@ -430,7 +563,17 @@ fn evaluate_policy(
             continue;
         }
         weighted_points.push((quote.price, weight));
+        eligible_quotes.push(quote.clone());
     }
+
+    let selected_bands = match classification {
+        ContextClassification::Systemic => policy.systemic_bands(),
+        _ => policy.isolated_bands(),
+    };
+    let trigger_floor_pct = match classification {
+        ContextClassification::Systemic => policy.systemic_floor_pct,
+        _ => policy.isolated_floor_pct,
+    };
 
     if weighted_points.is_empty() {
         return Ok(EvaluationOutcome {
@@ -441,10 +584,16 @@ fn evaluate_policy(
                 eligible_source_count: 0,
                 quorum_met: false,
                 breach_active: false,
+                oracle_confirmed: false,
+                classification,
+                trigger_floor_pct,
+                confidence_breakdown: HashMap::new(),
                 severity: None,
             },
             should_emit_alert: false,
             next_state: DpegAlertState::default(),
+            transition: None,
+            emitted_severity: None,
         });
     }
 
@@ -452,7 +601,7 @@ fn evaluate_policy(
         weighted_median(&weighted_points).ok_or_else(|| anyhow!("weighted median failed"))?;
     let divergence_pct =
         ((weighted_median_price - policy.peg_target).abs() / policy.peg_target) * 100.0;
-    let severity = severity_for_divergence(divergence_pct, &policy.severity_bands);
+    let severity = severity_for_divergence(divergence_pct, &selected_bands);
 
     let source_count = weighted_points.len();
     let enabled_source_count = policy.enabled_source_count().max(1);
@@ -463,10 +612,30 @@ fn evaluate_policy(
         .max(1);
     let source_ratio = source_count as f64 / enabled_source_count as f64;
     let quorum_met = source_count >= min_healthy && source_ratio >= policy.quorum_pct;
-    let breach_active = quorum_met && severity.is_some();
+    let oracle_confirmed = oracle_confirmation_met(
+        policy,
+        &eligible_quotes,
+        trigger_floor_pct,
+        now,
+        policy.peg_target,
+    );
+    let confidence_breakdown = compute_confidence_breakdown(
+        policy,
+        &eligible_quotes,
+        weighted_median_price,
+        oracle_confirmed,
+        policy.peg_target,
+    );
+    let threshold_breach = divergence_pct >= trigger_floor_pct && severity.is_some();
+    let breach_active = quorum_met
+        && threshold_breach
+        && (!policy.toggles.oracle_confirmation || oracle_confirmed);
 
     let mut next_state = current_state.clone();
     let mut should_emit_alert = false;
+    let mut transition = None;
+    let mut emitted_severity = None;
+    let previous_active = severity_from_str(next_state.last_severity.as_deref());
 
     if breach_active {
         if next_state.breach_started_at.is_none() {
@@ -484,22 +653,88 @@ fn evaluate_policy(
             .unwrap_or(false);
 
         let current_rank = severity_rank(severity.as_ref());
-        let previous_rank = severity_rank_str(next_state.last_severity.as_deref());
-        let severity_escalated = current_rank > previous_rank;
+        let previous_rank = severity_rank(previous_active.as_ref());
+        let is_new_incident = previous_active.is_none();
 
-        if sustained && (!cooldown_active || severity_escalated) {
-            should_emit_alert = true;
-            next_state.last_alerted_at = Some(now);
+        if is_new_incident {
+            if sustained && !cooldown_active {
+                if let Some(curr_severity) = severity.clone() {
+                    should_emit_alert = true;
+                    transition = Some(IncidentTransition::Trigger);
+                    emitted_severity = Some(curr_severity.clone());
+                    next_state.last_alerted_at = Some(now);
+                    next_state.last_divergence_pct = Some(divergence_pct);
+                    next_state.last_severity = Some(format!("{:?}", curr_severity).to_lowercase());
+                    next_state.last_classification =
+                        Some(context_classification_str(&classification).to_string());
+                    next_state.trigger_floor_pct = Some(trigger_floor_pct);
+                    next_state.below_trigger_blocks = 0;
+                    next_state.below_severity_blocks = 0;
+                    next_state.cooldown_until = Some(now + Duration::seconds(policy.cooldown_sec));
+                }
+            }
+        } else if current_rank > previous_rank {
+            if let Some(curr_severity) = severity.clone() {
+                should_emit_alert = true;
+                transition = Some(IncidentTransition::Escalate);
+                emitted_severity = Some(curr_severity.clone());
+                next_state.last_alerted_at = Some(now);
+                next_state.last_divergence_pct = Some(divergence_pct);
+                next_state.last_severity = Some(format!("{:?}", curr_severity).to_lowercase());
+                next_state.last_classification =
+                    Some(context_classification_str(&classification).to_string());
+                next_state.below_severity_blocks = 0;
+                if next_state.trigger_floor_pct.is_none() {
+                    next_state.trigger_floor_pct = Some(trigger_floor_pct);
+                }
+            }
+        } else if current_rank < previous_rank {
+            next_state.below_severity_blocks += 1;
+            if next_state.below_severity_blocks >= policy.deescalation_blocks {
+                if let Some(curr_severity) = severity.clone() {
+                    should_emit_alert = true;
+                    transition = Some(IncidentTransition::Deescalate);
+                    emitted_severity = Some(curr_severity.clone());
+                    next_state.last_alerted_at = Some(now);
+                    next_state.last_divergence_pct = Some(divergence_pct);
+                    next_state.last_severity = Some(format!("{:?}", curr_severity).to_lowercase());
+                    next_state.last_classification =
+                        Some(context_classification_str(&classification).to_string());
+                    next_state.below_severity_blocks = 0;
+                }
+            }
+        } else {
+            next_state.below_severity_blocks = 0;
             next_state.last_divergence_pct = Some(divergence_pct);
-            next_state.last_severity = severity
-                .as_ref()
-                .map(|s| format!("{:?}", s).to_lowercase());
-            next_state.cooldown_until =
-                Some(now + Duration::seconds(policy.cooldown_sec));
+            next_state.last_classification =
+                Some(context_classification_str(&classification).to_string());
         }
+        next_state.below_trigger_blocks = 0;
     } else {
         next_state.breach_started_at = None;
         next_state.last_divergence_pct = Some(divergence_pct);
+        next_state.below_severity_blocks = 0;
+
+        if previous_active.is_some() {
+            let resolution_floor = next_state.trigger_floor_pct.unwrap_or(trigger_floor_pct);
+            if divergence_pct < resolution_floor {
+                next_state.below_trigger_blocks += 1;
+            } else {
+                next_state.below_trigger_blocks = 0;
+            }
+
+            if next_state.below_trigger_blocks >= policy.resolution_blocks {
+                should_emit_alert = true;
+                transition = Some(IncidentTransition::Resolve);
+                emitted_severity = previous_active.clone();
+                next_state.last_alerted_at = Some(now);
+                next_state.last_severity = None;
+                next_state.last_classification = None;
+                next_state.trigger_floor_pct = None;
+                next_state.below_trigger_blocks = 0;
+                next_state.cooldown_until = Some(now + Duration::seconds(policy.cooldown_sec));
+            }
+        }
     }
 
     Ok(EvaluationOutcome {
@@ -510,11 +745,106 @@ fn evaluate_policy(
             eligible_source_count: enabled_source_count,
             quorum_met,
             breach_active,
+            oracle_confirmed,
+            classification,
+            trigger_floor_pct,
+            confidence_breakdown,
             severity,
         },
         should_emit_alert,
         next_state,
+        transition,
+        emitted_severity,
     })
+}
+
+fn market_divergence_pct(policy: &DpegPolicy, quotes: &[QuoteInput], now: DateTime<Utc>) -> Option<f64> {
+    let mut weighted_points = Vec::<(f64, f64)>::new();
+    for quote in quotes {
+        if !policy.source_enabled(&quote.source_id, &quote.source_kind) {
+            continue;
+        }
+        let stale_ms = policy.source_stale_timeout_ms(&quote.source_id);
+        let age_ms = now
+            .signed_duration_since(quote.observed_at)
+            .num_milliseconds();
+        if age_ms > stale_ms {
+            continue;
+        }
+        let weight = policy.source_weight(&quote.source_id);
+        if weight <= 0.0 || !weight.is_finite() {
+            continue;
+        }
+        weighted_points.push((quote.price, weight));
+    }
+    let median = weighted_median(&weighted_points)?;
+    Some(((median - policy.peg_target).abs() / policy.peg_target) * 100.0)
+}
+
+fn oracle_confirmation_met(
+    policy: &DpegPolicy,
+    eligible_quotes: &[QuoteInput],
+    trigger_floor_pct: f64,
+    now: DateTime<Utc>,
+    peg_target: f64,
+) -> bool {
+    eligible_quotes.iter().any(|quote| {
+        if quote.source_kind != "oracle" {
+            return false;
+        }
+        let stale_ms = policy.source_stale_timeout_ms(&quote.source_id);
+        let age_ms = now
+            .signed_duration_since(quote.observed_at)
+            .num_milliseconds();
+        if age_ms > stale_ms {
+            return false;
+        }
+        ((quote.price - peg_target).abs() / peg_target) * 100.0 >= trigger_floor_pct
+    })
+}
+
+fn compute_confidence_breakdown(
+    policy: &DpegPolicy,
+    eligible_quotes: &[QuoteInput],
+    weighted_median_price: f64,
+    oracle_confirmed: bool,
+    peg_target: f64,
+) -> HashMap<String, f64> {
+    let mut breakdown = HashMap::new();
+    if eligible_quotes.is_empty() {
+        breakdown.insert("source_agreement".to_string(), 0.0);
+        breakdown.insert("oracle_confirmation".to_string(), 0.0);
+        breakdown.insert("volume_confirmation".to_string(), 50.0);
+        breakdown.insert("total".to_string(), 0.0);
+        return breakdown;
+    }
+
+    let direction = (weighted_median_price - peg_target).signum();
+    let agreement_count = eligible_quotes
+        .iter()
+        .filter(|quote| (quote.price - peg_target).signum() == direction)
+        .count();
+    let source_agreement = (agreement_count as f64 / eligible_quotes.len() as f64) * 100.0;
+    let oracle_score = if policy.toggles.oracle_confirmation {
+        if oracle_confirmed { 100.0 } else { 0.0 }
+    } else {
+        50.0
+    };
+    let volume_score = 50.0;
+    let source_weight: f64 = 0.7;
+    let oracle_weight: f64 = if policy.toggles.oracle_confirmation { 0.2 } else { 0.0 };
+    let volume_weight: f64 = if policy.toggles.volume_confirmation { 0.1 } else { 0.0 };
+    let total_weight = (source_weight + oracle_weight + volume_weight).max(f64::EPSILON);
+    let total = ((source_agreement * source_weight)
+        + (oracle_score * oracle_weight)
+        + (volume_score * volume_weight))
+        / total_weight;
+
+    breakdown.insert("source_agreement".to_string(), source_agreement);
+    breakdown.insert("oracle_confirmation".to_string(), oracle_score);
+    breakdown.insert("volume_confirmation".to_string(), volume_score);
+    breakdown.insert("total".to_string(), total);
+    breakdown
 }
 
 fn weighted_median(points: &[(f64, f64)]) -> Option<f64> {
@@ -561,14 +891,22 @@ fn severity_rank(s: Option<&Severity>) -> u8 {
     }
 }
 
-fn severity_rank_str(s: Option<&str>) -> u8 {
+fn severity_from_str(s: Option<&str>) -> Option<Severity> {
     match s {
-        Some("critical") => 5,
-        Some("high") => 4,
-        Some("medium") => 3,
-        Some("low") => 2,
-        Some("info") => 1,
-        _ => 0,
+        Some(value) if value.eq_ignore_ascii_case("critical") => Some(Severity::Critical),
+        Some(value) if value.eq_ignore_ascii_case("high") => Some(Severity::High),
+        Some(value) if value.eq_ignore_ascii_case("medium") => Some(Severity::Medium),
+        Some(value) if value.eq_ignore_ascii_case("low") => Some(Severity::Low),
+        Some(value) if value.eq_ignore_ascii_case("info") => Some(Severity::Info),
+        _ => None,
+    }
+}
+
+fn context_classification_str(value: &ContextClassification) -> &'static str {
+    match value {
+        ContextClassification::Isolated => "isolated",
+        ContextClassification::Systemic => "systemic",
+        ContextClassification::None => "none",
     }
 }
 
@@ -586,6 +924,7 @@ fn build_detection(
     policy: &DpegPolicy,
     snapshot: &ConsensusSnapshot,
     severity: Severity,
+    transition: Option<IncidentTransition>,
     now: DateTime<Utc>,
 ) -> DetectionResult {
     let subject_key = format!("{}:{}", policy.tenant_id, policy.market_key);
@@ -598,6 +937,48 @@ fn build_detection(
         snapshot.weighted_median_price,
         snapshot.source_count,
         if snapshot.quorum_met { "met" } else { "not met" }
+    );
+
+    let confidence_pct = snapshot
+        .confidence_breakdown
+        .get("total")
+        .copied()
+        .unwrap_or(0.0);
+    let confidence = (confidence_pct / 100.0).clamp(0.0, 1.0);
+    let risk_score = RiskScore {
+        score: snapshot.divergence_pct.min(100.0),
+        confidence,
+        rationale: vec![
+            format!(
+                "context={} oracle_confirmed={} quorum_met={}",
+                context_classification_str(&snapshot.classification),
+                snapshot.oracle_confirmed,
+                snapshot.quorum_met
+            ),
+            format!(
+                "weighted_median={:.6} peg_target={:.6}",
+                snapshot.weighted_median_price, policy.peg_target
+            ),
+        ],
+        attribution: Vec::new(),
+    };
+
+    let mut oracle_context = std::collections::HashMap::new();
+    oracle_context.insert(
+        "oracle_confirmed".to_string(),
+        serde_json::json!(snapshot.oracle_confirmed),
+    );
+    oracle_context.insert(
+        "weighted_median_price".to_string(),
+        serde_json::json!(snapshot.weighted_median_price),
+    );
+    oracle_context.insert(
+        "trigger_floor_pct".to_string(),
+        serde_json::json!(snapshot.trigger_floor_pct),
+    );
+    oracle_context.insert(
+        "context_classification".to_string(),
+        serde_json::json!(context_classification_str(&snapshot.classification)),
     );
 
     DetectionResult {
@@ -624,9 +1005,173 @@ fn build_detection(
             label: Some(divergence_str),
             source_id: None,
         }],
-        risk_score: RiskScore::default(),
-        oracle_context: std::collections::HashMap::new(),
+        risk_score,
+        incident_transition: transition,
+        context_classification: Some(snapshot.classification.clone()),
+        confidence_breakdown: snapshot.confidence_breakdown.clone(),
+        oracle_context,
         actions_recommended: vec![],
         created_at: now,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_policy() -> DpegPolicy {
+        DpegPolicy {
+            tenant_id: "tenant-a".to_string(),
+            market_key: "USDC/USD".to_string(),
+            peg_target: 1.0,
+            min_sources: 1,
+            quorum_pct: 0.0,
+            sustained_window_ms: 0,
+            cooldown_sec: 0,
+            stale_timeout_ms: 60_000,
+            severity_bands: DpegSeverityBands {
+                medium: 0.5,
+                high: 1.0,
+                critical: 5.0,
+            },
+            severity_bands_isolated: Some(DpegSeverityBands {
+                medium: 0.5,
+                high: 1.0,
+                critical: 5.0,
+            }),
+            severity_bands_systemic: Some(DpegSeverityBands {
+                medium: 0.01,
+                high: 0.25,
+                critical: 0.5,
+            }),
+            isolated_floor_pct: 0.5,
+            systemic_floor_pct: 0.01,
+            deescalation_blocks: 5,
+            resolution_blocks: 30,
+            source_filter: DpegSourceFilter::default(),
+            toggles: DpegToggles::default(),
+            source_overrides: HashMap::new(),
+        }
+    }
+
+    fn quote(source_id: &str, source_kind: &str, price: f64, observed_at: DateTime<Utc>) -> QuoteInput {
+        QuoteInput {
+            source_id: source_id.to_string(),
+            source_kind: source_kind.to_string(),
+            price,
+            observed_at,
+        }
+    }
+
+    #[test]
+    fn oracle_confirmation_gate_blocks_alert_without_oracle_quote() {
+        let now = Utc::now();
+        let mut policy = base_policy();
+        policy.toggles.oracle_confirmation = true;
+        let quotes = vec![quote("cex-a", "cex", 0.99, now)];
+
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &DpegAlertState::default(),
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+
+        assert!(!outcome.snapshot.oracle_confirmed);
+        assert!(!outcome.snapshot.breach_active);
+        assert!(!outcome.should_emit_alert);
+    }
+
+    #[test]
+    fn contagion_toggle_off_forces_isolated_classification() {
+        let now = Utc::now();
+        let mut pattern = DpegPattern::default();
+        let mut policy = base_policy();
+        policy.toggles.contagion_detection = false;
+        pattern
+            .policies
+            .insert((policy.tenant_id.clone(), policy.market_key.clone()), policy.clone());
+
+        let classification = pattern.classify_context(&policy, now);
+        assert!(matches!(classification, ContextClassification::Isolated));
+    }
+
+    #[test]
+    fn deescalation_requires_configured_block_count() {
+        let now = Utc::now();
+        let policy = base_policy();
+        let quotes = vec![quote("cex-a", "cex", 0.994, now)];
+        let mut state = DpegAlertState {
+            breach_started_at: Some(now),
+            cooldown_until: None,
+            last_alerted_at: Some(now),
+            last_divergence_pct: Some(1.2),
+            last_severity: Some("high".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        for i in 1..=policy.deescalation_blocks {
+            let ts = now + Duration::seconds(i);
+            let outcome = evaluate_policy(
+                &policy,
+                &quotes,
+                &state,
+                ts,
+                ContextClassification::Isolated,
+            )
+            .expect("evaluation");
+            if i < policy.deescalation_blocks {
+                assert!(!outcome.should_emit_alert);
+            } else {
+                assert!(outcome.should_emit_alert);
+                assert!(matches!(
+                    outcome.transition,
+                    Some(IncidentTransition::Deescalate)
+                ));
+            }
+            state = outcome.next_state;
+        }
+    }
+
+    #[test]
+    fn resolution_requires_configured_block_count() {
+        let now = Utc::now();
+        let policy = base_policy();
+        let quotes = vec![quote("cex-a", "cex", 0.9998, now)];
+        let mut state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: None,
+            last_alerted_at: Some(now),
+            last_divergence_pct: Some(0.8),
+            last_severity: Some("medium".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        for i in 1..=policy.resolution_blocks {
+            let ts = now + Duration::seconds(i);
+            let outcome = evaluate_policy(
+                &policy,
+                &quotes,
+                &state,
+                ts,
+                ContextClassification::Isolated,
+            )
+            .expect("evaluation");
+            if i < policy.resolution_blocks {
+                assert!(!outcome.should_emit_alert);
+            } else {
+                assert!(outcome.should_emit_alert);
+                assert!(matches!(outcome.transition, Some(IncidentTransition::Resolve)));
+            }
+            state = outcome.next_state;
+        }
     }
 }

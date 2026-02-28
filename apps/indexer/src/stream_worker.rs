@@ -18,6 +18,10 @@ use crate::stream_parser::{parse_payload, ParsedFeedEvent, ParserInput};
 const FX_LOOKUP_MARKET_KEY: &str = "USDT/USD";
 const FX_LOOKUP_FRESHNESS_SECONDS: i64 = 30;
 const FX_CACHE_TTL_SECONDS: i64 = 3;
+const DEFAULT_RPC_LOGS_POLL_INTERVAL_MS: u64 = 2_000;
+const DEFAULT_HTTP_POLL_INTERVAL_MS: u64 = 5_000;
+const MIN_POLL_INTERVAL_MS: u64 = 200;
+const MAX_POLL_INTERVAL_MS: u64 = 60_000;
 
 #[derive(Debug, Clone)]
 struct CachedFxRate {
@@ -49,7 +53,15 @@ pub struct RuntimeStreamConfig {
     pub filter_config: Value,
     pub payload_ts_path: Option<String>,
     pub payload_ts_unit: String,
+    pub poll_interval_ms: Option<u64>,
     pub tenant_targets: Vec<String>,
+}
+
+fn resolve_poll_interval_duration(configured_ms: Option<u64>, default_ms: u64) -> Duration {
+    let resolved_ms = configured_ms
+        .unwrap_or(default_ms)
+        .clamp(MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS);
+    Duration::from_millis(resolved_ms)
 }
 
 pub async fn run_stream_worker(
@@ -154,10 +166,12 @@ async fn run_rpc_logs_loop(
     fx_cache: &mut FxRateCache,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
+    let poll_interval =
+        resolve_poll_interval_duration(config.poll_interval_ms, DEFAULT_RPC_LOGS_POLL_INTERVAL_MS);
     let mut connector = RpcLogsConnector::new(
         endpoint,
         config.filter_config.clone(),
-        Duration::from_secs(2),
+        poll_interval,
     );
     connector.connect().await?;
 
@@ -189,7 +203,9 @@ async fn run_http_poll_loop(
     fx_cache: &mut FxRateCache,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
-    let mut connector = HttpPollConnector::new(endpoint, Duration::from_secs(5));
+    let poll_interval =
+        resolve_poll_interval_duration(config.poll_interval_ms, DEFAULT_HTTP_POLL_INTERVAL_MS);
+    let mut connector = HttpPollConnector::new(endpoint, poll_interval);
     connector.connect().await?;
 
     loop {

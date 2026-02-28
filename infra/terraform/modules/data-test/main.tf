@@ -46,8 +46,15 @@ resource "aws_secretsmanager_secret" "database" {
 }
 
 resource "aws_secretsmanager_secret_version" "database" {
-  secret_id     = aws_secretsmanager_secret.database.id
-  secret_string = local.database_url
+  secret_id = aws_secretsmanager_secret.database.id
+  secret_string = jsonencode({
+    DATABASE_URL = local.database_url
+    DB_HOST      = var.postgres_host
+    DB_PORT      = var.postgres_port
+    DB_NAME      = var.db_name
+    DB_USERNAME  = var.db_username
+    DB_PASSWORD  = var.db_password
+  })
 }
 
 resource "aws_secretsmanager_secret" "redis" {
@@ -58,6 +65,10 @@ resource "aws_secretsmanager_secret" "redis" {
 }
 
 resource "aws_secretsmanager_secret_version" "redis" {
-  secret_id     = aws_secretsmanager_secret.redis.id
-  secret_string = local.redis_url
+  secret_id = aws_secretsmanager_secret.redis.id
+  secret_string = jsonencode({
+    REDIS_URL  = local.redis_url
+    REDIS_HOST = var.redis_host
+    REDIS_PORT = var.redis_port
+  })
 }

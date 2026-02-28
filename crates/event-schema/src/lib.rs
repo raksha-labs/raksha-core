@@ -107,6 +107,37 @@ pub enum Severity {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+pub enum IncidentTransition {
+    Trigger,
+    Escalate,
+    Deescalate,
+    Resolve,
+    Retract,
+    Update,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextClassification {
+    Isolated,
+    Systemic,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum FinalityStatus {
+    Tentative,
+    Safe,
+    Finalized,
+}
+
+fn default_finality_status() -> FinalityStatus {
+    FinalityStatus::Tentative
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
 pub enum SignalType {
     OracleDivergence,
     PegDeviation,
@@ -214,6 +245,12 @@ pub struct DetectionResult {
     pub block_number: i64,
     pub signals: Vec<DetectionSignal>,
     pub risk_score: RiskScore,
+    #[serde(default)]
+    pub incident_transition: Option<IncidentTransition>,
+    #[serde(default)]
+    pub context_classification: Option<ContextClassification>,
+    #[serde(default)]
+    pub confidence_breakdown: HashMap<String, f64>,
     pub oracle_context: HashMap<String, serde_json::Value>,
     pub actions_recommended: Vec<String>,
     pub created_at: DateTime<Utc>,
@@ -232,14 +269,20 @@ pub struct AlertEvent {
     pub chain_slug: String,
     pub protocol: String,
     pub lifecycle_state: LifecycleState,
+    #[serde(default = "default_finality_status")]
+    pub finality_status: FinalityStatus,
     pub severity: Severity,
     pub risk_score: f64,
     pub confidence: f64,
+    #[serde(default)]
+    pub confidence_breakdown: HashMap<String, f64>,
     pub rule_ids: Vec<String>,
     pub channel_routes: Vec<String>,
     pub dedup_key: Option<String>,
     pub attribution: Vec<Attribution>,
     pub blast_radius: Vec<String>,
+    #[serde(default)]
+    pub exposure_summary: HashMap<String, serde_json::Value>,
     pub tx_hash: String,
     pub block_number: u64,
     pub oracle_context: HashMap<String, serde_json::Value>,

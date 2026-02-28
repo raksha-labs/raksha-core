@@ -6,6 +6,8 @@ on:
     paths:
       - 'infra/**'
       - '.github/workflows/infra-plan.yml'
+      - '.github/workflows/reusable-terraform-plan.yml'
+      - 'scripts/ci/**'
   workflow_dispatch:
     inputs:
       target_environment:
@@ -26,15 +28,9 @@ on:
 permissions:
   id-token: write
   contents: read
-  pull-requests: write
-
-env:
-  AWS_REGION: eu-west-1
 
 jobs:
   plan:
-    name: Plan (${{ matrix.environment }})
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -42,52 +38,13 @@ jobs:
 
     if: github.event_name != 'workflow_dispatch' || matrix.environment == github.event.inputs.target_environment
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.6.6
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_INFRA_PLAN_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Terraform init (no backend)
-        working-directory: infra/terraform/environments/${{ matrix.environment }}
-        run: terraform init -backend=false
-
-      - name: Terraform plan
-        id: plan
-        working-directory: infra/terraform/environments/${{ matrix.environment }}
-        env:
-          IMAGE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag || format('sha-{0}', github.sha) }}
-        run: |
-          set -o pipefail
-          terraform plan \
-            -no-color \
-            -lock=false \
-            -refresh=true \
-            -var="image_tag=${IMAGE_TAG}" \
-            -out=tfplan | tee plan.txt
-
-      - name: Upload plan artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-plan-${{ matrix.environment }}
-          path: infra/terraform/environments/${{ matrix.environment }}/plan.txt
-
-      - name: Add plan summary
-        if: always()
-        working-directory: infra/terraform/environments/${{ matrix.environment }}
-        run: |
-          echo "### Terraform plan (${{ matrix.environment }})" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f plan.txt ]; then
-            tail -n 20 plan.txt >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Plan output not generated." >> "$GITHUB_STEP_SUMMARY"
-          fi
+    uses: ./.github/workflows/reusable-terraform-plan.yml
+    with:
+      environment: ${{ matrix.environment }}
+      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag || format('sha-{0}', github.sha) }}
+      aws_region: eu-west-1
+    secrets:
+      aws_role_arn: ${{ secrets.AWS_INFRA_PLAN_ROLE_ARN }}
+      tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET }}
+      tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
+      tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}

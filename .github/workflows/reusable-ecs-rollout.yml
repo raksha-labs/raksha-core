@@ -1,0 +1,106 @@
+name: Reusable ECS Rollout
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      image_tag:
+        required: true
+        type: string
+      apply_infra:
+        required: false
+        type: boolean
+        default: false
+      service_filter:
+        required: false
+        type: string
+        default: ''
+      aws_region:
+        required: false
+        type: string
+        default: eu-west-1
+    outputs:
+      cluster_name:
+        description: ECS cluster used for rollout
+        value: ${{ jobs.rollout.outputs.cluster_name }}
+      core_contract_version:
+        description: Core contract version published to SSM
+        value: ${{ jobs.rollout.outputs.core_contract_version }}
+    secrets:
+      aws_role_arn:
+        required: true
+      tf_backend_bucket:
+        required: true
+      tf_backend_dynamodb_table:
+        required: true
+      tf_backend_kms_key_id:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  rollout:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      cluster_name: ${{ steps.resolve.outputs.cluster_name }}
+      core_contract_version: ${{ steps.resolve.outputs.core_contract_version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Terraform apply
+        if: ${{ inputs.apply_infra }}
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          TF_BACKEND_BUCKET: ${{ secrets.tf_backend_bucket }}
+          TF_BACKEND_DYNAMODB_TABLE: ${{ secrets.tf_backend_dynamodb_table }}
+          TF_BACKEND_KMS_KEY_ID: ${{ secrets.tf_backend_kms_key_id }}
+        run: |
+          scripts/ci/terraform_apply.sh "${{ inputs.environment }}" "${{ inputs.image_tag }}"
+
+      - name: Roll out ECS services
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          SERVICE_FILTER: ${{ inputs.service_filter }}
+          TF_BACKEND_BUCKET: ${{ secrets.tf_backend_bucket }}
+          TF_BACKEND_DYNAMODB_TABLE: ${{ secrets.tf_backend_dynamodb_table }}
+          TF_BACKEND_KMS_KEY_ID: ${{ secrets.tf_backend_kms_key_id }}
+        run: |
+          scripts/ci/deploy_ecs_services.sh "${{ inputs.environment }}"
+
+      - name: Resolve rollout outputs
+        id: resolve
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          TF_BACKEND_BUCKET: ${{ secrets.tf_backend_bucket }}
+          TF_BACKEND_DYNAMODB_TABLE: ${{ secrets.tf_backend_dynamodb_table }}
+          TF_BACKEND_KMS_KEY_ID: ${{ secrets.tf_backend_kms_key_id }}
+        run: |
+          scripts/ci/terraform_init.sh "${{ inputs.environment }}"
+          TF_DIR="infra/terraform/environments/${{ inputs.environment }}"
+          CLUSTER_NAME=$(terraform -chdir="${TF_DIR}" output -raw cluster_name)
+          CORE_CONTRACT_VERSION=$(aws ssm get-parameter \
+            --name "/defi-surv/${{ inputs.environment }}/core/contract_version" \
+            --region "${{ inputs.aws_region }}" \
+            --query 'Parameter.Value' \
+            --output text)
+
+          echo "cluster_name=${CLUSTER_NAME}" >> "$GITHUB_OUTPUT"
+          echo "core_contract_version=${CORE_CONTRACT_VERSION}" >> "$GITHUB_OUTPUT"

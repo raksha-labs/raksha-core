@@ -162,6 +162,7 @@ fn to_runtime_config(cfg: EffectiveStreamConfig, tenant_targets: Vec<String>) ->
         filter_config: cfg.filter_config,
         payload_ts_path: cfg.payload_ts_path,
         payload_ts_unit: cfg.payload_ts_unit,
+        poll_interval_ms: cfg.poll_interval_ms.and_then(|value| u64::try_from(value).ok()),
         tenant_targets,
     }
 }
@@ -185,6 +186,7 @@ fn hash_runtime_config(cfg: &RuntimeStreamConfig) -> String {
         "filter_config": cfg.filter_config,
         "payload_ts_path": cfg.payload_ts_path,
         "payload_ts_unit": cfg.payload_ts_unit,
+        "poll_interval_ms": cfg.poll_interval_ms,
         "tenant_targets": cfg.tenant_targets,
     });
     let mut hasher = Sha256::new();

@@ -28,11 +28,24 @@ pub struct EffectiveStreamConfig {
     pub auth_config: Value,
     pub payload_ts_path: Option<String>,
     pub payload_ts_unit: String,
+    pub poll_interval_ms: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StreamTenantTarget {
     pub tenant_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct IncidentRecord {
+    pub incident_id: String,
+    pub tenant_id: String,
+    pub pattern_id: String,
+    pub subject_type: Option<String>,
+    pub subject_key: Option<String>,
+    pub chain_slug: String,
+    pub status: String,
+    pub current_severity: String,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +77,14 @@ pub struct PostgresRepository {
     client: Arc<Client>,
 }
 
+pub struct IncidentKey<'a> {
+    pub tenant_id: &'a str,
+    pub pattern_id: &'a str,
+    pub subject_type: Option<&'a str>,
+    pub subject_key: Option<&'a str>,
+    pub chain_slug: &'a str,
+}
+
 impl PostgresRepository {
     pub async fn from_database_url(database_url: &str) -> Result<Self> {
         let (client, connection) = tokio_postgres::connect(database_url, NoTls).await?;
@@ -90,6 +111,9 @@ impl PostgresRepository {
             "detections",
             "alerts",
             "alert_lifecycle_events",
+            "incidents",
+            "incident_events",
+            "incident_context_snapshots",
             "alert_delivery_attempts",
             "usage_events",
             "data_sources",
@@ -174,10 +198,11 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO alerts (id, tx_hash, chain, chain_slug, protocol, block_number, subject_type, subject_key, tenant_id, pattern_id, lifecycle_state, severity, risk_score, payload)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                INSERT INTO alerts (id, incident_id, tx_hash, chain, chain_slug, protocol, block_number, subject_type, subject_key, tenant_id, pattern_id, lifecycle_state, severity, risk_score, payload)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 ON CONFLICT (id) DO UPDATE
-                SET lifecycle_state = EXCLUDED.lifecycle_state,
+                SET incident_id = EXCLUDED.incident_id,
+                    lifecycle_state = EXCLUDED.lifecycle_state,
                     severity = EXCLUDED.severity,
                     risk_score = EXCLUDED.risk_score,
                     block_number = EXCLUDED.block_number,
@@ -189,6 +214,7 @@ impl PostgresRepository {
                 "#,
                 &[
                     &alert.alert_id.to_string(),
+                    &alert.incident_id,
                     &alert.tx_hash,
                     &format!("{:?}", alert.chain).to_lowercase(),
                     &alert.chain_slug,
@@ -319,7 +345,8 @@ impl PostgresRepository {
                     ssc.auth_secret_ref,
                     ssc.auth_config,
                     ssc.payload_ts_path,
-                    ssc.payload_ts_unit
+                    ssc.payload_ts_unit,
+                    ssc.poll_interval_ms
                 FROM source_stream_configs ssc
                 JOIN data_sources ds
                   ON ds.source_id = ssc.source_id
@@ -361,6 +388,7 @@ impl PostgresRepository {
                 auth_config: row.get(14),
                 payload_ts_path: row.get(15),
                 payload_ts_unit: row.get(16),
+                poll_interval_ms: row.get(17),
             });
         }
         Ok(configs)
@@ -789,11 +817,12 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO alert_lifecycle_events (alert_id, event_key, tx_hash, block_number, lifecycle_state, payload)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO alert_lifecycle_events (alert_id, incident_id, event_key, tx_hash, block_number, lifecycle_state, payload)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 "#,
                 &[
                     &alert.alert_id.to_string(),
+                    &alert.incident_id,
                     &alert.event_key,
                     &alert.tx_hash,
                     &(alert.block_number as i64),
@@ -830,6 +859,160 @@ impl PostgresRepository {
                     &reason,
                     &status_code_i32,
                 ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn find_active_incident(&self, key: IncidentKey<'_>) -> Result<Option<IncidentRecord>> {
+        let row = self
+            .client
+            .query_opt(
+                r#"
+                SELECT incident_id, tenant_id, pattern_id, subject_type, subject_key, chain_slug, status, current_severity
+                FROM incidents
+                WHERE tenant_id = $1
+                  AND pattern_id = $2
+                  AND COALESCE(subject_type, '') = COALESCE($3, '')
+                  AND COALESCE(subject_key, '') = COALESCE($4, '')
+                  AND chain_slug = $5
+                  AND status NOT IN ('resolved', 'retracted', 'closed', 'cancelled')
+                ORDER BY updated_at DESC
+                LIMIT 1
+                "#,
+                &[
+                    &key.tenant_id,
+                    &key.pattern_id,
+                    &key.subject_type,
+                    &key.subject_key,
+                    &key.chain_slug,
+                ],
+            )
+            .await?;
+
+        Ok(row.map(|record| IncidentRecord {
+            incident_id: record.get(0),
+            tenant_id: record.get(1),
+            pattern_id: record.get(2),
+            subject_type: record.get(3),
+            subject_key: record.get(4),
+            chain_slug: record.get(5),
+            status: record.get(6),
+            current_severity: record.get(7),
+        }))
+    }
+
+    pub async fn create_incident(
+        &self,
+        incident: &IncidentRecord,
+        opened_at: DateTime<Utc>,
+    ) -> Result<()> {
+        self.client
+            .execute(
+                r#"
+                INSERT INTO incidents (
+                    incident_id, tenant_id, pattern_id, subject_type, subject_key,
+                    chain_slug, status, current_severity, opened_at, updated_at, closed_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, NULL)
+                ON CONFLICT (incident_id) DO NOTHING
+                "#,
+                &[
+                    &incident.incident_id,
+                    &incident.tenant_id,
+                    &incident.pattern_id,
+                    &incident.subject_type,
+                    &incident.subject_key,
+                    &incident.chain_slug,
+                    &incident.status,
+                    &incident.current_severity,
+                    &opened_at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_incident_state(
+        &self,
+        incident_id: &str,
+        status: &str,
+        current_severity: &str,
+        updated_at: DateTime<Utc>,
+        closed: bool,
+    ) -> Result<()> {
+        let closed_at: Option<DateTime<Utc>> = if closed { Some(updated_at) } else { None };
+        self.client
+            .execute(
+                r#"
+                UPDATE incidents
+                SET status = $2,
+                    current_severity = $3,
+                    updated_at = $4,
+                    closed_at = CASE WHEN $5 THEN $6 ELSE closed_at END
+                WHERE incident_id = $1
+                "#,
+                &[
+                    &incident_id,
+                    &status,
+                    &current_severity,
+                    &updated_at,
+                    &closed,
+                    &closed_at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn append_incident_event(
+        &self,
+        incident_id: &str,
+        transition_type: &str,
+        from_state: Option<&str>,
+        to_state: Option<&str>,
+        reason: Option<&str>,
+        payload: serde_json::Value,
+        created_at: DateTime<Utc>,
+    ) -> Result<()> {
+        self.client
+            .execute(
+                r#"
+                INSERT INTO incident_events
+                    (incident_id, transition_type, from_state, to_state, reason, payload, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "#,
+                &[
+                    &incident_id,
+                    &transition_type,
+                    &from_state,
+                    &to_state,
+                    &reason,
+                    &payload,
+                    &created_at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn append_incident_context_snapshot(
+        &self,
+        incident_id: &str,
+        classification: Option<&str>,
+        score: Option<f64>,
+        confidence: Option<f64>,
+        payload: serde_json::Value,
+        observed_at: DateTime<Utc>,
+    ) -> Result<()> {
+        self.client
+            .execute(
+                r#"
+                INSERT INTO incident_context_snapshots
+                    (incident_id, classification, score, confidence, payload, observed_at)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                "#,
+                &[&incident_id, &classification, &score, &confidence, &payload, &observed_at],
             )
             .await?;
         Ok(())

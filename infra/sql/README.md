@@ -14,6 +14,18 @@ This directory contains the SQL files for the DeFi Surveillance database.
   - Creates default "glider" tenant configuration
   - Run after schema.sql
 
+- **`upgrade_poll_interval_ms.sql`** - One-time upgrade for existing databases
+  - Adds `source_stream_configs.poll_interval_ms`
+  - Backfills defaults for polling connectors (`rpc_logs=2000`, `http_poll=5000`)
+  - Applies range constraint (`200..60000` ms, nullable for websocket)
+
+- **`upgrade_generic_incidents.sql`** - One-time upgrade for existing databases
+  - Adds `incident_id` columns/indexes to `alerts` and `alert_lifecycle_events`
+  - Creates generic incident lifecycle tables:
+    - `incidents`
+    - `incident_events`
+    - `incident_context_snapshots`
+
 ## Quick Start
 
 ### For Fresh Installation:
@@ -27,6 +39,13 @@ psql -U postgres -d defi_surv -f schema.sql
 
 # 3. Load seed data
 psql -U postgres -d defi_surv -f seed_data.sql
+```
+
+### For Existing Installation Upgrade:
+
+```bash
+psql -U postgres -d defi_surv -f upgrade_poll_interval_ms.sql
+psql -U postgres -d defi_surv -f upgrade_generic_incidents.sql
 ```
 
 ### With Docker:

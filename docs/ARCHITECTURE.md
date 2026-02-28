@@ -20,6 +20,7 @@
   - `source_stream_configs`
   - `source_stream_tenant_targets`
 - For DB-managed stream ingestion, indexer does not use YAML/rules for stream subscription/filter setup.
+- Polling connectors (`rpc_logs`, `http_poll`) read per-stream cadence from `source_stream_configs.poll_interval_ms` (ms). Websocket streams keep this field null.
 - Effective activation for a stream worker requires:
   - source enabled (`data_sources.enabled=true`)
   - stream config enabled (`source_stream_configs.enabled=true`)
@@ -67,6 +68,7 @@ flowchart LR
 
 - PostgreSQL tables (via `infra/sql/*.sql`):
   - Core: `detections`, `alerts`, `alert_lifecycle_events`, `finality_state`
+  - Generic incident model: `incidents`, `incident_events`, `incident_context_snapshots`
   - Pattern system: `tenant_data_sources`, `tenant_pattern_configs`, `pattern_state`, `pattern_snapshots`
   - Tenant isolation: `detections.tenant_id`, `alerts.tenant_id`
   - Quota management: `usage_events`, `alert_delivery_attempts`
@@ -90,6 +92,7 @@ Source of truth for service shape is `infra/service-catalog.yaml`.
 
 - Consumer groups are enabled by default for stream workers and support horizontal scaling.
 - Finality and orchestrator logic prevent premature confirmation and support reorg correction.
+- Orchestrator maps detections to a generic incident key (`tenant_id`, `pattern_id`, `subject_type`, `subject_key`, `chain_slug`) and appends transition/context history independent of pattern family.
 - Pattern registry in detector enables extensible detection logic via DetectionPattern trait.
 - Each pattern (DpegPattern, FlashLoanPattern) maintains isolated state in `pattern_state` and `pattern_snapshots` tables.
 - Patterns are configured per-tenant via `tenant_pattern_configs` for multi-tenant isolation.

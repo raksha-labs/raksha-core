@@ -64,6 +64,38 @@ locals {
   } : {}
 
   discovery_services = merge(local.services, local.test_data_services)
+
+  service_static_env = {
+    for name, _ in local.services :
+    name => concat(
+      [
+        {
+          name  = "ENVIRONMENT"
+          value = var.environment
+        },
+        {
+          name  = "AWS_REGION"
+          value = var.aws_region
+        }
+      ],
+      [
+        for key in sort(keys(lookup(var.service_static_env, name, {}))) : {
+          name  = key
+          value = lookup(var.service_static_env, name, {})[key]
+        }
+      ]
+    )
+  }
+
+  service_secret_env = {
+    for name, _ in local.services :
+    name => [
+      for key in sort(keys(lookup(var.service_secret_env, name, {}))) : {
+        name      = key
+        valueFrom = lookup(var.service_secret_env, name, {})[key]
+      }
+    ]
+  }
 }
 
 resource "aws_ecs_cluster" "this" {
@@ -417,16 +449,8 @@ resource "aws_ecs_task_definition" "service" {
           protocol      = "tcp"
         }
       ] : []
-      environment = [
-        {
-          name  = "ENVIRONMENT"
-          value = var.environment
-        },
-        {
-          name  = "AWS_REGION"
-          value = var.aws_region
-        }
-      ]
+      environment = local.service_static_env[each.key]
+      secrets     = local.service_secret_env[each.key]
       logConfiguration = {
         logDriver = "awslogs"
         options = {

@@ -31,90 +31,47 @@ permissions:
   id-token: write
   contents: read
 
-env:
-  AWS_REGION: eu-west-1
-
 jobs:
   deploy:
-    name: Deploy ${{ inputs.target_environment }}
+    uses: ./.github/workflows/reusable-ecs-rollout.yml
+    with:
+      environment: ${{ inputs.target_environment }}
+      image_tag: ${{ inputs.image_tag }}
+      apply_infra: ${{ inputs.apply_infra }}
+      service_filter: ${{ inputs.service_filter }}
+      aws_region: eu-west-1
+    secrets:
+      aws_role_arn: ${{ inputs.target_environment == 'prod' && secrets.AWS_PROD_DEPLOY_ROLE_ARN || secrets.AWS_STAGE_DEPLOY_ROLE_ARN }}
+      tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET }}
+      tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
+      tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
+
+  notify-platform:
+    needs: deploy
     runs-on: ubuntu-latest
-    environment: ${{ inputs.target_environment }}
+    if: ${{ needs.deploy.result == 'success' }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.6.6
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ inputs.target_environment == 'prod' && secrets.AWS_PROD_DEPLOY_ROLE_ARN || secrets.AWS_STAGE_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Terraform init
-        working-directory: infra/terraform/environments/${{ inputs.target_environment }}
-        run: terraform init -backend=false
-
-      - name: Terraform apply
-        if: inputs.apply_infra == true
-        working-directory: infra/terraform/environments/${{ inputs.target_environment }}
+      - name: Ensure dispatch token exists
         run: |
-          terraform apply -auto-approve -var="image_tag=${{ inputs.image_tag }}"
-
-      - name: Resolve cluster name
-        id: cluster
-        working-directory: infra/terraform/environments/${{ inputs.target_environment }}
-        env:
-          FALLBACK_STAGE: ${{ secrets.STAGE_ECS_CLUSTER }}
-          FALLBACK_PROD: ${{ secrets.PROD_ECS_CLUSTER }}
-        run: |
-          set -e
-          CLUSTER=""
-          if terraform output -raw cluster_name >/tmp/cluster_name 2>/tmp/cluster_err; then
-            CLUSTER=$(cat /tmp/cluster_name)
-          else
-            if [ "${{ inputs.target_environment }}" = "prod" ] && [ -n "$FALLBACK_PROD" ]; then
-              CLUSTER="$FALLBACK_PROD"
-            elif [ "${{ inputs.target_environment }}" = "stage" ] && [ -n "$FALLBACK_STAGE" ]; then
-              CLUSTER="$FALLBACK_STAGE"
-            fi
-          fi
-
-          if [ -z "$CLUSTER" ]; then
-            echo "Unable to determine ECS cluster name"
-            cat /tmp/cluster_err || true
+          if [ -z "${{ secrets.PLATFORM_REPO_DISPATCH_TOKEN }}" ]; then
+            echo "Missing required secret PLATFORM_REPO_DISPATCH_TOKEN"
             exit 1
           fi
 
-          echo "cluster_name=$CLUSTER" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy ECS services
+      - name: Trigger platform deployment dispatch
         env:
-          CLUSTER_NAME: ${{ steps.cluster.outputs.cluster_name }}
+          GH_TOKEN: ${{ secrets.PLATFORM_REPO_DISPATCH_TOKEN }}
+          TARGET_REPO: defi-surv/defi-surv-platform
           TARGET_ENV: ${{ inputs.target_environment }}
-          SERVICE_FILTER: ${{ inputs.service_filter }}
+          CORE_IMAGE_TAG: ${{ inputs.image_tag }}
+          CORE_CONTRACT_VERSION: ${{ needs.deploy.outputs.core_contract_version }}
+          TRIGGER_SHA: ${{ github.sha }}
         run: |
-          set -euo pipefail
+          payload=$(printf '{"event_type":"core_release_ready","client_payload":{"environment":"%s","core_image_tag":"%s","core_contract_version":"%s","trigger_sha":"%s"}}' "$TARGET_ENV" "$CORE_IMAGE_TAG" "$CORE_CONTRACT_VERSION" "$TRIGGER_SHA")
 
-          SERVICES=(
-            indexer detector scorer orchestrator finality market-indexer market-detector
-          )
-
-          FILTER=",${SERVICE_FILTER},"
-
-          for svc in "${SERVICES[@]}"; do
-            if [ -n "${SERVICE_FILTER}" ] && ! echo "$FILTER" | grep -q ",$svc,"; then
-              continue
-            fi
-
-            echo "Deploying ${svc}"
-            aws ecs update-service \
-              --cluster "$CLUSTER_NAME" \
-              --service "defi-surv-${TARGET_ENV}-${svc}" \
-              --force-new-deployment \
-              --region "$AWS_REGION"
-          done
+          curl -sS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            https://api.github.com/repos/${TARGET_REPO}/dispatches \
+            -d "${payload}"

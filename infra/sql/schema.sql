@@ -65,11 +65,14 @@ CREATE TABLE IF NOT EXISTS source_stream_configs (
     auth_config      JSONB NOT NULL DEFAULT '{}'::jsonb,
     payload_ts_path  TEXT,
     payload_ts_unit  TEXT NOT NULL DEFAULT 'ms' CHECK (payload_ts_unit IN ('ms', 's', 'iso8601')),
+    poll_interval_ms INTEGER,
     enabled          BOOLEAN NOT NULL DEFAULT TRUE,
     created_by       TEXT NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_by       TEXT,
-    updated_at       TIMESTAMPTZ
+    updated_at       TIMESTAMPTZ,
+    CONSTRAINT source_stream_configs_poll_interval_ms_check
+        CHECK (poll_interval_ms IS NULL OR poll_interval_ms BETWEEN 200 AND 60000)
 );
 
 CREATE INDEX IF NOT EXISTS idx_source_stream_configs_source_enabled
@@ -326,6 +329,7 @@ CREATE INDEX IF NOT EXISTS idx_detections_tenant_pattern_created
 
 CREATE TABLE IF NOT EXISTS alerts (
     id              TEXT PRIMARY KEY,
+    incident_id     TEXT,
     tx_hash         TEXT NOT NULL,
     chain           TEXT NOT NULL,
     chain_slug      TEXT NOT NULL DEFAULT 'unknown',
@@ -345,6 +349,7 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_chain ON alerts(chain);
 CREATE INDEX IF NOT EXISTS idx_alerts_protocol ON alerts(protocol);
 CREATE INDEX IF NOT EXISTS idx_alerts_tx_hash ON alerts(tx_hash);
+CREATE INDEX IF NOT EXISTS idx_alerts_incident_id ON alerts(incident_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts(created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_subject_created
     ON alerts (subject_type, subject_key, created_at DESC);
@@ -360,6 +365,7 @@ CREATE INDEX IF NOT EXISTS idx_alerts_tenant_severity
 CREATE TABLE IF NOT EXISTS alert_lifecycle_events (
     id              BIGSERIAL PRIMARY KEY,
     alert_id        TEXT NOT NULL,
+    incident_id     TEXT,
     event_key       TEXT,
     tx_hash         TEXT NOT NULL DEFAULT '',
     block_number    BIGINT NOT NULL DEFAULT 0,
@@ -370,8 +376,60 @@ CREATE TABLE IF NOT EXISTS alert_lifecycle_events (
 
 CREATE INDEX IF NOT EXISTS idx_alert_lifecycle_alert_id
     ON alert_lifecycle_events (alert_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_lifecycle_incident_id
+    ON alert_lifecycle_events (incident_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_lifecycle_events_event_key
     ON alert_lifecycle_events (event_key);
+
+CREATE TABLE IF NOT EXISTS incidents (
+    incident_id      TEXT PRIMARY KEY,
+    tenant_id        TEXT NOT NULL,
+    pattern_id       TEXT NOT NULL,
+    subject_type     TEXT,
+    subject_key      TEXT,
+    chain_slug       TEXT NOT NULL DEFAULT 'unknown',
+    status           TEXT NOT NULL DEFAULT 'triggered',
+    current_severity TEXT NOT NULL DEFAULT 'medium',
+    opened_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    closed_at        TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_incidents_tenant_status_updated
+    ON incidents (tenant_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_incidents_tenant_pattern_subject
+    ON incidents (tenant_id, pattern_id, subject_key, chain_slug);
+CREATE INDEX IF NOT EXISTS idx_incidents_chain_pattern_status
+    ON incidents (chain_slug, pattern_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS incident_events (
+    id               BIGSERIAL PRIMARY KEY,
+    incident_id      TEXT NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    transition_type  TEXT NOT NULL,
+    from_state       TEXT,
+    to_state         TEXT,
+    reason           TEXT,
+    payload          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_incident_events_incident_created
+    ON incident_events (incident_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_incident_events_transition_created
+    ON incident_events (transition_type, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS incident_context_snapshots (
+    id             BIGSERIAL PRIMARY KEY,
+    incident_id    TEXT NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    classification TEXT,
+    score          DOUBLE PRECISION,
+    confidence     DOUBLE PRECISION,
+    payload        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    observed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_incident_context_snapshots_incident_observed
+    ON incident_context_snapshots (incident_id, observed_at DESC);
 
 CREATE TABLE IF NOT EXISTS alert_delivery_attempts (
     id          BIGSERIAL PRIMARY KEY,

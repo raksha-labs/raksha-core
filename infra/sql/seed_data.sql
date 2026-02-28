@@ -144,54 +144,54 @@ WITH desired_stream_configs AS (
   FROM (
     VALUES
       -- Binance (USDT quoted)
-      ('binance-global','websocket','miniTicker','usdcusdt@miniTicker','quote','binance_miniticker_v1','USDC/USD','USDCUSDT','{"symbols":["USDCUSDT"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',TRUE,'glider'),
-      ('binance-global','websocket','miniTicker','usdtusdc@miniTicker','quote','binance_miniticker_v1','USDT/USD','USDTUSDC','{"symbols":["USDTUSDC"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',TRUE,'glider'),
-      ('binance-global','websocket','miniTicker','daiusdt@miniTicker','quote','binance_miniticker_v1','DAI/USD','DAIUSDT','{"symbols":["DAIUSDT"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',TRUE,'glider'),
+      ('binance-global','websocket','miniTicker','usdcusdt@miniTicker','quote','binance_miniticker_v1','USDC/USD','USDCUSDT','{"symbols":["USDCUSDT"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',NULL,TRUE,'glider'),
+      ('binance-global','websocket','miniTicker','usdtusdc@miniTicker','quote','binance_miniticker_v1','USDT/USD','USDTUSDC','{"symbols":["USDTUSDC"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',NULL,TRUE,'glider'),
+      ('binance-global','websocket','miniTicker','daiusdt@miniTicker','quote','binance_miniticker_v1','DAI/USD','DAIUSDT','{"symbols":["DAIUSDT"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',NULL,TRUE,'glider'),
 
       -- Coinbase (USD direct)
-      ('coinbase-advanced','websocket','ticker','USDC-USD','quote','coinbase_ticker_v1','USDC/USD','USDC-USD','{"subscribe_message":{"type":"subscribe","channel":"ticker","product_ids":["USDC-USD"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.timestamp','iso8601',TRUE,'glider'),
-      ('coinbase-advanced','websocket','ticker','USDT-USD','quote','coinbase_ticker_v1','USDT/USD','USDT-USD','{"subscribe_message":{"type":"subscribe","channel":"ticker","product_ids":["USDT-USD"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.timestamp','iso8601',TRUE,'glider'),
-      ('coinbase-advanced','websocket','ticker','DAI-USD','quote','coinbase_ticker_v1','DAI/USD','DAI-USD','{"subscribe_message":{"type":"subscribe","channel":"ticker","product_ids":["DAI-USD"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.timestamp','iso8601',TRUE,'glider'),
+      ('coinbase-advanced','websocket','ticker','USDC-USD','quote','coinbase_ticker_v1','USDC/USD','USDC-USD','{"subscribe_message":{"type":"subscribe","channel":"ticker","product_ids":["USDC-USD"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.timestamp','iso8601',NULL,TRUE,'glider'),
+      ('coinbase-advanced','websocket','ticker','USDT-USD','quote','coinbase_ticker_v1','USDT/USD','USDT-USD','{"subscribe_message":{"type":"subscribe","channel":"ticker","product_ids":["USDT-USD"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.timestamp','iso8601',NULL,TRUE,'glider'),
+      ('coinbase-advanced','websocket','ticker','DAI-USD','quote','coinbase_ticker_v1','DAI/USD','DAI-USD','{"subscribe_message":{"type":"subscribe","channel":"ticker","product_ids":["DAI-USD"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.timestamp','iso8601',NULL,TRUE,'glider'),
 
       -- Kraken (USD direct)
-      ('kraken-spot','websocket','ticker','USDC/USD','quote','kraken_ticker_v2','USDC/USD','USDC/USD','{"subscribe_message":{"method":"subscribe","params":{"channel":"ticker","symbol":["USDC/USD"]},"req_id":1}}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',TRUE,'glider'),
-      ('kraken-spot','websocket','ticker','USDT/USD','quote','kraken_ticker_v2','USDT/USD','USDT/USD','{"subscribe_message":{"method":"subscribe","params":{"channel":"ticker","symbol":["USDT/USD"]},"req_id":1}}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',TRUE,'glider'),
-      ('kraken-spot','websocket','ticker','DAI/USD','quote','kraken_ticker_v2','DAI/USD','DAI/USD','{"subscribe_message":{"method":"subscribe","params":{"channel":"ticker","symbol":["DAI/USD"]},"req_id":1}}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',TRUE,'glider'),
+      ('kraken-spot','websocket','ticker','USDC/USD','quote','kraken_ticker_v2','USDC/USD','USDC/USD','{"subscribe_message":{"method":"subscribe","params":{"channel":"ticker","symbol":["USDC/USD"]},"req_id":1}}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',NULL,TRUE,'glider'),
+      ('kraken-spot','websocket','ticker','USDT/USD','quote','kraken_ticker_v2','USDT/USD','USDT/USD','{"subscribe_message":{"method":"subscribe","params":{"channel":"ticker","symbol":["USDT/USD"]},"req_id":1}}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',NULL,TRUE,'glider'),
+      ('kraken-spot','websocket','ticker','DAI/USD','quote','kraken_ticker_v2','DAI/USD','DAI/USD','{"subscribe_message":{"method":"subscribe","params":{"channel":"ticker","symbol":["DAI/USD"]},"req_id":1}}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',NULL,TRUE,'glider'),
 
       -- OKX (USDT quoted)
-      ('okx-global','websocket','tickers','USDC-USDT','quote','okx_tickers_v5','USDC/USD','USDC-USDT','{"subscribe_message":{"op":"subscribe","args":[{"channel":"tickers","instId":"USDC-USDT"}]}}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',TRUE,'glider'),
-      ('okx-global','websocket','tickers','USDT-USDC','quote','okx_tickers_v5','USDT/USD','USDT-USDC','{"subscribe_message":{"op":"subscribe","args":[{"channel":"tickers","instId":"USDT-USDC"}]}}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',TRUE,'glider'),
-      ('okx-global','websocket','tickers','DAI-USDT','quote','okx_tickers_v5','DAI/USD','DAI-USDT','{"subscribe_message":{"op":"subscribe","args":[{"channel":"tickers","instId":"DAI-USDT"}]}}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',TRUE,'glider'),
+      ('okx-global','websocket','tickers','USDC-USDT','quote','okx_tickers_v5','USDC/USD','USDC-USDT','{"subscribe_message":{"op":"subscribe","args":[{"channel":"tickers","instId":"USDC-USDT"}]}}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',NULL,TRUE,'glider'),
+      ('okx-global','websocket','tickers','USDT-USDC','quote','okx_tickers_v5','USDT/USD','USDT-USDC','{"subscribe_message":{"op":"subscribe","args":[{"channel":"tickers","instId":"USDT-USDC"}]}}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',NULL,TRUE,'glider'),
+      ('okx-global','websocket','tickers','DAI-USDT','quote','okx_tickers_v5','DAI/USD','DAI-USDT','{"subscribe_message":{"op":"subscribe","args":[{"channel":"tickers","instId":"DAI-USDT"}]}}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',NULL,TRUE,'glider'),
 
       -- Bybit (USDT quoted)
-      ('bybit-spot','websocket','tickers','USDCUSDT','quote','bybit_tickers_v5','USDC/USD','USDCUSDT','{"subscribe_message":{"op":"subscribe","args":["tickers.USDCUSDT"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.ts','ms',TRUE,'glider'),
-      ('bybit-spot','websocket','tickers','USDTUSDC','quote','bybit_tickers_v5','USDT/USD','USDTUSDC','{"subscribe_message":{"op":"subscribe","args":["tickers.USDTUSDC"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.ts','ms',TRUE,'glider'),
-      ('bybit-spot','websocket','tickers','DAIUSDT','quote','bybit_tickers_v5','DAI/USD','DAIUSDT','{"subscribe_message":{"op":"subscribe","args":["tickers.DAIUSDT"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.ts','ms',TRUE,'glider'),
+      ('bybit-spot','websocket','tickers','USDCUSDT','quote','bybit_tickers_v5','USDC/USD','USDCUSDT','{"subscribe_message":{"op":"subscribe","args":["tickers.USDCUSDT"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.ts','ms',NULL,TRUE,'glider'),
+      ('bybit-spot','websocket','tickers','USDTUSDC','quote','bybit_tickers_v5','USDT/USD','USDTUSDC','{"subscribe_message":{"op":"subscribe","args":["tickers.USDTUSDC"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.ts','ms',NULL,TRUE,'glider'),
+      ('bybit-spot','websocket','tickers','DAIUSDT','quote','bybit_tickers_v5','DAI/USD','DAIUSDT','{"subscribe_message":{"op":"subscribe","args":["tickers.DAIUSDT"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.ts','ms',NULL,TRUE,'glider'),
 
       -- Gemini (USD direct, endpoint template uses subscription_key)
-      ('gemini-spot','websocket','marketdata','usdcusd','quote','gemini_marketdata_v1','USDC/USD','USDCUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.timestampms','ms',TRUE,'glider'),
-      ('gemini-spot','websocket','marketdata','usdtusd','quote','gemini_marketdata_v1','USDT/USD','USDTUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.timestampms','ms',TRUE,'glider'),
-      ('gemini-spot','websocket','marketdata','daiusd','quote','gemini_marketdata_v1','DAI/USD','DAIUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.timestampms','ms',TRUE,'glider'),
+      ('gemini-spot','websocket','marketdata','usdcusd','quote','gemini_marketdata_v1','USDC/USD','USDCUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.timestampms','ms',NULL,TRUE,'glider'),
+      ('gemini-spot','websocket','marketdata','usdtusd','quote','gemini_marketdata_v1','USDT/USD','USDTUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.timestampms','ms',NULL,TRUE,'glider'),
+      ('gemini-spot','websocket','marketdata','daiusd','quote','gemini_marketdata_v1','DAI/USD','DAIUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.timestampms','ms',NULL,TRUE,'glider'),
 
       -- Chainlink (Ethereum mainnet logs)
-      ('chainlink-eth-mainnet','rpc_logs','logs','usdc-usd-feed','oracle_update','chainlink_answer_updated_v1','USDC/USD','USDCUSD','{"addresses":["0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"],"topics":["0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"],"decimals":8}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider'),
-      ('chainlink-eth-mainnet','rpc_logs','logs','usdt-usd-feed','oracle_update','chainlink_answer_updated_v1','USDT/USD','USDTUSD','{"addresses":["0x3E7d1eAB13ad0104d2750B8863b489D65364e32D"],"topics":["0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"],"decimals":8}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider'),
-      ('chainlink-eth-mainnet','rpc_logs','logs','dai-usd-feed','oracle_update','chainlink_answer_updated_v1','DAI/USD','DAIUSD','{"addresses":["0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9"],"topics":["0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"],"decimals":8}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider'),
+      ('chainlink-eth-mainnet','rpc_logs','logs','usdc-usd-feed','oracle_update','chainlink_answer_updated_v1','USDC/USD','USDCUSD','{"addresses":["0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"],"topics":["0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"],"decimals":8}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
+      ('chainlink-eth-mainnet','rpc_logs','logs','usdt-usd-feed','oracle_update','chainlink_answer_updated_v1','USDT/USD','USDTUSD','{"addresses":["0x3E7d1eAB13ad0104d2750B8863b489D65364e32D"],"topics":["0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"],"decimals":8}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
+      ('chainlink-eth-mainnet','rpc_logs','logs','dai-usd-feed','oracle_update','chainlink_answer_updated_v1','DAI/USD','DAIUSD','{"addresses":["0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9"],"topics":["0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"],"decimals":8}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
 
       -- Uniswap V2 (Ethereum mainnet logs)
-      ('uniswap-v2-eth-mainnet','rpc_logs','logs','uni-v2-usdc-usdt','swap','uniswap_v2_swap_price_v1','USDC/USD','USDCUSDT','{"addresses":["0x3041CbD36888bECc7bbCBc0045E3B1f144466f5f"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDC"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider'),
-      ('uniswap-v2-eth-mainnet','rpc_logs','logs','uni-v2-usdt-usdc','swap','uniswap_v2_swap_price_v1','USDT/USD','USDTUSDC','{"addresses":["0x3041CbD36888bECc7bbCBc0045E3B1f144466f5f"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDT"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider'),
-      ('uniswap-v2-eth-mainnet','rpc_logs','logs','uni-v2-dai-usdt','swap','uniswap_v2_swap_price_v1','DAI/USD','DAIUSDT','{"addresses":["0x1f98A4a54f8D9f3b9B6Da3f68A2B4E8C8D718a51"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"DAI","token1_symbol":"USDT","token0_decimals":18,"token1_decimals":6,"base_symbol":"DAI"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider'),
+      ('uniswap-v2-eth-mainnet','rpc_logs','logs','uni-v2-usdc-usdt','swap','uniswap_v2_swap_price_v1','USDC/USD','USDCUSDT','{"addresses":["0x3041CbD36888bECc7bbCBc0045E3B1f144466f5f"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDC"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
+      ('uniswap-v2-eth-mainnet','rpc_logs','logs','uni-v2-usdt-usdc','swap','uniswap_v2_swap_price_v1','USDT/USD','USDTUSDC','{"addresses":["0x3041CbD36888bECc7bbCBc0045E3B1f144466f5f"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDT"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
+      ('uniswap-v2-eth-mainnet','rpc_logs','logs','uni-v2-dai-usdt','swap','uniswap_v2_swap_price_v1','DAI/USD','DAIUSDT','{"addresses":["0x1f98A4a54f8D9f3b9B6Da3f68A2B4E8C8D718a51"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"DAI","token1_symbol":"USDT","token0_decimals":18,"token1_decimals":6,"base_symbol":"DAI"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
 
       -- Uniswap V3 (Ethereum mainnet logs)
-      ('uniswap-v3-eth-mainnet','rpc_logs','logs','uni-v3-usdc-usdt','swap','uniswap_v3_swap_price_v1','USDC/USD','USDCUSDT','{"addresses":["0x3416cF6C708Da44DB2624D63ea0AAef7113527C6"],"topics":["0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDC"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider'),
-      ('uniswap-v3-eth-mainnet','rpc_logs','logs','uni-v3-usdt-usdc','swap','uniswap_v3_swap_price_v1','USDT/USD','USDTUSDC','{"addresses":["0x3416cF6C708Da44DB2624D63ea0AAef7113527C6"],"topics":["0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDT"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider'),
-      ('uniswap-v3-eth-mainnet','rpc_logs','logs','uni-v3-dai-usdt','swap','uniswap_v3_swap_price_v1','DAI/USD','DAIUSDT','{"addresses":["0x48DA0965ab2d2cbf1c17c09cfb5cbe67ad5b1406"],"topics":["0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"],"token0_symbol":"DAI","token1_symbol":"USDT","token0_decimals":18,"token1_decimals":6,"base_symbol":"DAI"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider'),
+      ('uniswap-v3-eth-mainnet','rpc_logs','logs','uni-v3-usdc-usdt','swap','uniswap_v3_swap_price_v1','USDC/USD','USDCUSDT','{"addresses":["0x3416cF6C708Da44DB2624D63ea0AAef7113527C6"],"topics":["0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDC"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
+      ('uniswap-v3-eth-mainnet','rpc_logs','logs','uni-v3-usdt-usdc','swap','uniswap_v3_swap_price_v1','USDT/USD','USDTUSDC','{"addresses":["0x3416cF6C708Da44DB2624D63ea0AAef7113527C6"],"topics":["0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDT"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
+      ('uniswap-v3-eth-mainnet','rpc_logs','logs','uni-v3-dai-usdt','swap','uniswap_v3_swap_price_v1','DAI/USD','DAIUSDT','{"addresses":["0x48DA0965ab2d2cbf1c17c09cfb5cbe67ad5b1406"],"topics":["0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"],"token0_symbol":"DAI","token1_symbol":"USDT","token0_decimals":18,"token1_decimals":6,"base_symbol":"DAI"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
 
       -- Sushi V2 (same event shape as UniV2)
-      ('sushi-v2-eth-mainnet','rpc_logs','logs','sushi-v2-usdc-usdt','swap','uniswap_v2_swap_price_v1','USDC/USD','USDCUSDT','{"addresses":["0x397FF1542f962076d0BFE58eA045FfA2d347ACa0"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDC"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider'),
-      ('sushi-v2-eth-mainnet','rpc_logs','logs','sushi-v2-usdt-usdc','swap','uniswap_v2_swap_price_v1','USDT/USD','USDTUSDC','{"addresses":["0x397FF1542f962076d0BFE58eA045FfA2d347ACa0"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDT"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider'),
-      ('sushi-v2-eth-mainnet','rpc_logs','logs','sushi-v2-dai-usdt','swap','uniswap_v2_swap_price_v1','DAI/USD','DAIUSDT','{"addresses":["0xC3D03e4f041FdA8Ff4F9fB6A90f0A6f2fA2f6C9A"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"DAI","token1_symbol":"USDT","token0_decimals":18,"token1_decimals":6,"base_symbol":"DAI"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',FALSE,'glider')
+      ('sushi-v2-eth-mainnet','rpc_logs','logs','sushi-v2-usdc-usdt','swap','uniswap_v2_swap_price_v1','USDC/USD','USDCUSDT','{"addresses":["0x397FF1542f962076d0BFE58eA045FfA2d347ACa0"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDC"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
+      ('sushi-v2-eth-mainnet','rpc_logs','logs','sushi-v2-usdt-usdc','swap','uniswap_v2_swap_price_v1','USDT/USD','USDTUSDC','{"addresses":["0x397FF1542f962076d0BFE58eA045FfA2d347ACa0"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDT"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
+      ('sushi-v2-eth-mainnet','rpc_logs','logs','sushi-v2-dai-usdt','swap','uniswap_v2_swap_price_v1','DAI/USD','DAIUSDT','{"addresses":["0xC3D03e4f041FdA8Ff4F9fB6A90f0A6f2fA2f6C9A"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"DAI","token1_symbol":"USDT","token0_decimals":18,"token1_decimals":6,"base_symbol":"DAI"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider')
   ) AS t(
     source_id,
     connector_mode,
@@ -206,6 +206,7 @@ WITH desired_stream_configs AS (
     auth_config,
     payload_ts_path,
     payload_ts_unit,
+    poll_interval_ms,
     enabled,
     created_by
   )
@@ -224,6 +225,7 @@ INSERT INTO source_stream_configs (
   auth_config,
   payload_ts_path,
   payload_ts_unit,
+  poll_interval_ms,
   enabled,
   created_by
 )
@@ -241,6 +243,7 @@ SELECT
   ds.auth_config,
   ds.payload_ts_path,
   ds.payload_ts_unit,
+  ds.poll_interval_ms,
   ds.enabled,
   ds.created_by
 FROM desired_stream_configs ds
