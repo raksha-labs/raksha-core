@@ -1,0 +1,594 @@
+-- ============================================================================
+-- DeFi Surveillance - Clean Bootstrap Schema (Create-Only)
+-- ============================================================================
+-- Fresh-install schema for local/dev bootstrap.
+-- No migration-style ALTER/UPDATE blocks are included here.
+--
+-- Pipeline order:
+--   1) Source catalog + stream configs
+--   2) Raw feed event landing table (raw_events)
+--   3) Pattern catalog/config + runtime state
+--   4) Detections -> Alerts -> Alert lifecycle
+--   5) Finality + analytics/support tables
+-- ============================================================================
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 1) Source Catalog + Stream Configuration
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS data_sources (
+    source_id         TEXT PRIMARY KEY,
+    source_type       TEXT NOT NULL,        -- evm_chain | cex_websocket | dex_api | oracle_api | custom_api
+    source_name       TEXT NOT NULL,
+    connection_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    filters           JSONB,
+    scope             TEXT NOT NULL DEFAULT 'global'
+        CHECK (scope IN ('global', 'tenant')),
+    owner_tenant_id   TEXT,
+    enabled           BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (
+        (scope = 'global' AND owner_tenant_id IS NULL)
+        OR (scope = 'tenant' AND owner_tenant_id IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_data_sources_scope_owner
+    ON data_sources (scope, owner_tenant_id);
+
+CREATE TABLE IF NOT EXISTS tenant_data_sources (
+    tenant_id       TEXT NOT NULL,
+    source_id       TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
+    enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+    override_config JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_data_sources_tenant
+    ON tenant_data_sources (tenant_id);
+
+CREATE TABLE IF NOT EXISTS source_stream_configs (
+    stream_config_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_id        TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
+    connector_mode   TEXT NOT NULL CHECK (connector_mode IN ('websocket', 'rpc_logs', 'http_poll')),
+    stream_name      TEXT NOT NULL,
+    subscription_key TEXT,
+    event_type       TEXT NOT NULL,
+    parser_name      TEXT NOT NULL,
+    market_key       TEXT,
+    asset_pair       TEXT,
+    filter_config    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    auth_secret_ref  TEXT,
+    auth_config      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    payload_ts_path  TEXT,
+    payload_ts_unit  TEXT NOT NULL DEFAULT 'ms' CHECK (payload_ts_unit IN ('ms', 's', 'iso8601')),
+    poll_interval_ms INTEGER,
+    enabled          BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by       TEXT NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by       TEXT,
+    updated_at       TIMESTAMPTZ,
+    CONSTRAINT source_stream_configs_poll_interval_ms_check
+        CHECK (poll_interval_ms IS NULL OR poll_interval_ms BETWEEN 200 AND 60000)
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_stream_configs_source_enabled
+    ON source_stream_configs (source_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_source_stream_configs_event_type
+    ON source_stream_configs (event_type);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_stream_configs_natural
+    ON source_stream_configs (source_id, stream_name, COALESCE(asset_pair, ''), COALESCE(subscription_key, ''));
+
+CREATE TABLE IF NOT EXISTS source_stream_tenant_targets (
+    stream_config_id UUID NOT NULL REFERENCES source_stream_configs(stream_config_id) ON DELETE CASCADE,
+    tenant_id        TEXT NOT NULL,
+    enabled          BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by       TEXT NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by       TEXT,
+    updated_at       TIMESTAMPTZ,
+    PRIMARY KEY (stream_config_id, tenant_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_stream_tenant_targets_tenant_enabled
+    ON source_stream_tenant_targets (tenant_id, enabled);
+
+CREATE TABLE IF NOT EXISTS source_required_pairs (
+    source_id             TEXT        NOT NULL,
+    market_key            TEXT        NOT NULL,
+    source_symbol         TEXT        NOT NULL,
+    required_tenant_count INTEGER     NOT NULL DEFAULT 0,
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (source_id, market_key, source_symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_required_pairs_source_market
+    ON source_required_pairs (source_id, market_key);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 2) Raw Feed Event Landing (first write in ingestion pipeline)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS raw_events (
+    raw_event_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    stream_config_id  UUID,
+    source_id         TEXT        NOT NULL,
+    source_type       TEXT        NOT NULL,
+    event_type        TEXT        NOT NULL,
+    event_id          TEXT,
+    market_key        TEXT,
+    asset_pair        TEXT,
+    chain_id          BIGINT,
+    block_number      BIGINT,
+    tx_hash           TEXT,
+    log_index         BIGINT,
+    topic0            TEXT,
+    price             DOUBLE PRECISION,
+    payload_event_ts  TIMESTAMPTZ,
+    received_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    observed_at       TIMESTAMPTZ NOT NULL,
+    parse_status      TEXT        NOT NULL CHECK (parse_status IN ('parsed', 'partial', 'raw_only', 'error')),
+    parse_error       TEXT,
+    payload           JSONB       NOT NULL,
+    normalized_fields JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    dedup_key         TEXT,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_events_source_observed
+    ON raw_events (source_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_events_source_market_observed
+    ON raw_events (source_id, market_key, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_events_stream_observed
+    ON raw_events (stream_config_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_events_event_type_observed
+    ON raw_events (event_type, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_events_market_observed
+    ON raw_events (market_key, observed_at DESC)
+    WHERE market_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_raw_events_tx
+    ON raw_events (tx_hash, log_index)
+    WHERE tx_hash IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_events_event_id
+    ON raw_events (event_id)
+    WHERE event_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_events_dedup
+    ON raw_events (dedup_key)
+    WHERE dedup_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS data_source_health (
+    tenant_id       TEXT        NOT NULL,
+    source_id       TEXT        NOT NULL,
+    healthy         BOOLEAN     NOT NULL,
+    last_message_at TIMESTAMPTZ,
+    last_error      TEXT,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, source_id)
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 3) Pattern Catalog, Tenant Bindings, and Runtime State
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS patterns (
+    pattern_id   TEXT PRIMARY KEY,
+    pattern_name TEXT NOT NULL,
+    description  TEXT,
+    enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS pattern_configs (
+    pattern_id TEXT PRIMARY KEY REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    config     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS tenant_pattern_configs (
+    tenant_id  TEXT NOT NULL,
+    pattern_id TEXT NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+    config     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, pattern_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_configs_tenant
+    ON tenant_pattern_configs (tenant_id);
+
+CREATE TABLE IF NOT EXISTS tenant_pattern_source_bindings (
+    tenant_id      TEXT        NOT NULL,
+    pattern_id     TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    source_id      TEXT        NOT NULL,
+    enabled        BOOLEAN     NOT NULL DEFAULT TRUE,
+    binding_config JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, pattern_id, source_id),
+    FOREIGN KEY (tenant_id, source_id)
+      REFERENCES tenant_data_sources(tenant_id, source_id)
+      ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_source_bindings_tenant_pattern
+    ON tenant_pattern_source_bindings (tenant_id, pattern_id);
+
+CREATE TABLE IF NOT EXISTS tenant_pattern_required_assets (
+    tenant_id  TEXT        NOT NULL,
+    pattern_id TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    market_key TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, pattern_id, market_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_required_assets_tenant_pattern
+    ON tenant_pattern_required_assets (tenant_id, pattern_id);
+
+CREATE TABLE IF NOT EXISTS tenant_pattern_alert_policies (
+    tenant_id          TEXT        NOT NULL,
+    pattern_id         TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    severity_threshold TEXT        NOT NULL DEFAULT 'medium',
+    cooldown_sec       INTEGER     NOT NULL DEFAULT 300,
+    default_channels   TEXT[]      NOT NULL DEFAULT '{webhook}',
+    route_overrides    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, pattern_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_alert_policies_tenant
+    ON tenant_pattern_alert_policies (tenant_id);
+
+CREATE TABLE IF NOT EXISTS tenant_pattern_notification_channels (
+    tenant_id          TEXT        NOT NULL,
+    pattern_id         TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    channel            TEXT        NOT NULL,
+    enabled            BOOLEAN     NOT NULL DEFAULT FALSE,
+    config_json        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    use_tenant_default BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, pattern_id, channel),
+    CHECK (channel IN ('webhook', 'slack', 'telegram', 'discord'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_notification_channels_tenant
+    ON tenant_pattern_notification_channels (tenant_id, pattern_id);
+
+CREATE TABLE IF NOT EXISTS pattern_state (
+    tenant_id  TEXT        NOT NULL,
+    pattern_id TEXT        NOT NULL,
+    state_key  TEXT        NOT NULL,
+    data       JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, pattern_id, state_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pattern_state_tenant_pattern
+    ON pattern_state (tenant_id, pattern_id);
+
+CREATE TABLE IF NOT EXISTS pattern_snapshots (
+    id           BIGSERIAL   PRIMARY KEY,
+    tenant_id    TEXT        NOT NULL,
+    pattern_id   TEXT        NOT NULL,
+    snapshot_key TEXT        NOT NULL,
+    data         JSONB       NOT NULL,
+    score        DOUBLE PRECISION,
+    severity     TEXT,
+    observed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pattern_snapshots_tenant_pattern_observed
+    ON pattern_snapshots (tenant_id, pattern_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pattern_snapshots_tenant_key_observed
+    ON pattern_snapshots (tenant_id, snapshot_key, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS tenant_policies (
+    tenant_id          TEXT PRIMARY KEY,
+    severity_threshold TEXT    NOT NULL DEFAULT 'medium',
+    cooldown_sec       INTEGER NOT NULL DEFAULT 300,
+    default_channels   TEXT[]  NOT NULL DEFAULT '{webhook}',
+    protocol_watchlist TEXT[]  NOT NULL DEFAULT '{}',
+    route_overrides    JSONB   NOT NULL DEFAULT '{}'::jsonb,
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 4) Detection and Alert Pipeline
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS detections (
+    id           TEXT PRIMARY KEY,
+    tx_hash      TEXT NOT NULL,
+    chain        TEXT NOT NULL,
+    protocol     TEXT NOT NULL,
+    subject_type TEXT,
+    subject_key  TEXT,
+    tenant_id    TEXT,
+    pattern_id   TEXT,
+    severity     TEXT NOT NULL,
+    risk_score   DOUBLE PRECISION NOT NULL,
+    payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_detections_chain ON detections(chain);
+CREATE INDEX IF NOT EXISTS idx_detections_protocol ON detections(protocol);
+CREATE INDEX IF NOT EXISTS idx_detections_tx_hash ON detections(tx_hash);
+CREATE INDEX IF NOT EXISTS idx_detections_created_at ON detections(created_at);
+CREATE INDEX IF NOT EXISTS idx_detections_subject_created
+    ON detections (subject_type, subject_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_detections_tenant_created
+    ON detections (tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_detections_tenant_pattern_created
+    ON detections (tenant_id, pattern_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id              TEXT PRIMARY KEY,
+    incident_id     TEXT,
+    tx_hash         TEXT NOT NULL,
+    chain           TEXT NOT NULL,
+    chain_slug      TEXT NOT NULL DEFAULT 'unknown',
+    protocol        TEXT NOT NULL,
+    block_number    BIGINT,
+    subject_type    TEXT,
+    subject_key     TEXT,
+    tenant_id       TEXT,
+    pattern_id      TEXT,
+    lifecycle_state TEXT NOT NULL DEFAULT 'confirmed',
+    severity        TEXT NOT NULL,
+    risk_score      DOUBLE PRECISION NOT NULL,
+    payload         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_chain ON alerts(chain);
+CREATE INDEX IF NOT EXISTS idx_alerts_protocol ON alerts(protocol);
+CREATE INDEX IF NOT EXISTS idx_alerts_tx_hash ON alerts(tx_hash);
+CREATE INDEX IF NOT EXISTS idx_alerts_incident_id ON alerts(incident_id);
+CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts(created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_subject_created
+    ON alerts (subject_type, subject_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_tenant_created
+    ON alerts (tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_tenant_pattern_created
+    ON alerts (tenant_id, pattern_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_tenant_lifecycle
+    ON alerts (tenant_id, lifecycle_state, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_tenant_severity
+    ON alerts (tenant_id, severity, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS alert_lifecycle_events (
+    id              BIGSERIAL PRIMARY KEY,
+    alert_id        TEXT NOT NULL,
+    incident_id     TEXT,
+    event_key       TEXT,
+    tx_hash         TEXT NOT NULL DEFAULT '',
+    block_number    BIGINT NOT NULL DEFAULT 0,
+    lifecycle_state TEXT NOT NULL DEFAULT 'confirmed',
+    payload         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_lifecycle_alert_id
+    ON alert_lifecycle_events (alert_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_lifecycle_incident_id
+    ON alert_lifecycle_events (incident_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_lifecycle_events_event_key
+    ON alert_lifecycle_events (event_key);
+
+CREATE TABLE IF NOT EXISTS incidents (
+    incident_id      TEXT PRIMARY KEY,
+    tenant_id        TEXT NOT NULL,
+    pattern_id       TEXT NOT NULL,
+    subject_type     TEXT,
+    subject_key      TEXT,
+    chain_slug       TEXT NOT NULL DEFAULT 'unknown',
+    status           TEXT NOT NULL DEFAULT 'triggered',
+    current_severity TEXT NOT NULL DEFAULT 'medium',
+    opened_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    closed_at        TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_incidents_tenant_status_updated
+    ON incidents (tenant_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_incidents_tenant_pattern_subject
+    ON incidents (tenant_id, pattern_id, subject_key, chain_slug);
+CREATE INDEX IF NOT EXISTS idx_incidents_chain_pattern_status
+    ON incidents (chain_slug, pattern_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS incident_events (
+    id               BIGSERIAL PRIMARY KEY,
+    incident_id      TEXT NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    transition_type  TEXT NOT NULL,
+    from_state       TEXT,
+    to_state         TEXT,
+    reason           TEXT,
+    payload          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_incident_events_incident_created
+    ON incident_events (incident_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_incident_events_transition_created
+    ON incident_events (transition_type, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS incident_context_snapshots (
+    id             BIGSERIAL PRIMARY KEY,
+    incident_id    TEXT NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    classification TEXT,
+    score          DOUBLE PRECISION,
+    confidence     DOUBLE PRECISION,
+    payload        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    observed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_incident_context_snapshots_incident_observed
+    ON incident_context_snapshots (incident_id, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS alert_delivery_attempts (
+    id          BIGSERIAL PRIMARY KEY,
+    alert_id    TEXT NOT NULL,
+    tenant_id   TEXT NOT NULL,
+    channel     TEXT NOT NULL,
+    delivered   BOOLEAN NOT NULL,
+    reason      TEXT,
+    status_code INTEGER,
+    attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_delivery_attempts_alert
+    ON alert_delivery_attempts (alert_id, attempted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_delivery_attempts_tenant
+    ON alert_delivery_attempts (tenant_id, attempted_at DESC);
+
+CREATE TABLE IF NOT EXISTS usage_events (
+    id          BIGSERIAL PRIMARY KEY,
+    tenant_id   TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
+    alert_type  TEXT NOT NULL,
+    chain_id    BIGINT,
+    quantity    INTEGER NOT NULL DEFAULT 1,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_events_tenant_recorded
+    ON usage_events (tenant_id, recorded_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 5) Indexer Durable State + Dead Letter Queue
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS indexer_state (
+    chain                  TEXT PRIMARY KEY,
+    last_indexed_block     BIGINT NOT NULL,
+    last_block_hash        TEXT NOT NULL,
+    last_block_timestamp   TIMESTAMPTZ,
+    processed_events_count BIGINT NOT NULL DEFAULT 0,
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS processed_events (
+    event_id      UUID PRIMARY KEY,
+    tx_hash       TEXT NOT NULL,
+    block_number  BIGINT NOT NULL,
+    block_hash    TEXT NOT NULL,
+    chain         TEXT NOT NULL,
+    event_key     TEXT,
+    processed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reverted      BOOLEAN NOT NULL DEFAULT FALSE,
+    UNIQUE (tx_hash, block_number, chain)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_events_event_key
+    ON processed_events (event_key);
+CREATE INDEX IF NOT EXISTS idx_processed_events_chain_block
+    ON processed_events (chain, block_number);
+
+CREATE TABLE IF NOT EXISTS normalized_events (
+    event_key              TEXT PRIMARY KEY,
+    event_id               UUID NOT NULL,
+    chain                  TEXT NOT NULL,
+    chain_slug             TEXT NOT NULL,
+    chain_id               BIGINT,
+    protocol               TEXT NOT NULL,
+    protocol_category      TEXT NOT NULL,
+    event_type             TEXT NOT NULL CHECK (event_type IN ('oracle_update', 'flash_loan_candidate')),
+    tx_hash                TEXT NOT NULL,
+    block_number           BIGINT NOT NULL,
+    block_hash             TEXT,
+    tx_index               BIGINT,
+    log_index              BIGINT,
+    status                 TEXT NOT NULL,
+    lifecycle_state        TEXT NOT NULL,
+    requires_confirmation  BOOLEAN NOT NULL,
+    confirmation_depth     BIGINT NOT NULL,
+    observed_at            TIMESTAMPTZ NOT NULL,
+    reverted               BOOLEAN NOT NULL DEFAULT FALSE,
+    payload                JSONB NOT NULL,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_normalized_events_chain_block
+    ON normalized_events (chain_slug, block_number);
+CREATE INDEX IF NOT EXISTS idx_normalized_events_tx_hash
+    ON normalized_events (tx_hash);
+CREATE INDEX IF NOT EXISTS idx_normalized_events_observed_at
+    ON normalized_events (observed_at);
+CREATE INDEX IF NOT EXISTS idx_normalized_events_reverted
+    ON normalized_events (reverted);
+
+CREATE TABLE IF NOT EXISTS dead_letter_queue (
+    id               TEXT PRIMARY KEY,
+    stream_name      TEXT NOT NULL,
+    entry_id         TEXT NOT NULL,
+    payload          JSONB NOT NULL,
+    error_message    TEXT NOT NULL,
+    retry_count      INTEGER NOT NULL DEFAULT 0,
+    first_failure_at TIMESTAMPTZ NOT NULL,
+    last_failure_at  TIMESTAMPTZ NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_dead_letter_queue_stream_name
+    ON dead_letter_queue (stream_name);
+CREATE INDEX IF NOT EXISTS idx_dead_letter_queue_created_at
+    ON dead_letter_queue (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dead_letter_queue_retry_count
+    ON dead_letter_queue (retry_count DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 6) Finality, Dependency Graph, and Feature Storage
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS finality_state (
+    chain              TEXT PRIMARY KEY,
+    head_block         BIGINT NOT NULL,
+    confirmation_depth INTEGER NOT NULL,
+    blocks             JSONB NOT NULL,
+    states             JSONB NOT NULL,
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS dependency_edges (
+    id         BIGSERIAL PRIMARY KEY,
+    chain      TEXT NOT NULL,
+    protocol   TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    target     TEXT NOT NULL,
+    relation   TEXT NOT NULL,
+    weight     DOUBLE PRECISION,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_dependency_edges_protocol
+    ON dependency_edges (chain, protocol);
+
+CREATE TABLE IF NOT EXISTS feature_vectors (
+    id                  BIGSERIAL PRIMARY KEY,
+    detection_id        TEXT NOT NULL,
+    tenant_id           TEXT,
+    feature_set_version TEXT NOT NULL,
+    values              JSONB NOT NULL,
+    labels              JSONB NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_feature_vectors_detection
+    ON feature_vectors (detection_id);
+
+-- ============================================================================
+-- Notes
+-- ============================================================================
+-- For high-volume production workloads, consider:
+-- 1. Time-based partitioning on raw_events, detections, alerts
+-- 2. Retention/archive jobs for historical rows
+-- 3. Connection pooling (PgBouncer)
+-- 4. Read replicas for analytics
+-- ============================================================================

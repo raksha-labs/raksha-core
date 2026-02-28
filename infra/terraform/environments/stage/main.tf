@@ -60,6 +60,29 @@ module "data_prod" {
   tags               = var.tags
 }
 
+locals {
+  database_url_secret_arn = var.enable_managed_data ? module.data_prod[0].database_url_secret_arn : null
+  redis_url_secret_arn    = var.enable_managed_data ? module.data_prod[0].redis_url_secret_arn : null
+
+  service_static_env = {
+    orchestrator = {
+      ALERT_FALLBACK_TENANT_ID = "glider"
+      NOTIFIER_GATEWAY_URL     = "http://notifier-gateway:3002"
+    }
+    finality = {
+      ALERT_FALLBACK_TENANT_ID = "glider"
+    }
+  }
+
+  service_secret_env = {
+    for service_name in keys(local.service_catalog_map) :
+    service_name => merge(
+      var.enable_managed_data ? { DATABASE_URL = "${local.database_url_secret_arn}:DATABASE_URL::" } : {},
+      var.enable_managed_data ? { REDIS_URL = "${local.redis_url_secret_arn}:REDIS_URL::" } : {}
+    )
+  }
+}
+
 module "compute" {
   source = "../../modules/compute-ecs"
 
@@ -88,7 +111,63 @@ module "compute" {
   public_certificate_arn       = var.public_certificate_arn
   enable_test_data_services    = false
   fargate_spot_scaling_classes = var.fargate_spot_scaling_classes
+  service_static_env           = local.service_static_env
+  service_secret_env           = local.service_secret_env
   tags                         = var.tags
+}
+
+locals {
+  core_contract_version = sha256(join("|", compact([
+    var.environment,
+    var.image_tag,
+    local.database_url_secret_arn,
+    local.redis_url_secret_arn,
+    module.compute.service_discovery_namespace_name
+  ])))
+}
+
+resource "aws_ssm_parameter" "core_database_url_secret_arn" {
+  count = var.enable_managed_data ? 1 : 0
+
+  name      = "/defi-surv/${var.environment}/core/database_url_secret_arn"
+  type      = "String"
+  value     = local.database_url_secret_arn
+  overwrite = true
+  tags      = var.tags
+}
+
+resource "aws_ssm_parameter" "core_redis_url_secret_arn" {
+  count = var.enable_managed_data ? 1 : 0
+
+  name      = "/defi-surv/${var.environment}/core/redis_url_secret_arn"
+  type      = "String"
+  value     = local.redis_url_secret_arn
+  overwrite = true
+  tags      = var.tags
+}
+
+resource "aws_ssm_parameter" "core_service_discovery_namespace" {
+  name      = "/defi-surv/${var.environment}/core/service_discovery_namespace"
+  type      = "String"
+  value     = module.compute.service_discovery_namespace_name
+  overwrite = true
+  tags      = var.tags
+}
+
+resource "aws_ssm_parameter" "core_cluster_name" {
+  name      = "/defi-surv/${var.environment}/core/cluster_name"
+  type      = "String"
+  value     = module.compute.cluster_name
+  overwrite = true
+  tags      = var.tags
+}
+
+resource "aws_ssm_parameter" "core_contract_version" {
+  name      = "/defi-surv/${var.environment}/core/contract_version"
+  type      = "String"
+  value     = local.core_contract_version
+  overwrite = true
+  tags      = var.tags
 }
 
 resource "aws_wafv2_web_acl" "public" {

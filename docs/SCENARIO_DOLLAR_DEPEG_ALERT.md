@@ -2,82 +2,86 @@
 
 ## Goal
 
-Detect sustained depeg on a dollar-pegged market (for example `USDC/USD`) using multi-source quote consensus, then emit a core detection event for normal alert lifecycle handling.
+Detect sustained depeg on a dollar-pegged market (e.g., `USDC/USD`) using the `DpegPattern` within the detector's pattern registry, then emit a detection event for normal alert lifecycle handling.
 
 ## Preconditions
 
 - Core runtime dependencies are up (`Postgres`, `Redis`).
-- Core schema from `infra/sql/001_init.sql`, `infra/sql/002_lifecycle_tenant.sql`, `infra/sql/003_market_dpeg.sql` is applied.
-- DPEG configuration tables exist and are populated:
-  - `tenant_market_sources`
-  - `tenant_market_pairs`
-  - `tenant_dpeg_policies`
-  - `tenant_dpeg_policy_sources`
+- Core schema from `infra/sql/001_init.sql` and `infra/sql/002_lifecycle_tenant.sql` is applied.
+- Pattern configuration tables exist:
+  - `tenant_data_sources` — Multi-source data connections (CEX, oracle feeds)
+  - `tenant_pattern_configs` — Per-tenant pattern configuration
+  - `pattern_state` — Runtime pattern state management
+  - `pattern_snapshots` — Historical pattern evaluation snapshots
 
 These configuration tables are normally created/managed by `defi-surv-platform` `config-service`.
 
-## Required Runtime Flags
+## Architecture Overview
 
-```bash
-export MARKET_DPEG_ENABLED=true
-export DPEG_ALERTS_EMIT_ENABLED=true
+DpegPattern is registered in the detector alongside other patterns (FlashLoanPattern, etc.). It implements the `DetectionPattern` trait:
+
+```rust
+pub trait DetectionPattern: Send + Sync {
+    fn process_event(&mut self, event: &UnifiedEvent) -> Result<Option<DetectionResult>>;
+}
 ```
+
+The indexer aggregates quotes from multiple sources (Binance, Coinbase, Kraken, etc.) into the unified event stream.
 
 ## End-to-End Sequence
 
 ```mermaid
 sequenceDiagram
   participant Ops as Operator
-  participant CFG as Config Source (Platform)
+  participant CFG as Config Service (Platform)
   participant DB as Postgres
-  participant MIDX as market-indexer
-  participant MQ as Redis market-quotes
-  participant MDET as market-detector
-  participant MS as Redis market-snapshots
+  participant IDX as indexer
+  participant UNIFIED as Redis unified-events
+  participant DET as detector (DpegPattern)
   participant DETS as Redis detections
   participant ORCH as orchestrator
 
-  Ops->>CFG: Upsert market sources + DPEG policy
-  CFG->>DB: Write tenant_* config tables
+  Ops->>CFG: Configure DPEG pattern for tenant
+  CFG->>DB: Write tenant_pattern_configs + tenant_data_sources
 
-  loop Continuous quotes
-    MIDX->>DB: Load enabled sources/pairs
-    MIDX->>MQ: Publish MarketQuoteEvent
-    MIDX->>DB: Persist market_quote_ticks
+  loop Continuous event ingestion
+    IDX->>DB: Load enabled data sources
+    IDX->>UNIFIED: Publish UnifiedEvent (market quotes from CEX/Oracle)
   end
 
-  MDET->>MQ: Consume quote stream
-  MDET->>MDET: Weighted median + divergence + quorum + cooldown
-  MDET->>DB: Persist market_consensus_snapshots + dpeg_alert_state
-  MDET->>MS: Publish MarketConsensusSnapshot
+  DET->>UNIFIED: Consume unified event stream
+  DET->>DET: DpegPattern.process_event()
+  DET->>DET: Weighted median + divergence + quorum + cooldown
+  DET->>DB: Persist pattern_snapshots
 
   alt Sustained breach and cooldown allows alert
-    MDET->>DETS: Publish DetectionResult (attack_family=PegDeviation)
+    DET->>DETS: Publish DetectionResult (attack_family=PegDeviation)
     ORCH->>DETS: Consume detection
     ORCH->>DB: Persist detections/alerts lifecycle
+    ORCH->>DB: Enforce tenant monthly quota (critical bypass)
   end
 ```
 
 ## Local Validation Checklist
 
-1. Quote ingestion is live:
+1. Unified event stream is active:
 ```bash
-docker exec -it defi-surv-redis redis-cli XINFO STREAM defi-surv:market-quotes
+docker exec -it defi-surv-redis redis-cli XINFO STREAM defi-surv:unified-events
 ```
 
-2. Consensus snapshots are being generated:
+2. Pattern snapshots are being generated:
 ```bash
-docker exec -it defi-surv-redis redis-cli XINFO STREAM defi-surv:market-snapshots
+docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT tenant_id, pattern_name, snapshot_data, created_at FROM pattern_snapshots WHERE pattern_name='dpeg' ORDER BY created_at DESC LIMIT 20;"
 ```
 
-3. Snapshot persistence is present:
+3. DPEG detections are emitted when breach criteria are met:
 ```bash
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT tenant_id, market_key, divergence_pct, severity, observed_at FROM market_consensus_snapshots ORDER BY observed_at DESC LIMIT 20;"
+docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT id, protocol, severity, payload->'signals' AS signals, created_at FROM detections WHERE attack_family='PegDeviation' ORDER BY created_at DESC LIMIT 20;"
 ```
 
-4. DPEG detections are emitted when breach criteria are met:
+4. Alert lifecycle tracking:
 ```bash
-docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT id, protocol, severity, payload->'signals' AS signals, created_at FROM detections ORDER BY created_at DESC LIMIT 20;"
+docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT id, tenant_id, lifecycle_state, severity, created_at FROM alerts ORDER BY created_at DESC LIMIT 20;"
 ```
 
 ## Default Policy Behavior
@@ -91,7 +95,9 @@ docker exec -it defi-surv-postgres psql -U postgres -d defi_surv -c "SELECT id, 
 
 ## Common Failure Modes
 
-- No quotes: connector cannot subscribe/read source; inspect `connector_health_state.last_error`.
-- No snapshots: no matching enabled policy/source mapping for `(tenant_id, market_key)`.
-- No detections: breach not sustained long enough, quorum not met, or cooldown active.
+- No unified events: indexer cannot connect to data sources; check `tenant_data_sources` configuration.
+- No pattern snapshots: no matching `tenant_pattern_configs` entry for DPEG pattern.
+- No detections: breach not sustained long enough, quorum not met, or pattern cooldown active.
+- Alert row is `suppressed`: tenant hit `max_alerts_per_month`; verify non-critical quota behavior and critical bypass.
 - Detections present but no alert progression: orchestrator not running or cannot read Redis/Postgres.
+- Pattern state corruption: check `pattern_state` table for stale entries, verify detector restart clears locks.

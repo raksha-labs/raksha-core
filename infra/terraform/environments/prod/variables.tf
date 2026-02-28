@@ -172,13 +172,13 @@ variable "admin_ingress_cidrs" {
 variable "github_org" {
   description = "GitHub organization"
   type        = string
-  default     = "your-org"
+  default     = "defi-surv"
 }
 
 variable "github_repo" {
   description = "GitHub repository"
   type        = string
-  default     = "defi-surv"
+  default     = "defi-surv-core"
 }
 
 variable "github_allowed_branches" {

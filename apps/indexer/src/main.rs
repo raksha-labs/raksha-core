@@ -6,20 +6,27 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
+use common::{start_health_check_server, ChainAdapter};
+use dotenv::dotenv;
+use event_schema::{NormalizedEvent, ReorgNotice};
 use ingestion::{
     build_oracle_protocol_map, default_eth_oracles, parse_oracle_addresses,
     parse_oracle_addresses_csv, parse_protocol_category, EvmChainAdapter, EvmChainConfig,
     EvmMockAdapter, EvmProtocolConfigFile, FlashLoanSourceConfig, MockProtocol, ProtocolBinding,
     DEFAULT_FILTER_CHUNK_SIZE, DEFAULT_LOOKBACK_BLOCKS, DEFAULT_ORACLE_DECIMALS,
 };
-use chrono::Utc;
-use event_schema::{NormalizedEvent, ReorgNotice};
-use common::ChainAdapter;
-use dotenv::dotenv;
 use serde::de::DeserializeOwned;
-use state_manager::RedisStreamPublisher;
+use state_manager::{PostgresRepository, RedisStreamPublisher};
 use tokio_postgres::{Client, NoTls};
 use tracing::{info, warn};
+
+mod stream_connector;
+mod stream_parser;
+mod stream_supervisor;
+mod stream_worker;
+
+use stream_supervisor::run_stream_supervisor;
 
 const DEFAULT_RULE_RELATIVE_ROOTS: [&str; 3] = [
     "./rules",      // Running from defi-surv-core/
@@ -139,81 +146,32 @@ impl IndexerStateStore {
     }
 
     async fn init_schema(&self) -> Result<()> {
-        self.client
-            .batch_execute(
-                r#"
-                CREATE TABLE IF NOT EXISTS indexer_state (
-                    chain TEXT PRIMARY KEY,
-                    last_indexed_block BIGINT NOT NULL,
-                    last_block_hash TEXT NOT NULL,
-                    last_block_timestamp TIMESTAMPTZ,
-                    processed_events_count BIGINT NOT NULL DEFAULT 0,
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
+        let required_tables = ["indexer_state", "processed_events", "normalized_events"];
+        let mut missing_tables = Vec::new();
+        for table in required_tables {
+            let exists = self
+                .client
+                .query_opt(
+                    r#"
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = $1
+                    "#,
+                    &[&table],
+                )
+                .await?;
+            if exists.is_none() {
+                missing_tables.push(table);
+            }
+        }
 
-                CREATE TABLE IF NOT EXISTS processed_events (
-                    event_id UUID PRIMARY KEY,
-                    tx_hash TEXT NOT NULL,
-                    block_number BIGINT NOT NULL,
-                    block_hash TEXT NOT NULL,
-                    chain TEXT NOT NULL,
-                    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    reverted BOOLEAN NOT NULL DEFAULT FALSE,
-                    UNIQUE (tx_hash, block_number, chain)
-                );
-
-                ALTER TABLE processed_events
-                    ADD COLUMN IF NOT EXISTS event_key TEXT;
-
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_events_event_key
-                    ON processed_events (event_key);
-
-                CREATE INDEX IF NOT EXISTS idx_processed_events_chain_block
-                    ON processed_events (chain, block_number);
-
-                CREATE TABLE IF NOT EXISTS normalized_events (
-                    event_key TEXT PRIMARY KEY,
-                    event_id UUID NOT NULL,
-                    chain TEXT NOT NULL,
-                    chain_slug TEXT NOT NULL,
-                    chain_id BIGINT,
-                    protocol TEXT NOT NULL,
-                    protocol_category TEXT NOT NULL,
-                    event_type TEXT NOT NULL CHECK (event_type IN ('oracle_update', 'flash_loan_candidate')),
-                    tx_hash TEXT NOT NULL,
-                    block_number BIGINT NOT NULL,
-                    block_hash TEXT,
-                    tx_index BIGINT,
-                    log_index BIGINT,
-                    status TEXT NOT NULL,
-                    lifecycle_state TEXT NOT NULL,
-                    requires_confirmation BOOLEAN NOT NULL,
-                    confirmation_depth BIGINT NOT NULL,
-                    observed_at TIMESTAMPTZ NOT NULL,
-                    reverted BOOLEAN NOT NULL DEFAULT FALSE,
-                    payload JSONB NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_normalized_events_chain_block
-                    ON normalized_events (chain_slug, block_number);
-                CREATE INDEX IF NOT EXISTS idx_normalized_events_tx_hash
-                    ON normalized_events (tx_hash);
-                CREATE INDEX IF NOT EXISTS idx_normalized_events_observed_at
-                    ON normalized_events (observed_at);
-                CREATE INDEX IF NOT EXISTS idx_normalized_events_reverted
-                    ON normalized_events (reverted);
-
-                INSERT INTO indexer_state (chain, last_indexed_block, last_block_hash)
-                VALUES
-                    ('ethereum', 0, '0x0000000000000000000000000000000000000000000000000000000000000000'),
-                    ('base', 0, '0x0000000000000000000000000000000000000000000000000000000000000000')
-                ON CONFLICT (chain) DO NOTHING;
-                "#,
-            )
-            .await?;
-
+        if !missing_tables.is_empty() {
+            anyhow::bail!(
+                "missing core schema tables: {}. Run SQL bootstrap (schema.sql + seed_data.sql)",
+                missing_tables.join(", ")
+            );
+        }
         Ok(())
     }
 
@@ -551,6 +509,7 @@ async fn main() -> Result<()> {
         )
         .compact()
         .init();
+    let health_status = start_health_check_server("indexer");
 
     let mut adapters = build_adapters().await?;
     if adapters.is_empty() {
@@ -567,6 +526,59 @@ async fn main() -> Result<()> {
         warn!("REDIS_URL not set or unavailable; ingestion requires Redis Streams");
         return Ok(());
     };
+
+    let stream_supervisor_enabled = std::env::var("STREAM_SUPERVISOR_ENABLED")
+        .ok()
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let stream_purge_enabled = std::env::var("STREAM_PURGE_ENABLED")
+        .ok()
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if stream_supervisor_enabled {
+        match std::env::var("DATABASE_URL") {
+            Ok(database_url) => match PostgresRepository::from_database_url(&database_url).await {
+                Ok(repo) => {
+                    let stream_clone = stream.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = run_stream_supervisor(
+                            repo,
+                            stream_clone,
+                            database_url,
+                            stream_purge_enabled,
+                        )
+                        .await
+                        {
+                            warn!(error = ?err, "stream supervisor task terminated");
+                        }
+                    });
+                    info!(
+                        stream_purge_enabled,
+                        "db-driven stream supervisor started",
+                    );
+                }
+                Err(err) => warn!(
+                    error = ?err,
+                    "failed to initialize stream supervisor repository; supervisor disabled",
+                ),
+            },
+            Err(_) => warn!("DATABASE_URL not set; stream supervisor disabled"),
+        }
+    } else {
+        info!("db-driven stream supervisor disabled by STREAM_SUPERVISOR_ENABLED=false");
+    }
+
+    if let Some(status) = health_status.as_ref() {
+        let mut health = status.write().await;
+        health.redis_connected = true;
+        health.postgres_connected = std::env::var("DATABASE_URL").is_ok();
+        health.details = vec![
+            format!("chain_adapter_count={}", adapters.len()),
+            format!("stream_supervisor_enabled={stream_supervisor_enabled}"),
+            format!("stream_purge_enabled={stream_purge_enabled}"),
+        ];
+        health.is_ready = true;
+    }
 
     let poll_interval_secs = std::env::var("INGESTION_POLL_INTERVAL_SECS")
         .ok()

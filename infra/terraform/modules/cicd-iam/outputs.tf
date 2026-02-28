@@ -17,3 +17,8 @@ output "deploy_role_arn" {
   value       = aws_iam_role.deploy.arn
   description = "Role ARN for deployment workflow"
 }
+
+output "trusted_github_subjects" {
+  value       = local.subjects
+  description = "GitHub OIDC subjects trusted by this module"
+}

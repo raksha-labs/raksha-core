@@ -10,8 +10,8 @@ public_certificate_arn  = "arn:aws:acm:eu-west-1:123456789012:certificate/replac
 enable_waf              = true
 image_tag               = "main-abcdef0"
 
-github_org              = "your-org"
-github_repo             = "defi-surv"
+github_org              = "defi-surv"
+github_repo             = "defi-surv-core"
 github_allowed_branches = ["main", "release/*"]
 
 create_oidc_provider    = false

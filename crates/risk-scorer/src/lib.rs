@@ -63,13 +63,13 @@ impl RiskScorer for DeterministicRiskScorer {
         }
 
         for signal in &result.signals {
-            if signal.signal_type == SignalType::OracleDivergence && signal.triggered {
+            if signal.signal_type == SignalType::OracleDivergence {
                 score += 25.0;
                 rationale.push("Oracle divergence triggered +25".to_string());
                 attribution.push(Attribution {
                     feature: "oracle_divergence".to_string(),
                     contribution: 25.0,
-                    detail: signal.detail.clone(),
+                    detail: signal.label.clone().unwrap_or_else(|| format!("divergence value: {:.4}", signal.value)),
                 });
             }
         }

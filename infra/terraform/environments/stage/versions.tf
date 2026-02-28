@@ -12,5 +12,6 @@ terraform {
     }
   }
 
-  # backend "s3" {}
+  # Configure backend via -backend-config at init time.
+  backend "s3" {}
 }

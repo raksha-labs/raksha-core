@@ -1,0 +1,72 @@
+name: Reusable Terraform Plan
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      image_tag:
+        required: true
+        type: string
+      aws_region:
+        required: false
+        type: string
+        default: eu-west-1
+    secrets:
+      aws_role_arn:
+        required: true
+      tf_backend_bucket:
+        required: true
+      tf_backend_dynamodb_table:
+        required: true
+      tf_backend_kms_key_id:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Terraform plan
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          TF_BACKEND_BUCKET: ${{ secrets.tf_backend_bucket }}
+          TF_BACKEND_DYNAMODB_TABLE: ${{ secrets.tf_backend_dynamodb_table }}
+          TF_BACKEND_KMS_KEY_ID: ${{ secrets.tf_backend_kms_key_id }}
+        run: |
+          scripts/ci/terraform_plan.sh "${{ inputs.environment }}" "${{ inputs.image_tag }}"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.environment }}
+          path: infra/terraform/environments/${{ inputs.environment }}/plan.txt
+
+      - name: Add plan summary
+        if: always()
+        run: |
+          echo "### Terraform plan (${{ inputs.environment }})" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "infra/terraform/environments/${{ inputs.environment }}/plan.txt" ]; then
+            tail -n 20 "infra/terraform/environments/${{ inputs.environment }}/plan.txt" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Plan output not generated." >> "$GITHUB_STEP_SUMMARY"
+          fi

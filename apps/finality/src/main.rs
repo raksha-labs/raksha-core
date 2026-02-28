@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use anyhow::Result;
 use event_schema::Chain;
-use common::{FinalityEngine, ShutdownSignal};
+use common::{start_health_check_server, FinalityEngine, ShutdownSignal};
 use dotenv::dotenv;
 use state_manager::RedisStreamPublisher;
 use state_manager::{ChainFinalityTracker, InMemoryFinalityEngine, PostgresRepository};
@@ -22,6 +22,7 @@ async fn main() -> Result<()> {
         )
         .compact()
         .init();
+    let health_status = start_health_check_server("finality");
 
     let Some(stream) = init_stream_publisher().await else {
         warn!("REDIS_URL not set or unavailable; state-manager requires Redis Streams");
@@ -78,6 +79,17 @@ async fn main() -> Result<()> {
         info!("finality state persistence enabled");
     } else {
         warn!("DATABASE_URL not set; finality state will not be persisted");
+    }
+
+    if let Some(status) = health_status.as_ref() {
+        let mut health = status.write().await;
+        health.redis_connected = true;
+        health.postgres_connected = repository.is_some();
+        health.details = vec![
+            format!("consumer_group_enabled={use_consumer_group}"),
+            format!("stream_group={finality_group}"),
+        ];
+        health.is_ready = true;
     }
 
     info!("state-manager started");
@@ -261,7 +273,12 @@ async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
 fn default_confirmation_depth_for_chain(chain: &Chain) -> u64 {
     let env_name = match chain {
         Chain::Ethereum => "ETH_CONFIRMATION_DEPTH",
+        Chain::Arbitrum => "ARB_CONFIRMATION_DEPTH",
+        Chain::Optimism => "OP_CONFIRMATION_DEPTH",
         Chain::Base => "BASE_CONFIRMATION_DEPTH",
+        Chain::Polygon => "POLYGON_CONFIRMATION_DEPTH",
+        Chain::Avalanche => "AVAX_CONFIRMATION_DEPTH",
+        Chain::BSC => "BSC_CONFIRMATION_DEPTH",
         Chain::Offchain => "OFFCHAIN_CONFIRMATION_DEPTH",
         Chain::Unknown => "CONFIRMATION_DEPTH",
     };

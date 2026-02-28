@@ -1,0 +1,228 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: defi-surv-postgres
+    environment:
+      POSTGRES_DB: defi_surv
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Mount SQL files for easy access
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./sql/seed_data.sql:/docker-entrypoint-initdb.d/02-seed_data.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - defi-surv
+
+  redis:
+    image: redis:7-alpine
+    container_name: defi-surv-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - defi-surv
+
+  indexer:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: defi-surv-core:local
+    container_name: defi-surv-indexer
+    command: ["/app/bin/indexer"]
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/defi_surv
+      REDIS_URL: redis://redis:6379
+      RULES_REPO_PATH: /app/rules
+      RUST_LOG: info
+      STREAM_SUPERVISOR_ENABLED: ${STREAM_SUPERVISOR_ENABLED:-true}
+      STREAM_PURGE_ENABLED: ${STREAM_PURGE_ENABLED:-true}
+      ETH_WS_URL: ${ETH_WS_URL:-}
+      ETH_WS_URL_BACKUP: ${ETH_WS_URL_BACKUP:-}
+      INGESTION_POLL_INTERVAL_SECS: 5
+      INGESTION_MAX_RETRIES: ${INGESTION_MAX_RETRIES:-20}
+      INGESTION_RETRY_BACKOFF_MS: ${INGESTION_RETRY_BACKOFF_MS:-2000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - defi-surv
+
+  detector:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: defi-surv-core:local
+    container_name: defi-surv-detector
+    command: ["/app/bin/detector"]
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/defi_surv
+      REDIS_URL: redis://redis:6379
+      RULES_REPO_PATH: /app/rules
+      RUST_LOG: info
+      ETH_WS_URL: ${ETH_WS_URL:-}
+      DETECTION_ENGINE_USE_STREAM_MODE: "true"
+      DETECTION_ENGINE_EMIT_ALERTS: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      indexer:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - defi-surv
+
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: defi-surv-core:local
+    container_name: defi-surv-orchestrator
+    command: ["/app/bin/orchestrator"]
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/defi_surv
+      REDIS_URL: redis://redis:6379
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      detector:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - defi-surv
+
+  finality:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: defi-surv-core:local
+    container_name: defi-surv-finality
+    command: ["/app/bin/finality"]
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/defi_surv
+      REDIS_URL: redis://redis:6379
+      RUST_LOG: info
+      ETH_WS_URL: ${ETH_WS_URL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - defi-surv
+
+  simlab:
+    build:
+      context: ../../../defi-surv-simlab
+      dockerfile: docker/Dockerfile
+    image: defi-surv-simlab:local
+    container_name: defi-surv-simlab
+    command: ["run", "batch", "--chain", "ethereum", "--sink", "dual"]
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/defi_surv
+      REDIS_URL: redis://redis:6379/0
+      SIMLAB_SCENARIOS_DIR: /app/scenarios
+      SIMLAB_DEFAULT_SINK: dual
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - defi-surv
+    profiles:
+      - simlab
+
+  simlab-rpc:
+    build:
+      context: ../../../defi-surv-simlab
+      dockerfile: docker/Dockerfile
+    image: defi-surv-simlab:local
+    container_name: defi-surv-simlab-rpc
+    command:
+      [
+        "serve",
+        "rpc",
+        "--fixture",
+        "/app/rpc-fixtures/ethereum/alchemy_like_flash_oracle.yaml",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8546"
+      ]
+    ports:
+      - "8546:8546"
+    environment:
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
+    networks:
+      - defi-surv
+    profiles:
+      - simlab-rpc
+
+  # Optional: Redis Commander for debugging
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: defi-surv-redis-commander
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - defi-surv
+    profiles:
+      - debug
+
+  # Optional: pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: defi-surv-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@defi-surv.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "8080:80"
+    depends_on:
+      - postgres
+    networks:
+      - defi-surv
+    profiles:
+      - debug
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  defi-surv:
+    driver: bridge

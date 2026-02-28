@@ -28,6 +28,18 @@ variable "service_cpu_memory" {
   default = {}
 }
 
+variable "service_static_env" {
+  description = "Static environment variables per service"
+  type        = map(map(string))
+  default     = {}
+}
+
+variable "service_secret_env" {
+  description = "Secrets Manager valueFrom entries per service"
+  type        = map(map(string))
+  default     = {}
+}
+
 variable "compute_mode" {
   description = "Compute mode: ec2 or fargate_mix"
   type        = string

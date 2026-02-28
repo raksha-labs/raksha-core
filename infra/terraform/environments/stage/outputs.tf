@@ -52,3 +52,8 @@ output "github_deploy_role_arn" {
   value       = module.cicd_iam.deploy_role_arn
   description = "GitHub Actions deploy role ARN"
 }
+
+output "core_contract_ssm_prefix" {
+  value       = "/defi-surv/${var.environment}/core"
+  description = "SSM prefix for core deployment contract"
+}

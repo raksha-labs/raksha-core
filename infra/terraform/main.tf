@@ -44,10 +44,10 @@ resource "aws_ecs_cluster" "defi_surv" {
 # CloudWatch Log Groups for all services
 resource "aws_cloudwatch_log_group" "services" {
   for_each = toset([
-    "ingestion",
-    "detection-engine",
-    "state-manager",
-    "notifier",
+    "indexer",
+    "detector",
+    "orchestrator",
+    "finality",
     "api-service",
     "auth-tenants",
     "config-service",

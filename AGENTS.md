@@ -15,12 +15,10 @@ Do not change platform control-plane code from this repo.
 
 ## Primary Runtime Model
 
-Pipeline (core-owned):
-`indexer -> detector -> orchestrator/finality -> alerts`
+Unified Pipeline:
+`indexer -> detector (pattern registry: dpeg, flash_loan) -> orchestrator -> finality -> alerts`
 
-Market DPEG extension:
-`market-indexer -> market-detector -> detections`
-
+Patterns are registered within detector and configured via tenant_pattern_configs table.
 Redis streams and PostgreSQL schema are core runtime contracts.
 
 ## Standard Validation
@@ -58,8 +56,7 @@ Typical env vars:
 - `REDIS_URL`
 - `RULES_REPO_PATH`
 - `ETH_WS_URL` / `BASE_WS_URL`
-- `MARKET_DPEG_ENABLED`
-- `DPEG_ALERTS_EMIT_ENABLED`
+- `RUST_LOG`
 
 ## IaC and Deploy
 

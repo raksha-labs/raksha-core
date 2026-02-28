@@ -6,20 +6,14 @@ members = [
   "crates/common",
   "crates/ingestion",
   "crates/feature-builder",
-  "crates/detection-engine",
   "crates/risk-scorer",
   "crates/state-manager",
   "crates/notifier",
-  "crates/market-connectors",
-  "crates/dpeg-engine",
   # Binary applications
   "apps/indexer",
   "apps/detector",
-  "apps/scorer",
   "apps/orchestrator",
   "apps/finality",
-  "apps/market-indexer",
-  "apps/market-detector",
 ]
 
 [workspace.dependencies]
