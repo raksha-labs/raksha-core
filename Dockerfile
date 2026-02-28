@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy workspace manifests
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 
 # Copy all crate sources and apps
 COPY crates ./crates
