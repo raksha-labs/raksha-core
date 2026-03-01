@@ -72,7 +72,7 @@ variable "tags" {
 variable "github_org" {
   type        = string
   description = "GitHub organization or username"
-  default     = "YOUR_GITHUB_ORG"
+  default     = "raksha-labs"
 }
 
 variable "github_repo" {
