@@ -13,7 +13,7 @@ This directory is the new IaC baseline for phased AWS deployment:
 - `modules/data-test`: low-cost test data wiring (Secrets Manager + backup bucket).
 - `modules/data-prod`: managed RDS and ElastiCache with encrypted secrets.
 - `modules/observability`: CloudWatch log groups, alarms, dashboard.
-- `modules/cost-controls`: AWS Budgets + Cost Anomaly Detection + SNS notifications.
+- `modules/cost-controls`: AWS Budgets + Cost Anomaly Detection + Billing EstimatedCharges alarm + SNS notifications.
 - `modules/cicd-iam`: GitHub Actions OIDC roles for image, infra, and deploy workflows.
 - `environments/test`: single-account, lowest-cost baseline.
 - `environments/stage`: pre-production hardened baseline.

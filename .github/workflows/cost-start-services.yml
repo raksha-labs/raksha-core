@@ -1,0 +1,250 @@
+name: Start Services
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to start'
+        required: true
+        type: choice
+        options:
+          - test
+          - stage
+        default: test
+      start_ecs:
+        description: 'Start ECS services'
+        required: true
+        type: boolean
+        default: true
+      ecs_count:
+        description: 'ECS desired count per service'
+        required: true
+        type: number
+        default: 1
+      start_rds:
+        description: 'Start RDS database'
+        required: true
+        type: boolean
+        default: true
+      recreate_redis:
+        description: 'Recreate Redis with Terraform'
+        required: true
+        type: boolean
+        default: false
+      recreate_nat:
+        description: 'Recreate NAT gateways with Terraform'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  start-services:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Setup Terraform
+        if: github.event.inputs.recreate_redis == 'true' || github.event.inputs.recreate_nat == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Start RDS database
+        if: github.event.inputs.start_rds == 'true'
+        run: |
+          echo "▶️ Starting RDS database..."
+          DB_INSTANCE="raksha-${{ github.event.inputs.environment }}-db"
+          
+          # Check current status
+          STATUS=$(aws rds describe-db-instances \
+            --db-instance-identifier ${DB_INSTANCE} \
+            --query 'DBInstances[0].DBInstanceStatus' \
+            --output text 2>/dev/null || echo "not-found")
+          
+          if [ "$STATUS" = "stopped" ]; then
+            aws rds start-db-instance \
+              --db-instance-identifier ${DB_INSTANCE} \
+              --no-cli-pager
+            
+            echo "Waiting for database to be available..."
+            aws rds wait db-instance-available \
+              --db-instance-identifier ${DB_INSTANCE}
+            
+            echo "✅ RDS database started and available"
+          elif [ "$STATUS" = "available" ]; then
+            echo "✅ RDS database already running"
+          elif [ "$STATUS" = "not-found" ]; then
+            echo "⚠️ RDS database not found. Deploy with Terraform first."
+          else
+            echo "ℹ️ RDS database status: $STATUS"
+          fi
+
+      - name: Recreate NAT gateways
+        if: github.event.inputs.recreate_nat == 'true'
+        run: |
+          echo "🔄 Recreating NAT gateways with Terraform..."
+          cd infra/terraform/environments/${{ github.event.inputs.environment }}
+          
+          terraform init
+          
+          # Target only NAT gateway resources
+          terraform apply -target=module.networking.aws_nat_gateway.main -auto-approve
+          
+          echo "✅ NAT gateways recreated"
+
+      - name: Recreate Redis
+        if: github.event.inputs.recreate_redis == 'true'
+        run: |
+          echo "🔄 Recreating Redis with Terraform..."
+          cd infra/terraform/environments/${{ github.event.inputs.environment }}
+          
+          terraform init
+          
+          # Target only Redis resources
+          terraform apply -target=module.redis -auto-approve
+          
+          echo "✅ Redis cluster recreated"
+          echo "ℹ️ Note: Cache will be empty, services will rebuild cache"
+
+      - name: Start ECS services
+        if: github.event.inputs.start_ecs == 'true'
+        run: |
+          echo "▶️ Starting ECS services..."
+          CLUSTER="raksha-${{ github.event.inputs.environment }}"
+          DESIRED_COUNT=${{ github.event.inputs.ecs_count }}
+          
+          # Get all services in cluster
+          SERVICES=$(aws ecs list-services \
+            --cluster ${CLUSTER} \
+            --query 'serviceArns[*]' \
+            --output text)
+          
+          # Scale each service
+          for service_arn in $SERVICES; do
+            service_name=$(echo $service_arn | awk -F'/' '{print $NF}')
+            
+            CURRENT_COUNT=$(aws ecs describe-services \
+              --cluster ${CLUSTER} \
+              --services ${service_name} \
+              --query 'services[0].desiredCount' \
+              --output text)
+            
+            if [ "$CURRENT_COUNT" = "0" ]; then
+              echo "Starting $service_name (count: $DESIRED_COUNT)..."
+              aws ecs update-service \
+                --cluster ${CLUSTER} \
+                --service ${service_name} \
+                --desired-count ${DESIRED_COUNT} \
+                --no-cli-pager
+            else
+              echo "✅ $service_name already running (count: $CURRENT_COUNT)"
+            fi
+          done
+          
+          echo "✅ All ECS services started"
+
+      - name: Wait for services to be healthy
+        if: github.event.inputs.start_ecs == 'true'
+        run: |
+          echo "⏳ Waiting for services to become healthy..."
+          CLUSTER="raksha-${{ github.event.inputs.environment }}"
+          
+          # Wait up to 10 minutes for services to stabilize
+          aws ecs wait services-stable \
+            --cluster ${CLUSTER} \
+            --services $(aws ecs list-services --cluster ${CLUSTER} --query 'serviceArns[*]' --output text | tr '/' ' ' | awk '{print $NF}') \
+            || echo "⚠️ Some services may still be starting"
+          
+          echo "✅ Services are healthy"
+
+      - name: Verify connectivity
+        run: |
+          echo "🔍 Verifying service connectivity..."
+          
+          # Get ALB DNS
+          ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --names raksha-${{ github.event.inputs.environment }} \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text 2>/dev/null || echo "not-found")
+          
+          if [ "$ALB_DNS" != "not-found" ]; then
+            echo "ALB Endpoint: http://${ALB_DNS}"
+            echo ""
+            echo "Testing health endpoint..."
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${ALB_DNS}/health || echo "000")
+            
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Health check passed"
+            else
+              echo "⚠️ Health check returned: $STATUS (services may still be starting)"
+            fi
+          else
+            echo "⚠️ Load balancer not found"
+          fi
+
+      - name: Calculate costs
+        run: |
+          echo "💰 Estimated monthly costs after restart:"
+          echo ""
+          echo "  💵 ECS Services: ~\$150-200/month"
+          
+          if [ "${{ github.event.inputs.start_rds }}" = "true" ]; then
+            if [ "${{ github.event.inputs.environment }}" = "test" ]; then
+              echo "  💵 RDS (test): ~\$100/month"
+            else
+              echo "  💵 RDS (stage): ~\$200/month"
+            fi
+          fi
+          
+          if [ "${{ github.event.inputs.recreate_redis }}" = "true" ]; then
+            echo "  💵 Redis: ~\$100/month"
+          fi
+          
+          if [ "${{ github.event.inputs.recreate_nat }}" = "true" ]; then
+            echo "  💵 NAT Gateways: ~\$90/month"
+          fi
+          
+          echo ""
+          echo "💵 Base costs (always running): ~\$40-60/month"
+          echo "   - ALB: ~\$25/month"
+          echo "   - CloudWatch Logs: ~\$10-20/month"
+          echo "   - ECR: ~\$5/month"
+
+      - name: Create summary
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # ▶️ Services Started - ${{ github.event.inputs.environment }} Environment
+          
+          ## Actions Taken
+          - **RDS Database**: $([ "${{ github.event.inputs.start_rds }}" = "true" ] && echo "✅ Started" || echo "⏭️ Skipped")
+          - **NAT Gateways**: $([ "${{ github.event.inputs.recreate_nat }}" = "true" ] && echo "✅ Recreated" || echo "⏭️ Skipped")
+          - **Redis Cache**: $([ "${{ github.event.inputs.recreate_redis }}" = "true" ] && echo "✅ Recreated" || echo "⏭️ Skipped")
+          - **ECS Services**: $([ "${{ github.event.inputs.start_ecs }}" = "true" ] && echo "✅ Started (count: ${{ github.event.inputs.ecs_count }})" || echo "⏭️ Skipped")
+          
+          ## Access
+          - **API Endpoint**: \`http://$(aws elbv2 describe-load-balancers --names raksha-${{ github.event.inputs.environment }} --query 'LoadBalancers[0].DNSName' --output text 2>/dev/null || echo 'N/A')\`
+          - **Health Check**: \`/health\`
+          
+          ## Monitoring
+          - CloudWatch Logs: \`/ecs/raksha/${{ github.event.inputs.environment }}/*\`
+          - ECS Console: [View Services](https://console.aws.amazon.com/ecs/v2/clusters/raksha-${{ github.event.inputs.environment }}/services)
+          
+          ## Cost Impact
+          These services will now incur charges. Use the **Stop Services** workflow when not needed.
+          
+          ---
+          **Triggered by**: ${{ github.actor }}  
+          **Timestamp**: $(date -u)
+          EOF

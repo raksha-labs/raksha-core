@@ -68,3 +68,21 @@ variable "tags" {
     Environment = "production"
   }
 }
+
+variable "github_org" {
+  type        = string
+  description = "GitHub organization or username"
+  default     = "YOUR_GITHUB_ORG"
+}
+
+variable "github_repo" {
+  type        = string
+  description = "GitHub repository name"
+  default     = "raksha-core"
+}
+
+variable "enable_github_oidc" {
+  type        = bool
+  description = "Enable GitHub Actions OIDC integration"
+  default     = true
+}

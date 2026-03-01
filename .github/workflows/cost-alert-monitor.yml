@@ -1,0 +1,308 @@
+name: Cost Alert Monitor
+
+on:
+  schedule:
+    # Run daily at 9 AM PST (5 PM UTC)
+    - cron: '0 17 * * *'
+  workflow_dispatch:
+    inputs:
+      alert_threshold:
+        description: 'Alert threshold (USD per month)'
+        required: true
+        type: number
+        default: 200
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+
+jobs:
+  check-costs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_INFRA_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Get current month costs
+        id: current_costs
+        run: |
+          # Get cost for current month to date
+          START_DATE=$(date -u +%Y-%m-01)
+          END_DATE=$(date -u +%Y-%m-%d)
+          
+          echo "📅 Cost period: ${START_DATE} to ${END_DATE}"
+          
+          # Get costs by environment
+          for env in test stage prod; do
+            COST=$(aws ce get-cost-and-usage \
+              --time-period Start=${START_DATE},End=${END_DATE} \
+              --granularity MONTHLY \
+              --metrics "UnblendedCost" \
+              --filter file://<(echo '{
+                "Tags": {
+                  "Key": "Environment",
+                  "Values": ["'${env}'"]
+                }
+              }') \
+              --query 'ResultsByTime[0].Total.UnblendedCost.Amount' \
+              --output text 2>/dev/null || echo "0")
+            
+            echo "${env}_cost=${COST}" >> $GITHUB_OUTPUT
+            echo "💵 ${env}: \$${COST}"
+          done
+          
+          # Get total untagged costs
+          TOTAL=$(aws ce get-cost-and-usage \
+            --time-period Start=${START_DATE},End=${END_DATE} \
+            --granularity MONTHLY \
+            --metrics "UnblendedCost" \
+            --query 'ResultsByTime[0].Total.UnblendedCost.Amount' \
+            --output text)
+          
+          echo "total_cost=${TOTAL}" >> $GITHUB_OUTPUT
+          echo "💰 Total: \$${TOTAL}"
+
+      - name: Get cost breakdown by service
+        id: service_costs
+        run: |
+          START_DATE=$(date -u +%Y-%m-01)
+          END_DATE=$(date -u +%Y-%m-%d)
+          
+          echo "🔍 Top 10 services by cost:"
+          
+          aws ce get-cost-and-usage \
+            --time-period Start=${START_DATE},End=${END_DATE} \
+            --granularity MONTHLY \
+            --metrics "UnblendedCost" \
+            --group-by Type=DIMENSION,Key=SERVICE \
+            --query 'ResultsByTime[0].Groups[] | sort_by(@, &Metrics.UnblendedCost.Amount) | reverse(@) | [0:10]' \
+            --output table
+
+      - name: Get cost forecast
+        id: forecast
+        run: |
+          START_DATE=$(date -u +%Y-%m-%d)
+          END_DATE=$(date -u -d "$(date -u +%Y-%m-01) +1 month -1 day" +%Y-%m-%d)
+          
+          FORECAST=$(aws ce get-cost-forecast \
+            --time-period Start=${START_DATE},End=${END_DATE} \
+            --metric UNBLENDED_COST \
+            --granularity MONTHLY \
+            --query 'Total.Amount' \
+            --output text)
+          
+          echo "forecasted_cost=${FORECAST}" >> $GITHUB_OUTPUT
+          echo "📈 Forecasted end-of-month total: \$${FORECAST}"
+
+      - name: Check for cost anomalies
+        id: anomalies
+        run: |
+          # Get anomaly detection results
+          START_DATE=$(date -u -d '7 days ago' +%Y-%m-%d)
+          END_DATE=$(date -u +%Y-%m-%d)
+          
+          echo "🚨 Checking for cost anomalies in last 7 days..."
+          
+          # Check if anomaly detection is configured
+          MONITORS=$(aws ce get-anomaly-monitors --query 'AnomalyMonitors[*].MonitorName' --output text)
+          
+          if [ -n "$MONITORS" ]; then
+            ANOMALIES=$(aws ce get-anomalies \
+              --date-interval Start=${START_DATE},End=${END_DATE} \
+              --query 'Anomalies[?Impact.MaxImpact > `10`]' \
+              --output json)
+            
+            ANOMALY_COUNT=$(echo "$ANOMALIES" | jq '. | length')
+            echo "anomaly_count=${ANOMALY_COUNT}" >> $GITHUB_OUTPUT
+            
+            if [ "$ANOMALY_COUNT" -gt "0" ]; then
+              echo "⚠️ Found ${ANOMALY_COUNT} cost anomalies!"
+              echo "$ANOMALIES" | jq -r '.[] | "  - \(.ServiceName): $\(.Impact.MaxImpact) (\(.AnomalyStartDate))"'
+            else
+              echo "✅ No significant anomalies detected"
+            fi
+          else
+            echo "ℹ️ No anomaly monitors configured"
+            echo "anomaly_count=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Evaluate thresholds
+        id: evaluate
+        run: |
+          TEST_COST=${{ steps.current_costs.outputs.test_cost }}
+          STAGE_COST=${{ steps.current_costs.outputs.stage_cost }}
+          TOTAL_COST=${{ steps.current_costs.outputs.total_cost }}
+          FORECAST=${{ steps.forecast.outputs.forecasted_cost }}
+          
+          # Set thresholds
+          TEST_THRESHOLD=150
+          STAGE_THRESHOLD=300
+          TOTAL_THRESHOLD=500
+          
+          # Check if costs exceed thresholds
+          ALERTS=""
+          
+          if (( $(echo "$TEST_COST > $TEST_THRESHOLD" | bc -l) )); then
+            ALERTS="${ALERTS}- ⚠️ **Test environment** exceeds \$${TEST_THRESHOLD} threshold: \$${TEST_COST}\n"
+          fi
+          
+          if (( $(echo "$STAGE_COST > $STAGE_THRESHOLD" | bc -l) )); then
+            ALERTS="${ALERTS}- ⚠️ **Stage environment** exceeds \$${STAGE_THRESHOLD} threshold: \$${STAGE_COST}\n"
+          fi
+          
+          if (( $(echo "$TOTAL_COST > $TOTAL_THRESHOLD" | bc -l) )); then
+            ALERTS="${ALERTS}- 🚨 **Total cost** exceeds \$${TOTAL_THRESHOLD} threshold: \$${TOTAL_COST}\n"
+          fi
+          
+          if (( $(echo "$FORECAST > $TOTAL_THRESHOLD * 1.5" | bc -l) )); then
+            ALERTS="${ALERTS}- 📈 **Forecasted cost** concerning: \$${FORECAST}\n"
+          fi
+          
+          if [ -n "$ALERTS" ]; then
+            echo "has_alerts=true" >> $GITHUB_OUTPUT
+            echo -e "$ALERTS" > /tmp/alerts.txt
+          else
+            echo "has_alerts=false" >> $GITHUB_OUTPUT
+            echo "✅ All costs within acceptable thresholds"
+          fi
+
+      - name: Get running services
+        id: running_services
+        run: |
+          echo "🔍 Checking what's currently running..."
+          
+          for env in test stage; do
+            echo "## ${env} environment:"
+            
+            # Check ECS
+            CLUSTER="raksha-${env}"
+            SERVICES=$(aws ecs list-services --cluster ${CLUSTER} --query 'serviceArns' --output text 2>/dev/null || echo "")
+            
+            if [ -n "$SERVICES" ]; then
+              for svc in $SERVICES; do
+                SVC_NAME=$(echo $svc | awk -F'/' '{print $NF}')
+                COUNT=$(aws ecs describe-services --cluster ${CLUSTER} --services ${SVC_NAME} --query 'services[0].desiredCount' --output text)
+                RUNNING=$(aws ecs describe-services --cluster ${CLUSTER} --services ${SVC_NAME} --query 'services[0].runningCount' --output text)
+                
+                if [ "$COUNT" -gt "0" ]; then
+                  echo "  ✅ ECS ${SVC_NAME}: ${RUNNING}/${COUNT} tasks"
+                fi
+              done
+            fi
+            
+            # Check RDS
+            DB_STATUS=$(aws rds describe-db-instances --db-instance-identifier raksha-${env}-db --query 'DBInstances[0].DBInstanceStatus' --output text 2>/dev/null || echo "not-found")
+            if [ "$DB_STATUS" != "not-found" ]; then
+              echo "  📊 RDS: ${DB_STATUS}"
+            fi
+            
+            # Check Redis
+            REDIS_STATUS=$(aws elasticache describe-replication-groups --replication-group-id raksha-${env}-redis --query 'ReplicationGroups[0].Status' --output text 2>/dev/null || echo "not-found")
+            if [ "$REDIS_STATUS" != "not-found" ]; then
+              echo "  🔴 Redis: ${REDIS_STATUS}"
+            fi
+            
+            echo ""
+          done
+
+      - name: Create GitHub issue for high costs
+        if: steps.evaluate.outputs.has_alerts == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const alerts = fs.readFileSync('/tmp/alerts.txt', 'utf8');
+            
+            const body = `# 💰 Cost Alert Triggered
+            
+            ## Current Costs (Month to Date)
+            - **Test**: $\${{ steps.current_costs.outputs.test_cost }}
+            - **Stage**: $\${{ steps.current_costs.outputs.stage_cost }}
+            - **Total**: $\${{ steps.current_costs.outputs.total_cost }}
+            
+            ## Forecasted End-of-Month
+            - **Total**: $\${{ steps.forecast.outputs.forecasted_cost }}
+            
+            ## Alerts
+            ${alerts}
+            
+            ## Actions to Consider
+            
+            1. **Stop unused services**: Run the [Stop Services workflow](../actions/workflows/cost-stop-services.yml)
+            2. **Review service costs**: Check AWS Cost Explorer for details
+            3. **Scale down**: Reduce ECS task counts in non-prod environments
+            4. **Delete resources**: Remove unused NAT gateways, RDS instances
+            
+            ## Current Running Services
+            
+            Run this command to see what's active:
+            \`\`\`bash
+            aws ecs list-services --cluster raksha-test
+            aws ecs list-services --cluster raksha-stage
+            \`\`\`
+            
+            ---
+            *Automated alert from cost-monitoring workflow*
+            *Triggered: \${{ github.run_id }}*`;
+            
+            // Check if there's already an open cost alert issue
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'cost-alert'
+            });
+            
+            if (issues.data.length > 0) {
+              // Update existing issue
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body: `## Updated Cost Alert\n\n${body}`
+              });
+            } else {
+              // Create new issue
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: '💰 AWS Cost Alert - Review Required',
+                body: body,
+                labels: ['cost-alert', 'ops']
+              });
+            }
+
+      - name: Create summary
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # 💰 Cost Monitoring Report
+          
+          ## Current Month (to date)
+          | Environment | Cost | Status |
+          |-------------|------|--------|
+          | Test | \$\${{ steps.current_costs.outputs.test_cost }} | $([ $(echo "${{ steps.current_costs.outputs.test_cost }} > 150" | bc -l) -eq 1 ] && echo "⚠️ High" || echo "✅ Normal") |
+          | Stage | \$\${{ steps.current_costs.outputs.stage_cost }} | $([ $(echo "${{ steps.current_costs.outputs.stage_cost }} > 300" | bc -l) -eq 1 ] && echo "⚠️ High" || echo "✅ Normal") |
+          | **Total** | **\$\${{ steps.current_costs.outputs.total_cost }}** | $([ $(echo "${{ steps.current_costs.outputs.total_cost }} > 500" | bc -l) -eq 1 ] && echo "🚨 High" || echo "✅ Normal") |
+          
+          ## Forecast
+          - **End of Month**: \$\${{ steps.forecast.outputs.forecasted_cost }}
+          
+          ## Anomalies
+          - **Detected**: ${{ steps.anomalies.outputs.anomaly_count }} anomalies
+          
+          ## Quick Actions
+          - [Stop Services](../actions/workflows/cost-stop-services.yml)
+          - [Start Services](../actions/workflows/cost-start-services.yml)
+          - [AWS Cost Explorer](https://console.aws.amazon.com/cost-management/home)
+          
+          ---
+          **Next check**: Tomorrow at 9 AM PST
+          EOF

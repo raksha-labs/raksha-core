@@ -3,6 +3,10 @@ environment             = "stage"
 compute_mode            = "fargate_mix"
 enable_managed_data     = true
 budget_limit_usd        = 500
+# Optional cost controls:
+# anomaly_total_impact_absolute_usd   = 20
+# enable_billing_estimated_charges_alarm = true
+# billing_estimated_charges_alarm_usd = null  # null => uses budget_limit_usd
 alarm_emails            = ["you@example.com"]
 admin_access_mode       = "private-only"
 enable_public_https     = true

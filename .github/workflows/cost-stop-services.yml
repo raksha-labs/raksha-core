@@ -1,0 +1,245 @@
+name: Stop Expensive Services
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to stop'
+        required: true
+        type: choice
+        options:
+          - test
+          - stage
+        default: test
+      stop_ecs:
+        description: 'Stop ECS services (scale to 0)'
+        required: true
+        type: boolean
+        default: true
+      stop_rds:
+        description: 'Stop RDS database'
+        required: true
+        type: boolean
+        default: true
+      delete_redis:
+        description: 'Delete ElastiCache Redis'
+        required: true
+        type: boolean
+        default: false
+      destroy_nat:
+        description: 'Destroy NAT gateways'
+        required: true
+        type: boolean
+        default: false
+  schedule:
+    # Auto-stop test environment at 8 PM PST (4 AM UTC) on weekdays
+    - cron: '0 4 * * 1-5'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  stop-services:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Set environment for scheduled runs
+        if: github.event_name == 'schedule'
+        run: |
+          echo "ENVIRONMENT=test" >> $GITHUB_ENV
+          echo "STOP_ECS=true" >> $GITHUB_ENV
+          echo "STOP_RDS=true" >> $GITHUB_ENV
+          echo "DELETE_REDIS=false" >> $GITHUB_ENV
+          echo "DESTROY_NAT=false" >> $GITHUB_ENV
+
+      - name: Set environment for manual runs
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          echo "STOP_ECS=${{ github.event.inputs.stop_ecs }}" >> $GITHUB_ENV
+          echo "STOP_RDS=${{ github.event.inputs.stop_rds }}" >> $GITHUB_ENV
+          echo "DELETE_REDIS=${{ github.event.inputs.delete_redis }}" >> $GITHUB_ENV
+          echo "DESTROY_NAT=${{ github.event.inputs.destroy_nat }}" >> $GITHUB_ENV
+
+      - name: Get current costs
+        id: costs
+        run: |
+          END_DATE=$(date -u +%Y-%m-%d)
+          START_DATE=$(date -u -d '30 days ago' +%Y-%m-%d)
+          
+          COST=$(aws ce get-cost-and-usage \
+            --time-period Start=${START_DATE},End=${END_DATE} \
+            --granularity MONTHLY \
+            --metrics "UnblendedCost" \
+            --filter file://<(echo '{
+              "Tags": {
+                "Key": "Environment",
+                "Values": ["'$ENVIRONMENT'"]
+              }
+            }') \
+            --query 'ResultsByTime[0].Total.UnblendedCost.Amount' \
+            --output text)
+          
+          echo "monthly_cost=${COST}" >> $GITHUB_OUTPUT
+          echo "📊 Current monthly cost for $ENVIRONMENT: \$${COST}"
+
+      - name: Stop ECS services
+        if: env.STOP_ECS == 'true'
+        run: |
+          echo "⏸️ Stopping ECS services..."
+          CLUSTER="raksha-${ENVIRONMENT}"
+          
+          # Get all services in cluster
+          SERVICES=$(aws ecs list-services \
+            --cluster ${CLUSTER} \
+            --query 'serviceArns[*]' \
+            --output text)
+          
+          # Scale each service to 0
+          for service_arn in $SERVICES; do
+            service_name=$(echo $service_arn | awk -F'/' '{print $NF}')
+            echo "Scaling $service_name to 0..."
+            aws ecs update-service \
+              --cluster ${CLUSTER} \
+              --service ${service_name} \
+              --desired-count 0 \
+              --no-cli-pager
+          done
+          
+          echo "✅ All ECS services scaled to 0"
+
+      - name: Stop RDS database
+        if: env.STOP_RDS == 'true'
+        run: |
+          echo "⏸️ Stopping RDS database..."
+          DB_INSTANCE="raksha-${ENVIRONMENT}-db"
+          
+          # Check if DB exists and is running
+          STATUS=$(aws rds describe-db-instances \
+            --db-instance-identifier ${DB_INSTANCE} \
+            --query 'DBInstances[0].DBInstanceStatus' \
+            --output text 2>/dev/null || echo "not-found")
+          
+          if [ "$STATUS" = "available" ]; then
+            aws rds stop-db-instance \
+              --db-instance-identifier ${DB_INSTANCE} \
+              --no-cli-pager
+            echo "✅ RDS database stopped (will auto-start after 7 days)"
+          elif [ "$STATUS" = "not-found" ]; then
+            echo "⚠️ RDS database not found, skipping"
+          else
+            echo "ℹ️ RDS database status: $STATUS, skipping"
+          fi
+
+      - name: Delete ElastiCache Redis
+        if: env.DELETE_REDIS == 'true'
+        run: |
+          echo "🗑️ Deleting ElastiCache Redis..."
+          REDIS_ID="raksha-${ENVIRONMENT}-redis"
+          
+          # Check if Redis exists
+          EXISTS=$(aws elasticache describe-replication-groups \
+            --replication-group-id ${REDIS_ID} \
+            --query 'ReplicationGroups[0].Status' \
+            --output text 2>/dev/null || echo "not-found")
+          
+          if [ "$EXISTS" != "not-found" ]; then
+            aws elasticache delete-replication-group \
+              --replication-group-id ${REDIS_ID} \
+              --no-cli-pager
+            echo "✅ Redis cluster deletion initiated"
+            echo "⚠️ WARNING: You'll need to recreate Redis with Terraform when restarting"
+          else
+            echo "⚠️ Redis cluster not found, skipping"
+          fi
+
+      - name: Destroy NAT gateways
+        if: env.DESTROY_NAT == 'true'
+        run: |
+          echo "🗑️ Destroying NAT gateways..."
+          
+          # Get NAT gateways tagged with environment
+          NAT_IDS=$(aws ec2 describe-nat-gateways \
+            --filter "Name=tag:Environment,Values=${ENVIRONMENT}" \
+            --filter "Name=state,Values=available" \
+            --query 'NatGateways[*].NatGatewayId' \
+            --output text)
+          
+          if [ -n "$NAT_IDS" ]; then
+            for nat_id in $NAT_IDS; do
+              echo "Deleting NAT gateway: $nat_id"
+              aws ec2 delete-nat-gateway --nat-gateway-id $nat_id
+            done
+            echo "✅ NAT gateways deleted"
+            echo "⚠️ WARNING: Services won't have internet access. Recreate with Terraform."
+          else
+            echo "⚠️ No NAT gateways found"
+          fi
+
+      - name: Calculate savings
+        run: |
+          echo "💰 Estimated monthly savings:"
+          echo ""
+          
+          if [ "$STOP_ECS" = "true" ]; then
+            echo "  ECS Services: ~\$150-200/month"
+          fi
+          
+          if [ "$STOP_RDS" = "true" ]; then
+            echo "  RDS: ~\$100/month (test), ~\$200/month (stage)"
+          fi
+          
+          if [ "$DELETE_REDIS" = "true" ]; then
+            echo "  Redis: ~\$100/month"
+          fi
+          
+          if [ "$DESTROY_NAT" = "true" ]; then
+            echo "  NAT Gateways: ~\$90/month"
+          fi
+
+      - name: Send notification
+        if: always()
+        run: |
+          echo "📧 Services stopped in $ENVIRONMENT environment"
+          echo "Current monthly cost: \$\${{ steps.costs.outputs.monthly_cost }}"
+          echo ""
+          echo "To restart services, run the 'Start Services' workflow"
+
+      - name: Create summary
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # 🛑 Services Stopped - ${ENVIRONMENT} Environment
+          
+          ## Actions Taken
+          - **ECS Services**: $([ "$STOP_ECS" = "true" ] && echo "✅ Scaled to 0" || echo "⏭️ Skipped")
+          - **RDS Database**: $([ "$STOP_RDS" = "true" ] && echo "✅ Stopped" || echo "⏭️ Skipped")
+          - **Redis Cache**: $([ "$DELETE_REDIS" = "true" ] && echo "🗑️ Deleted" || echo "⏭️ Skipped")
+          - **NAT Gateways**: $([ "$DESTROY_NAT" = "true" ] && echo "🗑️ Deleted" || echo "⏭️ Skipped")
+          
+          ## Current Cost
+          **Monthly cost**: \$\${{ steps.costs.outputs.monthly_cost }}
+          
+          ## What's Still Running (Low/No Cost)
+          - ✅ VPC, Subnets, Security Groups (free)
+          - ✅ IAM Roles (free)
+          - ✅ ECR Repositories (~\$5/month for storage)
+          - ✅ CloudWatch Logs (~\$10-20/month)
+          - ✅ Application Load Balancer (~\$25/month)
+          
+          ## To Restart
+          Run the **Start Services** workflow with the same environment.
+          
+          ---
+          **Triggered by**: ${{ github.event_name }}  
+          **Timestamp**: $(date -u)
+          EOF

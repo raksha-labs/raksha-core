@@ -61,6 +61,25 @@ variable "budget_limit_usd" {
   default     = 100
 }
 
+variable "anomaly_total_impact_absolute_usd" {
+  description = "Absolute USD threshold for cost anomaly alerts"
+  type        = number
+  default     = 20
+}
+
+variable "enable_billing_estimated_charges_alarm" {
+  description = "Enable CloudWatch Billing EstimatedCharges alarm (only created in us-east-1)"
+  type        = bool
+  default     = true
+}
+
+variable "billing_estimated_charges_alarm_usd" {
+  description = "Absolute USD threshold for Billing EstimatedCharges alarm; null uses budget_limit_usd"
+  type        = number
+  default     = null
+  nullable    = true
+}
+
 variable "alarm_emails" {
   description = "Budget/alarm notification emails"
   type        = list(string)

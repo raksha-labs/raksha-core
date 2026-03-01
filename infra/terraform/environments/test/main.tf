@@ -193,11 +193,14 @@ resource "aws_ssm_parameter" "core_contract_version" {
 module "cost_controls" {
   source = "../../modules/cost-controls"
 
-  environment           = var.environment
-  budget_limit_usd      = var.budget_limit_usd
-  alert_email_addresses = var.alarm_emails
-  name_prefix           = "raksha"
-  tags                  = var.tags
+  environment                            = var.environment
+  budget_limit_usd                       = var.budget_limit_usd
+  alert_email_addresses                  = var.alarm_emails
+  anomaly_total_impact_absolute_usd      = var.anomaly_total_impact_absolute_usd
+  enable_billing_estimated_charges_alarm = var.enable_billing_estimated_charges_alarm
+  billing_estimated_charges_alarm_usd    = var.billing_estimated_charges_alarm_usd
+  name_prefix                            = "raksha"
+  tags                                   = var.tags
 }
 
 module "observability" {

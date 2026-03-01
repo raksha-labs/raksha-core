@@ -63,3 +63,18 @@ resource "aws_cloudwatch_log_group" "services" {
     Service = each.key
   })
 }
+
+# GitHub Actions OIDC Integration
+module "cicd_iam" {
+  source = "./modules/cicd-iam"
+  count  = var.enable_github_oidc ? 1 : 0
+
+  environment              = var.environment
+  github_org               = var.github_org
+  github_repo              = var.github_repo
+  github_allowed_branches  = ["master", "main"]
+  allow_pull_request       = true
+  allow_tag_refs           = true
+  create_oidc_provider     = true
+  tags                     = var.tags
+}

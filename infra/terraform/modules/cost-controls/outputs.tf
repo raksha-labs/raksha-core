@@ -12,3 +12,8 @@ output "anomaly_monitor_arn" {
   value       = aws_ce_anomaly_monitor.main.arn
   description = "Cost anomaly monitor ARN"
 }
+
+output "billing_estimated_charges_alarm_arn" {
+  value       = try(aws_cloudwatch_metric_alarm.billing_estimated_charges[0].arn, null)
+  description = "CloudWatch Billing EstimatedCharges alarm ARN (null when not created outside us-east-1)"
+}

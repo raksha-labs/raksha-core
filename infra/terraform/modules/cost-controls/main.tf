@@ -13,7 +13,11 @@ locals {
       threshold = 100
     }
   ]
+
+  billing_estimated_charges_alarm_usd = coalesce(var.billing_estimated_charges_alarm_usd, var.budget_limit_usd)
 }
+
+data "aws_region" "current" {}
 
 resource "aws_sns_topic" "budget_alerts" {
   name = "${var.name_prefix}-${var.environment}-budget-alerts"
@@ -82,9 +86,34 @@ resource "aws_ce_anomaly_subscription" "main" {
     and {
       dimension {
         key           = "ANOMALY_TOTAL_IMPACT_ABSOLUTE"
-        values        = ["20"]
+        values        = [tostring(var.anomaly_total_impact_absolute_usd)]
         match_options = ["GREATER_THAN_OR_EQUAL"]
       }
     }
   }
+}
+
+resource "aws_cloudwatch_metric_alarm" "billing_estimated_charges" {
+  count = var.enable_billing_estimated_charges_alarm && data.aws_region.current.name == "us-east-1" ? 1 : 0
+
+  alarm_name          = "${var.name_prefix}-${var.environment}-billing-estimated-charges"
+  alarm_description   = "Triggers when account estimated charges exceed ${local.billing_estimated_charges_alarm_usd} ${var.billing_estimated_charges_currency}."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = var.billing_estimated_charges_evaluation_periods
+  metric_name         = "EstimatedCharges"
+  namespace           = "AWS/Billing"
+  period              = var.billing_estimated_charges_period_seconds
+  statistic           = "Maximum"
+  threshold           = local.billing_estimated_charges_alarm_usd
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.budget_alerts.arn]
+  ok_actions          = [aws_sns_topic.budget_alerts.arn]
+
+  dimensions = {
+    Currency = var.billing_estimated_charges_currency
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-${var.environment}-billing-estimated-charges"
+  })
 }

@@ -91,3 +91,17 @@ output "waf_web_acl_arn" {
   value       = aws_wafv2_web_acl.main.arn
   description = "ARN of WAF Web ACL"
 }
+
+output "github_actions_roles" {
+  value = var.enable_github_oidc ? {
+    images_role_arn = module.cicd_iam[0].images_role_arn
+    infra_role_arn  = module.cicd_iam[0].infra_role_arn
+    deploy_role_arn = module.cicd_iam[0].deploy_role_arn
+  } : null
+  description = "GitHub Actions IAM role ARNs for OIDC authentication"
+}
+
+output "github_oidc_provider_arn" {
+  value       = var.enable_github_oidc ? module.cicd_iam[0].oidc_provider_arn : null
+  description = "GitHub OIDC provider ARN"
+}
