@@ -321,7 +321,7 @@ mod tests {
         // Successful calls should close the circuit
         for _ in 0..2 {
             let _ = breaker
-                .call(|| async { Ok::<_, ()>("success") })
+                .call(|| async { Ok::<_, String>("success") })
                 .await;
         }
 
