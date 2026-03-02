@@ -1,11 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use ethers::{
-    providers::{Http, Middleware, Provider},
-    types::{Address, U256},
+    providers::{Http, Provider},
+    types::Address,
 };
 use serde::Deserialize;
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use tracing::{debug, warn};
 
 #[async_trait]
@@ -32,6 +32,7 @@ impl ReferencePriceProvider for StaticReferencePriceProvider {
 /// Binance API response for ticker price
 #[derive(Debug, Deserialize)]
 struct BinanceTickerResponse {
+    #[allow(dead_code)]
     symbol: String,
     price: String,
 }
@@ -111,7 +112,7 @@ impl LiveReferencePriceProvider {
     /// Fetch Uniswap V3 TWAP (Time-Weighted Average Price)
     /// This is a simplified version - production would use observe() with proper time windows
     async fn fetch_uniswap_twap(&self, pair: &str) -> Result<f64> {
-        let provider = self
+        let _provider = self
             .eth_provider
             .as_ref()
             .ok_or_else(|| anyhow!("No Ethereum provider configured for Uniswap"))?;

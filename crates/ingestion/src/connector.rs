@@ -30,7 +30,6 @@ pub trait DataSourceConnector: Send {
 // ---------------------------------------------------------------------------
 
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, warn};
@@ -246,12 +245,11 @@ impl DataSourceConnector for CexWebsocketConnector {
 // ---------------------------------------------------------------------------
 
 use crate::adapter::EvmChainAdapter;
-use crate::config::EvmChainConfig;
 
 pub struct EvmChainConnector {
     tenant_id: String,
     source_id: String,
-    chain_id: i64,
+    _chain_id: i64,
     adapter: EvmChainAdapter,
     healthy: bool,
 }
@@ -266,7 +264,7 @@ impl EvmChainConnector {
         Self {
             tenant_id,
             source_id,
-            chain_id,
+            _chain_id: chain_id,
             adapter,
             healthy: true,
         }
