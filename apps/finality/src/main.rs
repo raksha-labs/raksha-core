@@ -321,7 +321,7 @@ fn load_tracker_from_db(
     };
 
     let confirmation_depth = state.confirmation_depth as u64;
-    let mut combined_json = serde_json::json!({
+    let combined_json = serde_json::json!({
         "head_block": state.head_block,
         "blocks": state.blocks,
         "states": state.states,
