@@ -260,8 +260,6 @@ pub struct DeadLetterStats {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Note: These tests require a PostgreSQL instance
     // In a real project, use testcontainers or similar for integration tests
 }
