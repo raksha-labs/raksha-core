@@ -21,6 +21,11 @@ on:
         required: false
         default: ''
         type: string
+      force_build:
+        description: Force image build even when only CI/infrastructure files changed
+        required: true
+        default: false
+        type: boolean
       apply_infra:
         description: Apply Terraform before deploy
         required: true
@@ -41,6 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       build_required: ${{ steps.filter.outputs.build_required }}
+      ci_scripts_changed: ${{ steps.filter.outputs.ci_scripts_changed }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -60,11 +66,22 @@ jobs:
               - 'Cargo.lock'
               - 'Dockerfile'
               - 'infra/service-catalog.yaml'
+            ci_scripts_changed:
+              - 'scripts/ci/**'
+
+  guard-rails:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' && needs.detect-changes.outputs.ci_scripts_changed == 'true' && needs.detect-changes.outputs.build_required != 'true' }}
+    steps:
+      - name: Warn when build is skipped for CI script-only change
+        run: |
+          echo "::warning title=Image build skipped::Only scripts/ci changed, so image build was skipped. If CI scripts now affect image contents, include those paths in detect-changes.build_required or run workflow_dispatch with force_build=true."
 
   build-images:
     needs: detect-changes
     # Build images on push, or on dispatch when no pre-built image_tag is provided
-    if: ${{ (github.event_name == 'push' && needs.detect-changes.outputs.build_required == 'true') || (github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag == '') }}
+    if: ${{ (github.event_name == 'push' && needs.detect-changes.outputs.build_required == 'true') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.image_tag == '' || github.event.inputs.force_build == 'true')) }}
     uses: ./.github/workflows/reusable-image-build.yml
     with:
       aws_region: eu-west-1
@@ -81,7 +98,7 @@ jobs:
     uses: ./.github/workflows/reusable-ecs-rollout.yml
     with:
       environment: test
-      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || format('sha-{0}', github.sha) }}
+      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || format('sha-{0}', github.sha) }}
       apply_infra: ${{ github.event_name == 'push' || github.event.inputs.apply_infra == 'true' }}
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
       aws_region: eu-west-1

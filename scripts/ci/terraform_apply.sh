@@ -307,6 +307,49 @@ import_shared_secrets_if_needed() {
   fi
 }
 
+
+import_ecs_services_if_needed() {
+  local cluster_name="raksha-${ENVIRONMENT}"
+  local services=()
+  local svc
+  while IFS= read -r svc; do
+    [[ -n "${svc}" ]] || continue
+    services+=("${svc}")
+  done < <(catalog_services)
+
+  if [[ "${ENVIRONMENT}" == "test" ]]; then
+    services+=("postgres" "redis")
+  fi
+
+  local service_name
+  local address
+  local existing_count
+  for svc in "${services[@]}"; do
+    if [[ "${svc}" == "postgres" || "${svc}" == "redis" ]]; then
+      address="module.compute.aws_ecs_service.test_data[\"${svc}\"]"
+    else
+      address="module.compute.aws_ecs_service.service[\"${svc}\"]"
+    fi
+
+    if resource_in_state "${address}"; then
+      continue
+    fi
+
+    service_name="raksha-${ENVIRONMENT}-${svc}"
+    existing_count=$(aws ecs describe-services \
+      --cluster "${cluster_name}" \
+      --services "${service_name}" \
+      --region "${AWS_REGION_EFFECTIVE}" \
+      --query "length(services[?status!='INACTIVE'])" \
+      --output text 2>/dev/null || true)
+
+    if [[ "${existing_count}" == "1" ]]; then
+      log "import existing ECS service into state: ${service_name}"
+      tf_import "${address}" "${cluster_name}/${service_name}"
+    fi
+  done
+}
+
 import_log_groups_if_needed() {
   local services=()
   local svc
@@ -380,6 +423,7 @@ import_compute_ec2_resources_if_needed
 import_ecr_repositories_if_needed
 import_shared_secrets_if_needed
 import_log_groups_if_needed
+import_ecs_services_if_needed
 run_tf_with_lock_retry terraform -chdir="${TF_DIR}" apply \
   -input=false \
   -auto-approve \
