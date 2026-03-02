@@ -1,0 +1,36 @@
+scenario_id: euler_2023_flash_loan
+name: Euler 2023 Flash Loan Exploit Replay
+chain: ethereum
+chain_slug: ethereum
+chain_id: 1
+incident_class: flash_loan_manipulation
+protocol: euler
+protocol_category: lending
+source_refs:
+  - https://www.euler.finance/blog/war-peace-behind-the-scenes-of-eulers-240m-exploit-recovery
+fork:
+  block_number: 16817996
+  tx_hash_anchor: "0x3f3f8f2c5f9f17d7d8d8ea14b2d56f4f0f939f92f8c0e9bb7d0d67e305a6c2f1"
+steps:
+  - type: replay_tx
+    protocol: euler
+    protocol_category: lending
+    event_type: flash_loan_candidate
+    tx_hash: "0x3f3f8f2c5f9f17d7d8d8ea14b2d56f4f0f939f92f8c0e9bb7d0d67e305a6c2f1"
+    log_index: 6
+    source_id: euler-main
+    asset_address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    loan_amount_raw: "300000000000"
+    fee_raw: "270000000"
+    borrower: "0xExploitBorrowerEuler"
+    initiator: "0xExploitInitiatorEuler"
+  - type: mutate_param
+    protocol: chainlink
+    protocol_category: unknown
+    event_type: oracle_update
+    tx_hash: "0x3f3f8f2c5f9f17d7d8d8ea14b2d56f4f0f939f92f8c0e9bb7d0d67e305a6c2f1"
+    log_index: 7
+    oracle_price: 1200.0
+    reference_price: 1800.0
+    metadata:
+      oracle_address: "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419"

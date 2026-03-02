@@ -1,0 +1,35 @@
+scenario_id: cream_2021_flash_loan
+name: CREAM 2021 Flash Loan Exploit Replay
+chain: ethereum
+chain_slug: ethereum
+chain_id: 1
+incident_class: flash_loan_manipulation
+protocol: cream-finance
+protocol_category: lending
+source_refs:
+  - https://medium.com/cream-finance/c-r-e-a-m-finance-post-mortem-flash-loan-exploit-oct-27-507b12bb6f8e
+fork:
+  block_number: 13474443
+steps:
+  - type: replay_tx
+    protocol: cream-finance
+    protocol_category: lending
+    event_type: flash_loan_candidate
+    tx_hash: "0x0f7f95e0ab0a0f3b0a63ad9e6cf9a4f7d5ce31e4d5c1f6a612dce6fd6d77b2af"
+    log_index: 10
+    source_id: cream-main
+    asset_address: "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+    loan_amount_raw: "50000000000000000000000000"
+    fee_raw: "45000000000000000000000"
+    borrower: "0xExploitBorrowerCream"
+    initiator: "0xExploitInitiatorCream"
+  - type: mutate_param
+    protocol: chainlink
+    protocol_category: unknown
+    event_type: oracle_update
+    tx_hash: "0x0f7f95e0ab0a0f3b0a63ad9e6cf9a4f7d5ce31e4d5c1f6a612dce6fd6d77b2af"
+    log_index: 11
+    oracle_price: 400.0
+    reference_price: 620.0
+    metadata:
+      oracle_address: "0xF79D6aFBb6dA890132F9D7c355e3015f15F3406F"

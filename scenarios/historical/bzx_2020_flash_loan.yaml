@@ -1,0 +1,35 @@
+scenario_id: bzx_2020_flash_loan
+name: bZx 2020 Flash Loan Exploit Replay
+chain: ethereum
+chain_slug: ethereum
+chain_id: 1
+incident_class: flash_loan_manipulation
+protocol: bzx
+protocol_category: lending
+source_refs:
+  - https://defillama.com/hacks
+fork:
+  block_number: 9484688
+steps:
+  - type: replay_tx
+    protocol: bzx
+    protocol_category: lending
+    event_type: flash_loan_candidate
+    tx_hash: "0xbadf00dbadf00dbadf00dbadf00dbadf00dbadf00dbadf00dbadf00dbadf00d"
+    log_index: 3
+    source_id: bzx-main
+    asset_address: "0xC02aaA39b223FE8D0A0E5C4F27eAD9083C756Cc2"
+    loan_amount_raw: "10000000000000000000000"
+    fee_raw: "9000000000000000000"
+    borrower: "0xExploitBorrowerBzx"
+    initiator: "0xExploitInitiatorBzx"
+  - type: simulate_call
+    protocol: chainlink
+    protocol_category: unknown
+    event_type: oracle_update
+    tx_hash: "0xbadf00dbadf00dbadf00dbadf00dbadf00dbadf00dbadf00dbadf00dbadf00d"
+    log_index: 4
+    oracle_price: 82.0
+    reference_price: 110.0
+    metadata:
+      oracle_address: "0xUnknownOracle"
