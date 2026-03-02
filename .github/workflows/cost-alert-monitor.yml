@@ -90,14 +90,41 @@ jobs:
         run: |
           START_DATE=$(date -u +%Y-%m-%d)
           END_DATE=$(date -u -d "$(date -u +%Y-%m-01) +1 month -1 day" +%Y-%m-%d)
-          
+
+          set +e
           FORECAST=$(aws ce get-cost-forecast \
             --time-period Start=${START_DATE},End=${END_DATE} \
             --metric UNBLENDED_COST \
             --granularity MONTHLY \
             --query 'Total.Amount' \
-            --output text)
-          
+            --output text 2>/tmp/forecast_error.txt)
+          FORECAST_STATUS=$?
+          set -e
+
+          if [ "${FORECAST_STATUS}" -ne 0 ]; then
+            if grep -q "DataUnavailableException" /tmp/forecast_error.txt; then
+              echo "⚠️ Cost forecast unavailable (insufficient historical data). Falling back to month-to-date actual cost."
+              MONTH_START=$(date -u +%Y-%m-01)
+              TODAY=$(date -u +%Y-%m-%d)
+              FORECAST=$(aws ce get-cost-and-usage \
+                --time-period Start=${MONTH_START},End=${TODAY} \
+                --granularity MONTHLY \
+                --metrics "UnblendedCost" \
+                --query 'ResultsByTime[0].Total.UnblendedCost.Amount' \
+                --output text 2>/dev/null || echo "0")
+              echo "forecast_data_available=false" >> $GITHUB_OUTPUT
+            else
+              cat /tmp/forecast_error.txt >&2
+              exit "${FORECAST_STATUS}"
+            fi
+          else
+            echo "forecast_data_available=true" >> $GITHUB_OUTPUT
+          fi
+
+          if ! echo "${FORECAST}" | grep -Eq '^[0-9]+([.][0-9]+)?$'; then
+            FORECAST="0"
+          fi
+
           echo "forecasted_cost=${FORECAST}" >> $GITHUB_OUTPUT
           echo "📈 Forecasted end-of-month total: \$${FORECAST}"
 
