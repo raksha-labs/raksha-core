@@ -146,7 +146,17 @@ jobs:
       - name: Install tfsec
         run: |
           curl -sL https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
-          sudo install ./bin/tfsec /usr/local/bin/tfsec
+          if [ -x ./bin/tfsec ]; then
+            sudo install ./bin/tfsec /usr/local/bin/tfsec
+          elif [ -x ./tfsec ]; then
+            sudo install ./tfsec /usr/local/bin/tfsec
+          elif command -v tfsec >/dev/null 2>&1; then
+            echo "tfsec already available at $(command -v tfsec)"
+          else
+            echo "tfsec binary not found after installer run"
+            exit 1
+          fi
+          tfsec --version
 
       - name: Terraform security scan
         run: tfsec infra/terraform/modules --soft-fail
