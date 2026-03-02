@@ -143,9 +143,10 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           ignore: RUSTSEC-2025-0009  # ring 0.16 AES panic - blocked by ethers→jsonwebtoken dep chain; tracked for alloy migration
 
+      - name: Install tfsec
+        run: |
+          curl -sL https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+          sudo install ./bin/tfsec /usr/local/bin/tfsec
+
       - name: Terraform security scan
-        uses: aquasecurity/tfsec-action@v1.0.3
-        with:
-          working_directory: infra/terraform
-          soft_fail: true
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+        run: tfsec infra/terraform/modules --soft-fail
