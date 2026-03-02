@@ -16,6 +16,13 @@ IMAGE_TAG_INPUT="${2:-${IMAGE_TAG:-latest}}"
 
 TF_DIR=$(terraform_dir_for_env "${ENVIRONMENT}")
 AWS_REGION_EFFECTIVE="${AWS_REGION:-eu-west-1}"
+TF_LOCK_TIMEOUT="${TF_LOCK_TIMEOUT:-10m}"
+
+tf_import() {
+  local address="$1"
+  local id="$2"
+  terraform -chdir="${TF_DIR}" import -input=false -lock-timeout="${TF_LOCK_TIMEOUT}" "${address}" "${id}"
+}
 
 resource_in_state() {
   local address="$1"
@@ -41,7 +48,7 @@ import_cicd_roles_if_needed() {
     fi
     if aws iam get-role --role-name "${names[$i]}" >/dev/null 2>&1; then
       log "import existing IAM role into state: ${names[$i]}"
-      terraform -chdir="${TF_DIR}" import -input=false "${addresses[$i]}" "${names[$i]}" || true
+      tf_import "${addresses[$i]}" "${names[$i]}"
     fi
   done
 }
@@ -57,7 +64,7 @@ import_ecr_repositories_if_needed() {
     fi
     if aws ecr describe-repositories --repository-names "${repo}" --region "${AWS_REGION_EFFECTIVE}" >/dev/null 2>&1; then
       log "import existing ECR repository into state: ${repo}"
-      terraform -chdir="${TF_DIR}" import -input=false "${address}" "${repo}" || true
+      tf_import "${address}" "${repo}"
     fi
   done < <(awk '
     /^[[:space:]]*-[[:space:]]*service_name:[[:space:]]*/ {
@@ -84,14 +91,14 @@ import_shared_secrets_if_needed() {
   if ! resource_in_state "module.data_test[0].aws_secretsmanager_secret.database"; then
     if aws secretsmanager describe-secret --secret-id "${db_secret}" --region "${AWS_REGION_EFFECTIVE}" >/dev/null 2>&1; then
       log "import existing Secrets Manager secret into state: ${db_secret}"
-      terraform -chdir="${TF_DIR}" import -input=false "module.data_test[0].aws_secretsmanager_secret.database" "${db_secret}" || true
+      tf_import "module.data_test[0].aws_secretsmanager_secret.database" "${db_secret}"
     fi
   fi
 
   if ! resource_in_state "module.data_test[0].aws_secretsmanager_secret.redis"; then
     if aws secretsmanager describe-secret --secret-id "${redis_secret}" --region "${AWS_REGION_EFFECTIVE}" >/dev/null 2>&1; then
       log "import existing Secrets Manager secret into state: ${redis_secret}"
-      terraform -chdir="${TF_DIR}" import -input=false "module.data_test[0].aws_secretsmanager_secret.redis" "${redis_secret}" || true
+      tf_import "module.data_test[0].aws_secretsmanager_secret.redis" "${redis_secret}"
     fi
   fi
 }
@@ -124,7 +131,7 @@ import_log_groups_if_needed() {
       --output text 2>/dev/null || true)
     if [[ -n "${existing}" && "${existing}" != "None" ]]; then
       log "import existing log group into state: ${log_group}"
-      terraform -chdir="${TF_DIR}" import -input=false "${address}" "${log_group}" || true
+      tf_import "${address}" "${log_group}"
     fi
   done
 }
@@ -138,4 +145,5 @@ terraform -chdir="${TF_DIR}" apply \
   -input=false \
   -auto-approve \
   -lock=true \
+  -lock-timeout="${TF_LOCK_TIMEOUT}" \
   -var="image_tag=${IMAGE_TAG_INPUT}"

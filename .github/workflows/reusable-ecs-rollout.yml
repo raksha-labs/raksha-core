@@ -44,6 +44,9 @@ permissions:
 
 jobs:
   rollout:
+    concurrency:
+      group: core-rollout-${{ github.repository }}-${{ inputs.environment }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     outputs:
