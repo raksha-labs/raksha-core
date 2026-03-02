@@ -7,7 +7,7 @@ edition = "2021"
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
-dotenv.workspace = true
+dotenvy.workspace = true
 event-schema = { path = "../event-schema" }
 common = { path = "../common" }
 ethers.workspace = true

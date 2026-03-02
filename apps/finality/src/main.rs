@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::Duration};
 use anyhow::Result;
 use event_schema::Chain;
 use common::{start_health_check_server, FinalityEngine, ShutdownSignal};
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use state_manager::RedisStreamPublisher;
 use state_manager::{ChainFinalityTracker, InMemoryFinalityEngine, PostgresRepository};
 use tracing::{info, warn};

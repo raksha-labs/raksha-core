@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use common::start_health_check_server;
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use state_manager::{PostgresRepository, RedisStreamPublisher};
 use tokio::{signal, time::interval};
 use tracing::{error, info, warn};

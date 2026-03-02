@@ -8,7 +8,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use common::{start_health_check_server, ChainAdapter};
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use event_schema::{NormalizedEvent, ReorgNotice};
 use ingestion::{
     build_oracle_protocol_map, default_eth_oracles, parse_oracle_addresses,

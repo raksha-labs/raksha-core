@@ -118,15 +118,19 @@ jobs:
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Rust security audit
-        uses: rustsec/audit-check@v1
+        uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2025-0009  # ring 0.16 AES panic - blocked by ethers→jsonwebtoken dep chain; tracked for alloy migration
 
       - name: Terraform security scan
         uses: aquasecurity/tfsec-action@v1.0.3

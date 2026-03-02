@@ -7,7 +7,7 @@ use event_schema::{
     AlertEvent, Chain, DetectionResult, FinalityStatus, IncidentTransition, LifecycleState, Severity,
 };
 use common::{start_health_check_server, ShutdownSignal};
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use state_manager::{IncidentKey, IncidentRecord, PostgresRepository, RedisStreamPublisher};
 use tracing::{info, warn};
 use uuid::Uuid;

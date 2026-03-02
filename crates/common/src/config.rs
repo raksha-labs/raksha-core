@@ -68,7 +68,7 @@ pub struct TraceEnrichmentConfig {
 impl AppConfig {
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self> {
-        dotenv::dotenv().ok();
+        dotenvy::dotenv().ok();
 
         let eth_config = ChainConfig {
             name: "ethereum".to_string(),
