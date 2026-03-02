@@ -97,7 +97,7 @@ impl DeadLetterQueue {
         if let Some(row) = existing {
             // Update existing entry
             let retry_count: i32 = row.get(0);
-            let first_failure_at: DateTime<Utc> = row.get(1);
+            let _first_failure_at: DateTime<Utc> = row.get(1);
             let new_retry_count = retry_count + 1;
 
             self.client
