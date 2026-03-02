@@ -111,6 +111,8 @@ jobs:
 
       - name: Run TFLint
         working-directory: infra/terraform/environments/${{ matrix.environment }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tflint --init
           tflint --recursive
@@ -146,3 +148,4 @@ jobs:
         with:
           working_directory: infra/terraform
           soft_fail: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
