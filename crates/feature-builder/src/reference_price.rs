@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_static_provider() {
-        let provider = StaticReferencePriceProvider;
+        let _provider = StaticReferencePriceProvider;
         // Can't easily test async in sync test without tokio runtime
         // Just verify it compiles
     }
