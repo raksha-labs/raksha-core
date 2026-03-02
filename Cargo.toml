@@ -14,6 +14,7 @@ members = [
   "apps/detector",
   "apps/orchestrator",
   "apps/finality",
+  "apps/history-worker",
 ]
 
 [workspace.dependencies]

@@ -25,6 +25,14 @@ This directory contains the SQL files for the Raksha database.
     - `incidents`
     - `incident_events`
     - `incident_context_snapshots`
+- **`upgrade_history_intelligence.sql`** - One-time upgrade for history intelligence layer
+  - Creates `history` schema and replay/history tables:
+    - `history.cases`
+    - `history.case_events`
+    - `history.case_alert_links`
+    - `history.replay_catalog`
+    - `history.ml_feature_registry`
+    - `history.ingest_offsets`
 
 ## Quick Start
 
@@ -46,6 +54,7 @@ psql -U postgres -d raksha -f seed_data.sql
 ```bash
 psql -U postgres -d raksha -f upgrade_poll_interval_ms.sql
 psql -U postgres -d raksha -f upgrade_generic_incidents.sql
+psql -U postgres -d raksha -f upgrade_history_intelligence.sql
 ```
 
 ### With Docker:

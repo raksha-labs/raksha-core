@@ -136,7 +136,68 @@ import_log_groups_if_needed() {
   done
 }
 
+force_unlock_stale_if_needed() {
+  local dynamo_table="${TF_BACKEND_DYNAMODB_TABLE:-}"
+  local bucket="${TF_BACKEND_BUCKET:-}"
+  [[ -n "${dynamo_table}" && -n "${bucket}" ]] || return 0
+
+  local stale_threshold_minutes="${TF_STALE_LOCK_MINUTES:-15}"
+  local state_path_suffix="/${ENVIRONMENT}/terraform.tfstate"
+
+  # Query DynamoDB for a lock on this environment's state file
+  local lock_info
+  lock_info=$(aws dynamodb scan \
+    --table-name "${dynamo_table}" \
+    --filter-expression "contains(LockID, :suffix)" \
+    --expression-attribute-values "{\":suffix\":{\"S\":\"${state_path_suffix}\"}}" \
+    --region "${AWS_REGION_EFFECTIVE}" \
+    --output json 2>/dev/null || true)
+
+  [[ -n "${lock_info}" ]] || return 0
+
+  # Extract Created timestamp and lock ID from the Info JSON blob
+  local lock_created_ts lock_id
+  lock_created_ts=$(echo "${lock_info}" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+items=d.get('Items',[])
+if not items: sys.exit(0)
+info=json.loads(items[0].get('Info',{}).get('S','{}'))
+print(info.get('Created',''))
+" 2>/dev/null || true)
+
+  lock_id=$(echo "${lock_info}" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+items=d.get('Items',[])
+if not items: sys.exit(0)
+info=json.loads(items[0].get('Info',{}).get('S','{}'))
+print(info.get('ID',''))
+" 2>/dev/null || true)
+
+  [[ -n "${lock_created_ts}" && -n "${lock_id}" ]] || return 0
+
+  local lock_created_epoch now_epoch age_minutes
+  lock_created_epoch=$(python3 -c "
+from datetime import datetime, timezone
+s='${lock_created_ts}'.split('.')[0].strip()
+dt=datetime.strptime(s,'%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+print(int(dt.timestamp()))
+" 2>/dev/null || echo "0")
+
+  now_epoch=$(date +%s)
+  age_minutes=$(( (now_epoch - lock_created_epoch) / 60 ))
+
+  if [[ "${lock_created_epoch}" -gt 0 && "${age_minutes}" -ge "${stale_threshold_minutes}" ]]; then
+    log "WARNING: stale state lock detected (${age_minutes}m old, threshold ${stale_threshold_minutes}m) — force-unlocking: ${lock_id}"
+    terraform -chdir="${TF_DIR}" force-unlock -force "${lock_id}" || true
+  else
+    log "Active state lock found (${age_minutes}m old) — waiting up to ${TF_LOCK_TIMEOUT}"
+  fi
+}
+
 log "terraform apply (${ENVIRONMENT}) image_tag=${IMAGE_TAG_INPUT}"
+force_unlock_stale_if_needed
 import_cicd_roles_if_needed
 import_ecr_repositories_if_needed
 import_shared_secrets_if_needed

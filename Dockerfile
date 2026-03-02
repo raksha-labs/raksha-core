@@ -24,7 +24,8 @@ RUN cargo build --release \
     -p indexer \
     -p detector \
     -p orchestrator \
-    -p finality
+    -p finality \
+    -p history-worker
 
 # Runtime stage - minimal image
 FROM debian:bookworm-slim
@@ -45,6 +46,7 @@ COPY --from=builder /app/target/release/indexer /app/bin/indexer
 COPY --from=builder /app/target/release/detector /app/bin/detector
 COPY --from=builder /app/target/release/orchestrator /app/bin/orchestrator
 COPY --from=builder /app/target/release/finality /app/bin/finality
+COPY --from=builder /app/target/release/history-worker /app/bin/history-worker
 
 # Copy schemas and rules (needed for runtime validation)
 COPY schemas ./schemas
