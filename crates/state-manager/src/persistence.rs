@@ -48,6 +48,32 @@ pub struct IncidentRecord {
     pub current_severity: String,
 }
 
+/// A row from the `tenant_monitored_entities` table representing a user's tracked position.
+#[derive(Debug, Clone)]
+pub struct MonitoredEntityRow {
+    pub entity_id: String,
+    pub entity_type: String,
+    pub display_name: Option<String>,
+    pub chain_slug: Option<String>,
+    pub asset_symbol: Option<String>,
+    pub quantity: f64,
+    pub valuation_usd: f64,
+    pub metadata_json: Option<Value>,
+}
+
+/// A computed exposure record to write into `incident_entity_exposures`.
+#[derive(Debug, Clone)]
+pub struct EntityExposureRecord {
+    pub entity_id: String,
+    pub capital_at_risk_usd: f64,
+    pub liquidity_status: String,
+    pub estimated_slippage_pct: f64,
+    pub loss_scenario_5pct_usd: f64,
+    pub loss_scenario_10pct_usd: f64,
+    pub estimated_savings_usd: f64,
+    pub payload: Value,
+}
+
 #[derive(Debug, Clone)]
 pub struct SourceFeedEventRecord {
     pub stream_config_id: Option<String>,
@@ -1173,6 +1199,111 @@ impl PostgresRepository {
             states: row.get(4),
             updated_at: row.get(5),
         }))
+    }
+
+    /// Fetch all enabled monitored entities for a given tenant and asset symbol.
+    /// Used to compute blast radius when a depeg alert fires.
+    pub async fn find_monitored_entities_for_alert(
+        &self,
+        tenant_id: &str,
+        asset_symbol: &str,
+    ) -> Result<Vec<MonitoredEntityRow>> {
+        let rows = match self
+            .client
+            .query(
+                r#"
+                SELECT entity_id, entity_type, display_name, chain_slug, asset_symbol,
+                       quantity::float8, valuation_usd::float8, metadata_json
+                FROM tenant_monitored_entities
+                WHERE tenant_id = $1
+                  AND asset_symbol = $2
+                  AND enabled = TRUE
+                "#,
+                &[&tenant_id, &asset_symbol],
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(error) => {
+                if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
+                    warn!("tenant_monitored_entities table not found; blast radius unavailable");
+                    return Ok(vec![]);
+                }
+                return Err(error.into());
+            }
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(|row| MonitoredEntityRow {
+                entity_id: row.get(0),
+                entity_type: row.get(1),
+                display_name: row.get(2),
+                chain_slug: row.get(3),
+                asset_symbol: row.get(4),
+                quantity: row.get::<usize, Option<f64>>(5).unwrap_or(0.0),
+                valuation_usd: row.get::<usize, Option<f64>>(6).unwrap_or(0.0),
+                metadata_json: row.get(7),
+            })
+            .collect())
+    }
+
+    /// Persist computed blast radius exposure records for an incident.
+    /// Uses ON CONFLICT to allow safe upserts when an incident escalates.
+    pub async fn save_incident_entity_exposures(
+        &self,
+        incident_id: &str,
+        tenant_id: &str,
+        exposures: &[EntityExposureRecord],
+    ) -> Result<()> {
+        for exposure in exposures {
+            if let Err(error) = self
+                .client
+                .execute(
+                    r#"
+                    INSERT INTO incident_entity_exposures
+                        (incident_id, tenant_id, entity_id, capital_at_risk_usd,
+                         liquidity_status, estimated_slippage_pct,
+                         loss_scenario_5pct_usd, loss_scenario_10pct_usd,
+                         estimated_savings_usd, payload)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ON CONFLICT (incident_id, entity_id) DO UPDATE
+                    SET capital_at_risk_usd    = EXCLUDED.capital_at_risk_usd,
+                        liquidity_status       = EXCLUDED.liquidity_status,
+                        estimated_slippage_pct = EXCLUDED.estimated_slippage_pct,
+                        loss_scenario_5pct_usd = EXCLUDED.loss_scenario_5pct_usd,
+                        loss_scenario_10pct_usd = EXCLUDED.loss_scenario_10pct_usd,
+                        estimated_savings_usd  = EXCLUDED.estimated_savings_usd,
+                        payload                = EXCLUDED.payload
+                    "#,
+                    &[
+                        &incident_id,
+                        &tenant_id,
+                        &exposure.entity_id,
+                        &exposure.capital_at_risk_usd,
+                        &exposure.liquidity_status,
+                        &exposure.estimated_slippage_pct,
+                        &exposure.loss_scenario_5pct_usd,
+                        &exposure.loss_scenario_10pct_usd,
+                        &exposure.estimated_savings_usd,
+                        &exposure.payload,
+                    ],
+                )
+                .await
+            {
+                if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
+                    warn!("incident_entity_exposures table not found; skipping blast radius persist");
+                    return Ok(());
+                }
+                warn!(
+                    error = ?error,
+                    incident_id = %incident_id,
+                    entity_id = %exposure.entity_id,
+                    "failed to save incident entity exposure"
+                );
+            }
+        }
+        Ok(())
     }
 }
 

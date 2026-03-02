@@ -12,13 +12,14 @@ on:
       - 'Dockerfile'
       - '.github/workflows/deploy-test.yml'
       - '.github/workflows/reusable-ecs-rollout.yml'
+      - '.github/workflows/reusable-image-build.yml'
       - 'scripts/ci/**'
   workflow_dispatch:
     inputs:
       image_tag:
-        description: Image tag to deploy
+        description: 'Image tag to deploy (leave empty to build fresh images)'
         required: false
-        default: latest
+        default: ''
         type: string
       apply_infra:
         description: Apply Terraform before deploy
@@ -36,11 +37,26 @@ permissions:
   contents: read
 
 jobs:
+  build-images:
+    # Build images on push, or on dispatch when no pre-built image_tag is provided
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag == '') }}
+    uses: ./.github/workflows/reusable-image-build.yml
+    with:
+      aws_region: eu-west-1
+      service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
+      image_tag: ${{ format('sha-{0}', github.sha) }}
+      push_latest: ${{ github.ref == 'refs/heads/master' }}
+    secrets:
+      aws_role_arn: ${{ secrets.AWS_IMAGES_ROLE_ARN }}
+
   deploy:
+    needs: build-images
+    # Run when build-images succeeded OR was skipped (dispatch with pre-built image_tag)
+    if: ${{ !cancelled() && (needs.build-images.result == 'success' || needs.build-images.result == 'skipped') }}
     uses: ./.github/workflows/reusable-ecs-rollout.yml
     with:
       environment: test
-      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag || format('sha-{0}', github.sha) }}
+      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || format('sha-{0}', github.sha) }}
       apply_infra: ${{ github.event_name == 'push' || github.event.inputs.apply_infra == 'true' }}
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
       aws_region: eu-west-1

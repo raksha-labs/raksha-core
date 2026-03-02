@@ -8,7 +8,7 @@ use event_schema::{
 };
 use common::{start_health_check_server, ShutdownSignal};
 use dotenvy::dotenv;
-use state_manager::{IncidentKey, IncidentRecord, PostgresRepository, RedisStreamPublisher};
+use state_manager::{EntityExposureRecord, IncidentKey, IncidentRecord, PostgresRepository, RedisStreamPublisher};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -376,6 +376,120 @@ async fn attach_incident_context(
     };
 
     alert.incident_id = Some(incident.incident_id.clone());
+
+    // --- Blast radius computation -------------------------------------------------
+    // Identify monitored entities exposed to the depegged asset and compute how
+    // much capital is at risk.  Results are persisted to incident_entity_exposures
+    // and surfaced in the alert payload via blast_radius / exposure_summary.
+    if let Some(symbol) = extract_asset_symbol(detection.subject_key.as_deref()) {
+        match repo
+            .find_monitored_entities_for_alert(&tenant_id, &symbol)
+            .await
+        {
+            Ok(entities) if !entities.is_empty() => {
+                let current_price = detection
+                    .oracle_context
+                    .get("weighted_median_price")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let divergence_pct = detection.risk_score.score;
+                let is_critical = matches!(detection.severity, Severity::Critical);
+
+                let exposures: Vec<EntityExposureRecord> = entities
+                    .iter()
+                    .map(|entity| {
+                        let capital = if current_price > 0.0 {
+                            entity.quantity * current_price
+                        } else {
+                            entity.valuation_usd
+                        };
+                        let loss_5pct = capital * 0.05;
+                        let loss_10pct = capital * 0.10;
+                        // Estimated slippage scales with the depeg magnitude (capped at 100 %)
+                        let slippage = divergence_pct.min(100.0);
+                        let liquidity = if is_critical {
+                            "at_risk"
+                        } else {
+                            "degraded"
+                        }
+                        .to_string();
+                        // Estimated savings = capital that could have been protected if exit
+                        // was triggered at the initial peg floor rather than current price.
+                        let savings = capital * (divergence_pct / 100.0).max(0.0);
+                        EntityExposureRecord {
+                            entity_id: entity.entity_id.clone(),
+                            capital_at_risk_usd: capital,
+                            liquidity_status: liquidity,
+                            estimated_slippage_pct: slippage,
+                            loss_scenario_5pct_usd: loss_5pct,
+                            loss_scenario_10pct_usd: loss_10pct,
+                            estimated_savings_usd: savings,
+                            payload: serde_json::json!({
+                                "entity_type": entity.entity_type,
+                                "display_name": entity.display_name,
+                                "chain_slug": entity.chain_slug,
+                                "asset_symbol": entity.asset_symbol,
+                                "quantity": entity.quantity,
+                                "current_price": current_price,
+                                "divergence_pct": divergence_pct,
+                            }),
+                        }
+                    })
+                    .collect();
+
+                if let Err(err) = repo
+                    .save_incident_entity_exposures(
+                        &incident.incident_id,
+                        &tenant_id,
+                        &exposures,
+                    )
+                    .await
+                {
+                    warn!(
+                        error = ?err,
+                        incident_id = %incident.incident_id,
+                        "failed to save blast radius exposures"
+                    );
+                }
+
+                alert.blast_radius = exposures.iter().map(|e| e.entity_id.clone()).collect();
+                let total_capital: f64 =
+                    exposures.iter().map(|e| e.capital_at_risk_usd).sum();
+                let total_loss_5pct: f64 =
+                    exposures.iter().map(|e| e.loss_scenario_5pct_usd).sum();
+                let total_loss_10pct: f64 =
+                    exposures.iter().map(|e| e.loss_scenario_10pct_usd).sum();
+                alert.exposure_summary.insert(
+                    "total_capital_at_risk_usd".to_string(),
+                    serde_json::json!(total_capital),
+                );
+                alert.exposure_summary.insert(
+                    "entity_count".to_string(),
+                    serde_json::json!(exposures.len()),
+                );
+                alert.exposure_summary.insert(
+                    "total_loss_scenario_5pct_usd".to_string(),
+                    serde_json::json!(total_loss_5pct),
+                );
+                alert.exposure_summary.insert(
+                    "total_loss_scenario_10pct_usd".to_string(),
+                    serde_json::json!(total_loss_10pct),
+                );
+                alert.exposure_summary.insert(
+                    "asset_symbol".to_string(),
+                    serde_json::json!(symbol),
+                );
+            }
+            Ok(_) => {
+                // No monitored entities for this asset — blast_radius stays empty.
+            }
+            Err(err) => {
+                warn!(error = ?err, "failed to query monitored entities for blast radius");
+            }
+        }
+    }
+    // ------------------------------------------------------------------------------
+
     let severity_text = format!("{:?}", detection.severity).to_lowercase();
     if let Err(error) = repo
         .update_incident_state(
@@ -673,6 +787,23 @@ fn resolve_alert_tenant_id(tenant_id: Option<String>) -> String {
         std::env::var("ALERT_FALLBACK_TENANT_ID")
             .unwrap_or_else(|_| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string())
     })
+}
+
+/// Extract the base asset symbol from a DPEG subject_key.
+///
+/// Subject keys are formatted as `"tenant_id:BASE/QUOTE"` (e.g. `"tenant-a:USDC/USD"`).
+/// This function returns the `BASE` portion (`"USDC"`) which is the stablecoin being
+/// monitored and used to look up tenant positions in `tenant_monitored_entities`.
+fn extract_asset_symbol(subject_key: Option<&str>) -> Option<String> {
+    let key = subject_key?;
+    // The rightmost colon-separated segment is the market_key ("BASE/QUOTE").
+    let market_part = key.rsplit(':').next().unwrap_or(key);
+    let symbol = market_part.split('/').next()?;
+    if symbol.is_empty() {
+        None
+    } else {
+        Some(symbol.to_string())
+    }
 }
 
 async fn init_stream_publisher() -> Option<RedisStreamPublisher> {

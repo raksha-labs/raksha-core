@@ -8,8 +8,11 @@ mod chainlink_answer_updated;
 mod coinbase_ticker;
 mod evm_log;
 mod gemini_marketdata_v1;
+mod gate_ticker_v4;
+mod aerodrome_swap_price;
 mod kraken_ticker_v2;
 mod okx_tickers_v5;
+mod pyth_hermes_v2;
 mod uniswap_v2_swap;
 mod uniswap_v2_swap_price;
 mod uniswap_v3_swap_price;
@@ -49,12 +52,15 @@ pub fn parse_payload(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedF
         "kraken_ticker_v2" => kraken_ticker_v2::parse(input, payload),
         "okx_tickers_v5" => okx_tickers_v5::parse(input, payload),
         "bybit_tickers_v5" => bybit_tickers_v5::parse(input, payload),
+        "gate_ticker_v4" => gate_ticker_v4::parse(input, payload),
         "gemini_marketdata_v1" => gemini_marketdata_v1::parse(input, payload),
         "evm_log_v1" => evm_log::parse(input, payload),
         "chainlink_answer_updated_v1" => chainlink_answer_updated::parse(input, payload),
+        "pyth_hermes_v2" => pyth_hermes_v2::parse(input, payload),
         "uniswap_v2_swap_v1" => uniswap_v2_swap::parse(input, payload),
         "uniswap_v2_swap_price_v1" => uniswap_v2_swap_price::parse(input, payload),
         "uniswap_v3_swap_price_v1" => uniswap_v3_swap_price::parse(input, payload),
+        "aerodrome_swap_price_v1" => aerodrome_swap_price::parse(input, payload),
         other => Err(format!("unsupported_parser:{other}")),
     }
 }

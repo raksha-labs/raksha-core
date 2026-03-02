@@ -1,20 +1,11 @@
 name: Build and Push Core Images
 
+# Image builds for master pushes are handled by deploy-test.yml (build-images → deploy).
+# This workflow is for tag-based releases and manual builds only.
 on:
   push:
-    branches: [master]
     tags:
       - 'v*'
-    paths:
-      - 'apps/**'
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'Dockerfile'
-      - 'infra/service-catalog.yaml'
-      - '.github/workflows/images.yml'
-      - '.github/workflows/reusable-image-build.yml'
-      - 'scripts/ci/**'
   workflow_dispatch:
     inputs:
       service_filter:

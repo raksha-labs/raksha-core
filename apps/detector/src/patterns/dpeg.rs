@@ -981,6 +981,7 @@ fn build_detection(
         serde_json::json!(context_classification_str(&snapshot.classification)),
     );
 
+    let actions_recommended = recommended_actions_for_severity(&severity);
     DetectionResult {
         detection_id: Uuid::new_v4(),
         pattern_id: PATTERN_ID.to_string(),
@@ -1010,8 +1011,28 @@ fn build_detection(
         context_classification: Some(snapshot.classification.clone()),
         confidence_breakdown: snapshot.confidence_breakdown.clone(),
         oracle_context,
-        actions_recommended: vec![],
+        actions_recommended,
         created_at: now,
+    }
+}
+
+fn recommended_actions_for_severity(severity: &Severity) -> Vec<String> {
+    match severity {
+        Severity::Critical => vec![
+            "Immediate Rebalance: move all affected stablecoin positions to safe assets (ETH, BTC, or actively pegged stablecoins)".to_string(),
+            "Exit all positions in the affected stablecoin immediately to prevent further capital erosion".to_string(),
+            "Withdraw to Owner wallet: transfer funds to a secure wallet outside the affected protocol".to_string(),
+        ],
+        Severity::High => vec![
+            "Partial Exit: reduce stablecoin exposure by 50% to limit downside risk".to_string(),
+            "Rebalance to ETH or other correlated assets to maintain market exposure".to_string(),
+            "Hold and Monitor: set a recovery price alert at the peg target threshold".to_string(),
+        ],
+        Severity::Medium => vec![
+            "Hold and Monitor: depeg is within manageable range, no immediate action required".to_string(),
+            "Rebalance to maintain target stablecoin allocation if exposure exceeds risk tolerance".to_string(),
+        ],
+        _ => vec![],
     }
 }
 
