@@ -51,6 +51,7 @@ COPY --from=builder /app/target/release/history-worker /app/bin/history-worker
 # Copy schemas and rules (needed for runtime validation)
 COPY schemas ./schemas
 COPY rules ./rules
+COPY scenarios ./scenarios
 
 # Set ownership
 RUN chown -R appuser:appuser /app
