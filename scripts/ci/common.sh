@@ -41,7 +41,7 @@ is_selected_service() {
 }
 
 catalog_services() {
-  awk -F': ' '/service_name:/{gsub(/\"/,"",$2); print $2}' "${REPO_ROOT}/infra/service-catalog.yaml"
+  awk -F': ' '/service_name:/{gsub(/"/,"",$2); print $2}' "${REPO_ROOT}/infra/service-catalog.yaml"
 }
 
 terraform_dir_for_env() {
