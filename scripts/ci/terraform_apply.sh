@@ -7,6 +7,7 @@ source "${SCRIPT_DIR}/common.sh"
 
 require_cmd terraform
 require_cmd aws
+require_cmd python3
 
 ENVIRONMENT="${1:-${ENVIRONMENT:-}}"
 IMAGE_TAG_INPUT="${2:-${IMAGE_TAG:-latest}}"
@@ -18,10 +19,141 @@ TF_DIR=$(terraform_dir_for_env "${ENVIRONMENT}")
 AWS_REGION_EFFECTIVE="${AWS_REGION:-eu-west-1}"
 TF_LOCK_TIMEOUT="${TF_LOCK_TIMEOUT:-10m}"
 
+state_key_for_env() {
+  local repo_name
+  repo_name=$(basename "${REPO_ROOT}")
+  echo "${TF_STATE_KEY:-${TF_BACKEND_KEY_PREFIX:-raksha}/${repo_name}/${ENVIRONMENT}/terraform.tfstate}"
+}
+
+state_lock_details_for_env() {
+  local dynamo_table="${TF_BACKEND_DYNAMODB_TABLE:-}"
+  local bucket="${TF_BACKEND_BUCKET:-}"
+  [[ -n "${dynamo_table}" && -n "${bucket}" ]] || return 0
+
+  local expected_state_key
+  expected_state_key=$(state_key_for_env)
+
+  local lock_info
+  lock_info=$(aws dynamodb scan \
+    --table-name "${dynamo_table}" \
+    --region "${AWS_REGION_EFFECTIVE}" \
+    --output json 2>/dev/null || true)
+  [[ -n "${lock_info}" ]] || return 0
+
+  echo "${lock_info}" | python3 -c "
+import json, sys
+doc=json.load(sys.stdin)
+expected='${expected_state_key}'
+bucket='${bucket}'
+
+def matches(path: str) -> bool:
+    if not path:
+        return False
+    if path == expected:
+        return True
+    if path == f'{bucket}/{expected}':
+        return True
+    if path == f's3://{bucket}/{expected}':
+        return True
+    return path.endswith('/' + expected) or expected in path
+
+for item in doc.get('Items', []):
+    info_raw=item.get('Info',{}).get('S')
+    if not info_raw:
+        continue
+    try:
+        info=json.loads(info_raw)
+    except Exception:
+        continue
+    path=str(info.get('Path',''))
+    if matches(path):
+        print('\\t'.join([
+            str(info.get('ID','')),
+            str(info.get('Created','')),
+            str(info.get('Who','')),
+            str(info.get('Operation','')),
+            path
+        ]))
+        break
+" 2>/dev/null || true
+}
+
+print_state_lock_guard() {
+  local expected_state_key lock_details
+  expected_state_key=$(state_key_for_env)
+  log "state lock guard: backend key=${expected_state_key}"
+
+  lock_details=$(state_lock_details_for_env || true)
+  if [[ -z "${lock_details}" ]]; then
+    log "state lock guard: no existing lock row found"
+    return 0
+  fi
+
+  local lock_id lock_created_ts lock_who lock_operation lock_path
+  IFS=$'\t' read -r lock_id lock_created_ts lock_who lock_operation lock_path <<< "${lock_details}"
+
+  local lock_created_epoch now_epoch age_minutes
+  lock_created_epoch=$(python3 -c "
+from datetime import datetime, timezone
+s='${lock_created_ts}'.split('.')[0].strip()
+if not s:
+  print(0)
+  raise SystemExit(0)
+dt=datetime.strptime(s,'%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+print(int(dt.timestamp()))
+" 2>/dev/null || echo "0")
+  now_epoch=$(date +%s)
+  age_minutes=0
+  if [[ "${lock_created_epoch}" -gt 0 ]]; then
+    age_minutes=$(( (now_epoch - lock_created_epoch) / 60 ))
+  fi
+
+  log "state lock guard: lock detected id=${lock_id} who=${lock_who} op=${lock_operation} age=${age_minutes}m"
+  log "state lock guard: lock path=${lock_path}"
+}
+
+run_tf_with_lock_retry() {
+  local max_attempts="${TF_LOCK_RETRY_MAX_ATTEMPTS:-6}"
+  local sleep_seconds="${TF_LOCK_RETRY_SLEEP_SECONDS:-20}"
+  local attempt=1
+  local output rc
+
+  while (( attempt <= max_attempts )); do
+    set +e
+    output=$("$@" 2>&1)
+    rc=$?
+    set -e
+
+    if [[ "${rc}" -eq 0 ]]; then
+      [[ -n "${output}" ]] && printf '%s\n' "${output}"
+      return 0
+    fi
+
+    if grep -q "Error acquiring the state lock" <<<"${output}" \
+      || grep -q "ConditionalCheckFailedException" <<<"${output}"; then
+      printf '%s\n' "${output}" >&2
+      force_unlock_stale_if_needed || true
+
+      if (( attempt < max_attempts )); then
+        log "terraform state lock busy (attempt ${attempt}/${max_attempts}) — retrying in ${sleep_seconds}s"
+        sleep "${sleep_seconds}"
+        ((attempt++))
+        continue
+      fi
+    fi
+
+    printf '%s\n' "${output}" >&2
+    return "${rc}"
+  done
+
+  return 1
+}
+
 tf_import() {
   local address="$1"
   local id="$2"
-  terraform -chdir="${TF_DIR}" import -input=false -lock-timeout="${TF_LOCK_TIMEOUT}" "${address}" "${id}"
+  run_tf_with_lock_retry \
+    terraform -chdir="${TF_DIR}" import -input=false -lock-timeout="${TF_LOCK_TIMEOUT}" "${address}" "${id}"
 }
 
 resource_in_state() {
@@ -142,38 +274,9 @@ force_unlock_stale_if_needed() {
   [[ -n "${dynamo_table}" && -n "${bucket}" ]] || return 0
 
   local stale_threshold_minutes="${TF_STALE_LOCK_MINUTES:-15}"
-  local state_path_suffix="/${ENVIRONMENT}/terraform.tfstate"
-
-  # Query DynamoDB for a lock on this environment's state file
-  local lock_info
-  lock_info=$(aws dynamodb scan \
-    --table-name "${dynamo_table}" \
-    --filter-expression "contains(LockID, :suffix)" \
-    --expression-attribute-values "{\":suffix\":{\"S\":\"${state_path_suffix}\"}}" \
-    --region "${AWS_REGION_EFFECTIVE}" \
-    --output json 2>/dev/null || true)
-
-  [[ -n "${lock_info}" ]] || return 0
-
-  # Extract Created timestamp and lock ID from the Info JSON blob
-  local lock_created_ts lock_id
-  lock_created_ts=$(echo "${lock_info}" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-items=d.get('Items',[])
-if not items: sys.exit(0)
-info=json.loads(items[0].get('Info',{}).get('S','{}'))
-print(info.get('Created',''))
-" 2>/dev/null || true)
-
-  lock_id=$(echo "${lock_info}" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-items=d.get('Items',[])
-if not items: sys.exit(0)
-info=json.loads(items[0].get('Info',{}).get('S','{}'))
-print(info.get('ID',''))
-" 2>/dev/null || true)
+  local lock_details lock_id lock_created_ts lock_who lock_operation lock_path
+  lock_details=$(state_lock_details_for_env || true)
+  IFS=$'\t' read -r lock_id lock_created_ts lock_who lock_operation lock_path <<< "${lock_details}"
 
   [[ -n "${lock_created_ts}" && -n "${lock_id}" ]] || return 0
 
@@ -197,12 +300,13 @@ print(int(dt.timestamp()))
 }
 
 log "terraform apply (${ENVIRONMENT}) image_tag=${IMAGE_TAG_INPUT}"
+print_state_lock_guard
 force_unlock_stale_if_needed
 import_cicd_roles_if_needed
 import_ecr_repositories_if_needed
 import_shared_secrets_if_needed
 import_log_groups_if_needed
-terraform -chdir="${TF_DIR}" apply \
+run_tf_with_lock_retry terraform -chdir="${TF_DIR}" apply \
   -input=false \
   -auto-approve \
   -lock=true \
