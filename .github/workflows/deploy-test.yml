@@ -37,9 +37,34 @@ permissions:
   contents: read
 
 jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      build_required: ${{ steps.filter.outputs.build_required }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect code/image-impacting changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            build_required:
+              - 'apps/**'
+              - 'crates/**'
+              - 'schemas/**'
+              - 'rules/**'
+              - 'scenarios/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'Dockerfile'
+              - 'infra/service-catalog.yaml'
+
   build-images:
+    needs: detect-changes
     # Build images on push, or on dispatch when no pre-built image_tag is provided
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag == '') }}
+    if: ${{ (github.event_name == 'push' && needs.detect-changes.outputs.build_required == 'true') || (github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag == '') }}
     uses: ./.github/workflows/reusable-image-build.yml
     with:
       aws_region: eu-west-1

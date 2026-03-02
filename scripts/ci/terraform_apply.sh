@@ -217,6 +217,46 @@ import_compute_iam_if_needed() {
   fi
 }
 
+import_compute_ec2_resources_if_needed() {
+  local asg_name="raksha-${ENVIRONMENT}-ecs-asg"
+  local cp_name="raksha-${ENVIRONMENT}-ec2-cp"
+
+  if ! resource_in_state "module.compute.aws_autoscaling_group.ecs[0]"; then
+    if aws autoscaling describe-auto-scaling-groups \
+      --auto-scaling-group-names "${asg_name}" \
+      --region "${AWS_REGION_EFFECTIVE}" \
+      --query "length(AutoScalingGroups)" \
+      --output text 2>/dev/null | grep -q "^1$"; then
+      log "import existing ECS Auto Scaling Group into state: ${asg_name}"
+      tf_import "module.compute.aws_autoscaling_group.ecs[0]" "${asg_name}"
+    fi
+  fi
+
+  if ! resource_in_state "module.compute.aws_ecs_capacity_provider.ec2[0]"; then
+    if aws ecs describe-capacity-providers \
+      --capacity-providers "${cp_name}" \
+      --region "${AWS_REGION_EFFECTIVE}" \
+      --query "length(capacityProviders)" \
+      --output text 2>/dev/null | grep -q "^1$"; then
+      log "import existing ECS capacity provider into state: ${cp_name}"
+      tf_import "module.compute.aws_ecs_capacity_provider.ec2[0]" "${cp_name}"
+    fi
+  fi
+
+  if ! resource_in_state "module.compute.aws_launch_template.ecs[0]"; then
+    local lt_id
+    lt_id=$(aws ec2 describe-launch-templates \
+      --region "${AWS_REGION_EFFECTIVE}" \
+      --filters "Name=launch-template-name,Values=raksha-${ENVIRONMENT}-ecs-*" \
+      --query "LaunchTemplates[0].LaunchTemplateId" \
+      --output text 2>/dev/null || true)
+    if [[ -n "${lt_id}" && "${lt_id}" != "None" ]]; then
+      log "import existing ECS launch template into state: ${lt_id}"
+      tf_import "module.compute.aws_launch_template.ecs[0]" "${lt_id}"
+    fi
+  fi
+}
+
 import_ecr_repositories_if_needed() {
   local svc
   local repo
@@ -336,6 +376,7 @@ print_state_lock_guard
 force_unlock_stale_if_needed
 import_cicd_roles_if_needed
 import_compute_iam_if_needed
+import_compute_ec2_resources_if_needed
 import_ecr_repositories_if_needed
 import_shared_secrets_if_needed
 import_log_groups_if_needed

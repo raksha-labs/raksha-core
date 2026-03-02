@@ -501,10 +501,21 @@ resource "aws_ecs_service" "service" {
     }
   }
 
-  network_configuration {
-    subnets          = var.task_subnet_ids
-    security_groups  = [var.ecs_tasks_sg_id]
-    assign_public_ip = var.assign_public_ip
+  dynamic "network_configuration" {
+    for_each = var.compute_mode == "ec2" ? [1] : []
+    content {
+      subnets         = var.task_subnet_ids
+      security_groups = [var.ecs_tasks_sg_id]
+    }
+  }
+
+  dynamic "network_configuration" {
+    for_each = var.compute_mode == "ec2" ? [] : [1]
+    content {
+      subnets          = var.task_subnet_ids
+      security_groups  = [var.ecs_tasks_sg_id]
+      assign_public_ip = var.assign_public_ip
+    }
   }
 
   dynamic "service_registries" {
@@ -594,10 +605,21 @@ resource "aws_ecs_service" "test_data" {
   launch_type      = var.compute_mode == "ec2" ? "EC2" : null
   platform_version = var.compute_mode == "fargate_mix" ? "LATEST" : null
 
-  network_configuration {
-    subnets          = var.task_subnet_ids
-    security_groups  = [var.ecs_tasks_sg_id]
-    assign_public_ip = var.assign_public_ip
+  dynamic "network_configuration" {
+    for_each = var.compute_mode == "ec2" ? [1] : []
+    content {
+      subnets         = var.task_subnet_ids
+      security_groups = [var.ecs_tasks_sg_id]
+    }
+  }
+
+  dynamic "network_configuration" {
+    for_each = var.compute_mode == "ec2" ? [] : [1]
+    content {
+      subnets          = var.task_subnet_ids
+      security_groups  = [var.ecs_tasks_sg_id]
+      assign_public_ip = var.assign_public_ip
+    }
   }
 
   service_registries {
