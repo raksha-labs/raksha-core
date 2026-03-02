@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 
 use super::{
-    extract_symbol_from_topic, observed_at, parse_f64, parse_ts_from_path, source_event_id, split_symbol_pair,
-    symbol_to_market_key, ParsedFeedEvent, ParserInput,
+    extract_symbol_from_topic, observed_at, parse_f64, parse_ts_from_path, source_event_id,
+    split_symbol_pair, symbol_to_market_key, ParsedFeedEvent, ParserInput,
 };
 
 pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFeedEvent, String> {
@@ -54,8 +54,9 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         .ok_or_else(|| "missing_bybit_symbol".to_string())?;
     let price = price.ok_or_else(|| "missing_bybit_last_price".to_string())?;
 
-    let payload_event_ts = parse_ts_from_path(payload, input.payload_ts_path, input.payload_ts_unit)
-        .or_else(|| super::parse_ts_from_path(payload, Some("$.ts"), "ms"));
+    let payload_event_ts =
+        parse_ts_from_path(payload, input.payload_ts_path, input.payload_ts_unit)
+            .or_else(|| super::parse_ts_from_path(payload, Some("$.ts"), "ms"));
     let observed_at = observed_at(payload_event_ts);
 
     let market_key = input

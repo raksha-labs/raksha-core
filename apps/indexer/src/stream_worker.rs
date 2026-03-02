@@ -88,9 +88,15 @@ pub async fn run_stream_worker(
         }
 
         let result = match config.connector_mode.as_str() {
-            "websocket" => run_websocket_loop(&config, &repo, &stream, &mut shutdown, &mut fx_cache).await,
-            "rpc_logs" => run_rpc_logs_loop(&config, &repo, &stream, &mut shutdown, &mut fx_cache).await,
-            "http_poll" => run_http_poll_loop(&config, &repo, &stream, &mut shutdown, &mut fx_cache).await,
+            "websocket" => {
+                run_websocket_loop(&config, &repo, &stream, &mut shutdown, &mut fx_cache).await
+            }
+            "rpc_logs" => {
+                run_rpc_logs_loop(&config, &repo, &stream, &mut shutdown, &mut fx_cache).await
+            }
+            "http_poll" => {
+                run_http_poll_loop(&config, &repo, &stream, &mut shutdown, &mut fx_cache).await
+            }
             mode => Err(anyhow!("unsupported_connector_mode:{mode}")),
         };
 
@@ -168,11 +174,8 @@ async fn run_rpc_logs_loop(
     let endpoint = endpoint_from_runtime_config(config)?;
     let poll_interval =
         resolve_poll_interval_duration(config.poll_interval_ms, DEFAULT_RPC_LOGS_POLL_INTERVAL_MS);
-    let mut connector = RpcLogsConnector::new(
-        endpoint,
-        config.filter_config.clone(),
-        poll_interval,
-    );
+    let mut connector =
+        RpcLogsConnector::new(endpoint, config.filter_config.clone(), poll_interval);
     connector.connect().await?;
 
     loop {
@@ -257,7 +260,8 @@ async fn process_payload(
             }
             let mut payload_for_storage = payload.clone();
             let (parse_status, parse_error, should_fanout) =
-                apply_usdt_normalization(repo, &mut parsed, &mut payload_for_storage, fx_cache).await?;
+                apply_usdt_normalization(repo, &mut parsed, &mut payload_for_storage, fx_cache)
+                    .await?;
 
             let dedup_key = build_dedup_key(config, &parsed, &payload);
             let record = to_source_feed_record(
@@ -278,7 +282,8 @@ async fn process_payload(
                 return Ok(());
             }
             if should_fanout {
-                fanout_unified_events(config, stream, &payload_for_storage, &parsed, dedup_key).await?;
+                fanout_unified_events(config, stream, &payload_for_storage, &parsed, dedup_key)
+                    .await?;
             }
             Ok(())
         }
@@ -335,7 +340,10 @@ fn upsert_normalized_metadata(
         .cloned()
         .unwrap_or_default();
 
-    normalized.insert("raw_quote_price".to_string(), raw_quote_price.map_or(Value::Null, |v| json!(v)));
+    normalized.insert(
+        "raw_quote_price".to_string(),
+        raw_quote_price.map_or(Value::Null, |v| json!(v)),
+    );
     normalized.insert(
         "quote_asset".to_string(),
         quote_asset
@@ -365,7 +373,10 @@ fn upsert_payload_normalization(
 ) {
     ensure_object_payload(payload);
     if let Some(obj) = payload.as_object_mut() {
-        obj.insert("raw_quote_price".to_string(), raw_quote_price.map_or(Value::Null, |v| json!(v)));
+        obj.insert(
+            "raw_quote_price".to_string(),
+            raw_quote_price.map_or(Value::Null, |v| json!(v)),
+        );
         obj.insert(
             "quote_asset".to_string(),
             quote_asset
@@ -421,7 +432,10 @@ fn derive_quote_asset(parsed: &ParsedFeedEvent) -> Option<String> {
         .filter(|quote| !quote.is_empty())
 }
 
-async fn lookup_usdt_usd_rate(repo: &PostgresRepository, fx_cache: &mut FxRateCache) -> Result<Option<f64>> {
+async fn lookup_usdt_usd_rate(
+    repo: &PostgresRepository,
+    fx_cache: &mut FxRateCache,
+) -> Result<Option<f64>> {
     let now_ms = Utc::now().timestamp_millis();
     if let Some(cached) = fx_cache.usdt_usd.as_ref() {
         if now_ms - cached.cached_at_ms <= FX_CACHE_TTL_SECONDS * 1_000 {
@@ -457,30 +471,30 @@ async fn apply_usdt_normalization(
     let quote_asset_ref = quote_asset.as_deref();
 
     if quote_asset_ref != Some("USDT") {
-        upsert_normalized_metadata(parsed, Some(raw_price), quote_asset_ref, Some(raw_price), None, false);
-        upsert_payload_normalization(payload, Some(raw_price), quote_asset_ref, Some(raw_price), None, false);
+        upsert_normalized_metadata(
+            parsed,
+            Some(raw_price),
+            quote_asset_ref,
+            Some(raw_price),
+            None,
+            false,
+        );
+        upsert_payload_normalization(
+            payload,
+            Some(raw_price),
+            quote_asset_ref,
+            Some(raw_price),
+            None,
+            false,
+        );
         return Ok(("parsed", None, true));
     }
 
     let fx_rate = lookup_usdt_usd_rate(repo, fx_cache).await?;
     let Some(fx_rate) = fx_rate else {
         parsed.price = None;
-        upsert_normalized_metadata(
-            parsed,
-            Some(raw_price),
-            quote_asset_ref,
-            None,
-            None,
-            true,
-        );
-        upsert_payload_normalization(
-            payload,
-            Some(raw_price),
-            quote_asset_ref,
-            None,
-            None,
-            true,
-        );
+        upsert_normalized_metadata(parsed, Some(raw_price), quote_asset_ref, None, None, true);
+        upsert_payload_normalization(payload, Some(raw_price), quote_asset_ref, None, None, true);
         return Ok((
             "partial",
             Some("missing_fresh_usdt_usd_rate".to_string()),
@@ -555,7 +569,8 @@ async fn fanout_unified_events(
             .event_id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let enriched_payload = enrich_payload_for_unified(config, payload, parsed, dedup_key.as_deref());
+        let enriched_payload =
+            enrich_payload_for_unified(config, payload, parsed, dedup_key.as_deref());
         let event = UnifiedEvent {
             event_id,
             tenant_id: tenant_id.to_string(),
@@ -592,8 +607,14 @@ fn enrich_payload_for_unified(
             "stream_config_id".to_string(),
             Value::String(config.stream_config_id.clone()),
         );
-        obj.insert("source_id".to_string(), Value::String(config.source_id.clone()));
-        obj.insert("parser_name".to_string(), Value::String(config.parser_name.clone()));
+        obj.insert(
+            "source_id".to_string(),
+            Value::String(config.source_id.clone()),
+        );
+        obj.insert(
+            "parser_name".to_string(),
+            Value::String(config.parser_name.clone()),
+        );
         if let Some(market_key) = parsed.market_key.as_ref() {
             obj.insert("market_key".to_string(), Value::String(market_key.clone()));
         }
@@ -607,7 +628,10 @@ fn enrich_payload_for_unified(
             obj.insert("chainId".to_string(), json!(chain_id));
         }
         if let Some(dedup_key) = dedup_key {
-            obj.insert("dedup_key".to_string(), Value::String(dedup_key.to_string()));
+            obj.insert(
+                "dedup_key".to_string(),
+                Value::String(dedup_key.to_string()),
+            );
         }
     }
     enriched
@@ -615,7 +639,11 @@ fn enrich_payload_for_unified(
 
 fn endpoint_from_runtime_config(config: &RuntimeStreamConfig) -> Result<String> {
     let endpoint_template = endpoint_from_connection_config(&config.connection_config)?;
-    resolve_endpoint_template(&endpoint_template, &config.auth_config, config.auth_secret_ref.as_deref())
+    resolve_endpoint_template(
+        &endpoint_template,
+        &config.auth_config,
+        config.auth_secret_ref.as_deref(),
+    )
 }
 
 fn endpoint_from_connection_config(config: &Value) -> Result<String> {
@@ -714,7 +742,10 @@ fn collect_unresolved_placeholders(endpoint: &str) -> Vec<String> {
         let end_index = index + 1 + end_offset;
         if end_index > index + 1 {
             let key = &endpoint[index + 1..end_index];
-            if key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+            if key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+            {
                 let candidate = key.to_string();
                 if !placeholders.iter().any(|existing| existing == &candidate) {
                     placeholders.push(candidate);
@@ -736,7 +767,11 @@ fn map_source_type(source_type: &str) -> SourceType {
     }
 }
 
-fn build_dedup_key(config: &RuntimeStreamConfig, parsed: &ParsedFeedEvent, payload: &Value) -> Option<String> {
+fn build_dedup_key(
+    config: &RuntimeStreamConfig,
+    parsed: &ParsedFeedEvent,
+    payload: &Value,
+) -> Option<String> {
     if let Some(event_id) = parsed.event_id.as_ref() {
         return Some(format!(
             "provider:{}:{}:{}",
@@ -767,7 +802,11 @@ fn build_dedup_key(config: &RuntimeStreamConfig, parsed: &ParsedFeedEvent, paylo
     Some(hex::encode(hasher.finalize()))
 }
 
-fn hash_payload_only(config: &RuntimeStreamConfig, payload: &Value, observed_at: chrono::DateTime<Utc>) -> String {
+fn hash_payload_only(
+    config: &RuntimeStreamConfig,
+    payload: &Value,
+    observed_at: chrono::DateTime<Utc>,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(config.source_id.as_bytes());
     hasher.update(b"|");

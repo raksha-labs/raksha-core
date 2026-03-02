@@ -88,10 +88,7 @@ impl DetectionPattern for FlashLoanPattern {
         PATTERN_ID
     }
 
-    async fn reload_config(
-        &mut self,
-        config_map: &HashMap<(String, String), Value>,
-    ) -> Result<()> {
+    async fn reload_config(&mut self, config_map: &HashMap<(String, String), Value>) -> Result<()> {
         let mut new_configs = HashMap::new();
         for ((tenant_id, pattern_id), config) in config_map {
             if pattern_id != PATTERN_ID {
@@ -101,7 +98,10 @@ impl DetectionPattern for FlashLoanPattern {
             new_configs.insert(tenant_id.clone(), rules);
         }
         self.configs = new_configs;
-        tracing::info!(config_count = self.configs.len(), "flash_loan configs reloaded");
+        tracing::info!(
+            config_count = self.configs.len(),
+            "flash_loan configs reloaded"
+        );
         Ok(())
     }
 
@@ -159,9 +159,10 @@ impl DetectionPattern for FlashLoanPattern {
             }
 
             // Apply cooldown.
-            state
-                .cooldowns
-                .insert(cooldown_key.clone(), now + Duration::seconds(rule.cooldown_sec));
+            state.cooldowns.insert(
+                cooldown_key.clone(),
+                now + Duration::seconds(rule.cooldown_sec),
+            );
 
             // Persist updated state.
             let state_value = serde_json::to_value(state.clone())?;
@@ -216,7 +217,10 @@ fn parse_flash_loan_rules(config: &Value, tenant_id: &str) -> Vec<FlashLoanRule>
     }
 
     tracing::warn!(tenant_id = %tenant_id, "invalid flash_loan config; falling back to defaults");
-    vec![default_flash_rule("flash-default", "Default Flash Loan Rule")]
+    vec![default_flash_rule(
+        "flash-default",
+        "Default Flash Loan Rule",
+    )]
 }
 
 fn parse_rule_item(value: &Value, index: usize) -> Option<FlashLoanRule> {
@@ -370,7 +374,10 @@ fn build_detection(
     now: DateTime<Utc>,
     rule: &FlashLoanRule,
 ) -> DetectionResult {
-    let tx_hash = event.tx_hash.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    let tx_hash = event
+        .tx_hash
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let description = format!(
         "Flash loan rule '{}' triggered: ${:.0} borrowed from {}, ${:.0} profit extracted by {} on {}.",
         rule.name,
@@ -384,7 +391,10 @@ fn build_detection(
     DetectionResult {
         detection_id: Uuid::new_v4(),
         pattern_id: PATTERN_ID.to_string(),
-        event_key: Some(format!("flash_loan:{}:{}:{}", event.tenant_id, rule.rule_id, tx_hash)),
+        event_key: Some(format!(
+            "flash_loan:{}:{}:{}",
+            event.tenant_id, rule.rule_id, tx_hash
+        )),
         subject_type: Some("address".to_string()),
         subject_key: Some(fl.attacker_address.clone()),
         tenant_id: Some(event.tenant_id.clone()),

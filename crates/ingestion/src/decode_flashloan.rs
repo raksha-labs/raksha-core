@@ -96,10 +96,7 @@ mod tests {
     fn hashes_event_topic_from_signature() {
         assert_eq!(
             event_topic_from_signature(BALANCER_FLASH_LOAN_EVENT),
-            H256::from_slice(
-                keccak256(BALANCER_FLASH_LOAN_EVENT.as_bytes())
-                    .as_slice()
-            )
+            H256::from_slice(keccak256(BALANCER_FLASH_LOAN_EVENT.as_bytes()).as_slice())
         );
     }
 

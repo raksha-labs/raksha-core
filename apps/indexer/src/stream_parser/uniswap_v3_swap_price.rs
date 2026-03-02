@@ -63,9 +63,12 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         return Err("invalid_uniswap_v3_swap_data".to_string());
     }
 
-    let token0_symbol = read_string(input.filter_config, "token0_symbol", "TOKEN0").to_ascii_uppercase();
-    let token1_symbol = read_string(input.filter_config, "token1_symbol", "TOKEN1").to_ascii_uppercase();
-    let base_symbol = read_string(input.filter_config, "base_symbol", &token0_symbol).to_ascii_uppercase();
+    let token0_symbol =
+        read_string(input.filter_config, "token0_symbol", "TOKEN0").to_ascii_uppercase();
+    let token1_symbol =
+        read_string(input.filter_config, "token1_symbol", "TOKEN1").to_ascii_uppercase();
+    let base_symbol =
+        read_string(input.filter_config, "base_symbol", &token0_symbol).to_ascii_uppercase();
     let token0_decimals = read_i32(input.filter_config, "token0_decimals", 18);
     let token1_decimals = read_i32(input.filter_config, "token1_decimals", 18);
 
@@ -73,18 +76,19 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
     let amount1 = parse_i256_word_to_f64(&words[1]).unwrap_or_default();
     let sqrt_price_x96 = parse_u256_word_to_f64(&words[2]).unwrap_or_default();
 
-    let token0_price_in_token1 = derive_price_from_sqrt(sqrt_price_x96, token0_decimals, token1_decimals)
-        .or_else(|| {
-            let abs0 = amount0.abs() / 10f64.powi(token0_decimals);
-            let abs1 = amount1.abs() / 10f64.powi(token1_decimals);
-            if abs0 > 0.0 && abs1 > 0.0 {
-                Some(abs1 / abs0)
-            } else {
-                None
-            }
-        })
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .ok_or_else(|| "unable_to_derive_uniswap_v3_price".to_string())?;
+    let token0_price_in_token1 =
+        derive_price_from_sqrt(sqrt_price_x96, token0_decimals, token1_decimals)
+            .or_else(|| {
+                let abs0 = amount0.abs() / 10f64.powi(token0_decimals);
+                let abs1 = amount1.abs() / 10f64.powi(token1_decimals);
+                if abs0 > 0.0 && abs1 > 0.0 {
+                    Some(abs1 / abs0)
+                } else {
+                    None
+                }
+            })
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .ok_or_else(|| "unable_to_derive_uniswap_v3_price".to_string())?;
 
     let (raw_price, quote_asset) = if base_symbol == token0_symbol {
         (token0_price_in_token1, token1_symbol.clone())
@@ -96,16 +100,13 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
 
     parsed.event_type = input.event_type.to_string();
     parsed.price = Some(raw_price);
-    parsed.market_key = input
-        .market_key_hint
-        .map(ToString::to_string)
-        .or_else(|| {
-            if matches!(quote_asset.as_str(), "USD" | "USDT" | "USDC") {
-                Some(format!("{base_symbol}/USD"))
-            } else {
-                Some(format!("{base_symbol}/{quote_asset}"))
-            }
-        });
+    parsed.market_key = input.market_key_hint.map(ToString::to_string).or_else(|| {
+        if matches!(quote_asset.as_str(), "USD" | "USDT" | "USDC") {
+            Some(format!("{base_symbol}/USD"))
+        } else {
+            Some(format!("{base_symbol}/{quote_asset}"))
+        }
+    });
     parsed.asset_pair = parsed.asset_pair.or_else(|| {
         input
             .asset_pair_hint

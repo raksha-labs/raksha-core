@@ -1,6 +1,6 @@
-use common::DataSourceConfig;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use common::DataSourceConfig;
 use event_schema::{AlertEvent, DetectionResult, UnifiedEvent};
 use serde_json::Value;
 use std::sync::Arc;
@@ -597,7 +597,10 @@ impl PostgresRepository {
     }
 
     pub async fn insert_source_feed_event(&self, event: &UnifiedEvent) -> Result<()> {
-        if !self.is_source_stream_ingest_enabled(&event.source_id).await? {
+        if !self
+            .is_source_stream_ingest_enabled(&event.source_id)
+            .await?
+        {
             return Ok(());
         }
         if let Some(market_key) = event.market_key.as_deref() {
@@ -704,7 +707,11 @@ impl PostgresRepository {
         Ok(())
     }
 
-    async fn is_required_source_market_pair(&self, source_id: &str, market_key: &str) -> Result<bool> {
+    async fn is_required_source_market_pair(
+        &self,
+        source_id: &str,
+        market_key: &str,
+    ) -> Result<bool> {
         let row = match self
             .client
             .query_opt(
@@ -890,7 +897,10 @@ impl PostgresRepository {
         Ok(())
     }
 
-    pub async fn find_active_incident(&self, key: IncidentKey<'_>) -> Result<Option<IncidentRecord>> {
+    pub async fn find_active_incident(
+        &self,
+        key: IncidentKey<'_>,
+    ) -> Result<Option<IncidentRecord>> {
         let row = self
             .client
             .query_opt(
@@ -1039,7 +1049,14 @@ impl PostgresRepository {
                     (incident_id, classification, score, confidence, payload, observed_at)
                 VALUES ($1, $2, $3, $4, $5, $6)
                 "#,
-                &[&incident_id, &classification, &score, &confidence, &payload, &observed_at],
+                &[
+                    &incident_id,
+                    &classification,
+                    &score,
+                    &confidence,
+                    &payload,
+                    &observed_at,
+                ],
             )
             .await?;
         Ok(())
@@ -1293,7 +1310,9 @@ impl PostgresRepository {
                 .await
             {
                 if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
-                    warn!("incident_entity_exposures table not found; skipping blast radius persist");
+                    warn!(
+                        "incident_entity_exposures table not found; skipping blast radius persist"
+                    );
                     return Ok(());
                 }
                 warn!(

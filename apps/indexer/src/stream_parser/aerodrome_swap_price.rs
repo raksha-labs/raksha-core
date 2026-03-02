@@ -40,10 +40,8 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         .unwrap_or_else(|| "cl".to_string());
 
     let mut parsed = match pool_type.as_str() {
-        "basic" | "stable" | "volatile" => {
-            super::uniswap_v2_swap_price::parse(input, payload)
-                .map_err(|e| format!("aerodrome_basic_pool:{e}"))?
-        }
+        "basic" | "stable" | "volatile" => super::uniswap_v2_swap_price::parse(input, payload)
+            .map_err(|e| format!("aerodrome_basic_pool:{e}"))?,
         _ => {
             // Default to CL (Uniswap v3-style concentraced liquidity).
             super::uniswap_v3_swap_price::parse(input, payload)
@@ -58,14 +56,8 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
             "decoded_by".to_string(),
             serde_json::json!("aerodrome_swap_price_v1"),
         );
-        obj.insert(
-            "pool_type".to_string(),
-            serde_json::json!(pool_type),
-        );
-        obj.insert(
-            "chain".to_string(),
-            serde_json::json!("base"),
-        );
+        obj.insert("pool_type".to_string(), serde_json::json!(pool_type));
+        obj.insert("chain".to_string(), serde_json::json!("base"));
     }
 
     Ok(parsed)
@@ -165,8 +157,11 @@ mod tests {
         };
         // A missing "data" field causes the v2 parser to fail, confirming we
         // reached the v2 branch (the error prefix is "aerodrome_basic_pool:").
-        let err = parse(&input, &json!({"address": "0x0", "topics": [], "blockNumber": "0x1"}))
-            .unwrap_err();
+        let err = parse(
+            &input,
+            &json!({"address": "0x0", "topics": [], "blockNumber": "0x1"}),
+        )
+        .unwrap_err();
         assert!(err.starts_with("aerodrome_basic_pool:"), "got: {err}");
     }
 }

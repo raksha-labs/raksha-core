@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use event_schema::AlertEvent;
 use common::AlertSink;
+use event_schema::AlertEvent;
 use reqwest::Client;
 use serde_json::json;
 use tracing::{info, warn};
@@ -73,7 +73,10 @@ impl NotifierGatewayHttp {
             .send()
             .await
             .with_context(|| {
-                format!("failed to call notifier-gateway dispatch at {}", self.endpoint)
+                format!(
+                    "failed to call notifier-gateway dispatch at {}",
+                    self.endpoint
+                )
             })?;
 
         response.error_for_status().with_context(|| {

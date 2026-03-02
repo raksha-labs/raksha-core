@@ -80,18 +80,11 @@ impl CexWebsocketConnector {
             match source_name.as_str() {
                 "binance" => (parse_binance_quote, subscribe_binance),
                 "coinbase" => (parse_coinbase_quote, subscribe_coinbase),
-                "uniswap-v3" | "uniswap" => {
-                    (parse_uniswap_quote, subscribe_generic_symbols)
-                }
+                "uniswap-v3" | "uniswap" => (parse_uniswap_quote, subscribe_generic_symbols),
                 "curve" => (parse_curve_quote, subscribe_generic_symbols),
                 "chainlink" => (parse_chainlink_quote, subscribe_generic_symbols),
                 "pyth" => (parse_pyth_quote, subscribe_generic_symbols),
-                other => {
-                    return Err(anyhow!(
-                        "unsupported CEX source '{}': no connector",
-                        other
-                    ))
-                }
+                other => return Err(anyhow!("unsupported CEX source '{}': no connector", other)),
             };
 
         let market_symbols: Vec<String> = cfg
@@ -99,7 +92,12 @@ impl CexWebsocketConnector {
             .as_ref()
             .and_then(|f| f.get("market_symbols"))
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
 
         Ok(Self {
@@ -148,10 +146,7 @@ impl DataSourceConnector for CexWebsocketConnector {
                     ws.send(Message::Text(payload.to_string()))
                         .await
                         .with_context(|| {
-                            format!(
-                                "failed to send subscription for source {}",
-                                self.source_id
-                            )
+                            format!("failed to send subscription for source {}", self.source_id)
                         })?;
                 }
             }
@@ -170,12 +165,8 @@ impl DataSourceConnector for CexWebsocketConnector {
         };
 
         while let Some(msg) = ws.next().await {
-            let msg = msg.with_context(|| {
-                format!(
-                    "websocket read failed for source {}",
-                    self.source_id
-                )
-            })?;
+            let msg = msg
+                .with_context(|| format!("websocket read failed for source {}", self.source_id))?;
 
             match msg {
                 Message::Text(text) => {
@@ -221,10 +212,7 @@ impl DataSourceConnector for CexWebsocketConnector {
                         frame
                     ));
                 }
-                Message::Binary(_)
-                | Message::Ping(_)
-                | Message::Pong(_)
-                | Message::Frame(_) => {}
+                Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
             }
         }
 
@@ -327,7 +315,7 @@ impl DataSourceConnector for EvmChainConnector {
 // Quote parsers (migrated from crates/market-connectors)
 // ---------------------------------------------------------------------------
 
-use chrono::{TimeZone, DateTime};
+use chrono::{DateTime, TimeZone};
 
 fn parse_number(value: &Value) -> Result<f64> {
     if let Some(num) = value.as_f64() {
@@ -342,8 +330,7 @@ fn parse_number(value: &Value) -> Result<f64> {
 }
 
 fn parse_millis_timestamp(value: Option<&Value>) -> Option<DateTime<Utc>> {
-    let millis =
-        value.and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse::<i64>().ok()))?;
+    let millis = value.and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse::<i64>().ok()))?;
     Utc.timestamp_millis_opt(millis).single()
 }
 
@@ -381,9 +368,7 @@ fn subscribe_generic_symbols(symbols: &[String]) -> Vec<Value> {
 fn subscribe_binance(symbols: &[String]) -> Vec<Value> {
     let params: Vec<String> = symbols
         .iter()
-        .map(|s| {
-            s.replace(['/', '-'], "").to_ascii_lowercase() + "@ticker"
-        })
+        .map(|s| s.replace(['/', '-'], "").to_ascii_lowercase() + "@ticker")
         .collect();
     if params.is_empty() {
         return Vec::new();
@@ -415,9 +400,8 @@ fn parse_binance_quote(value: &Value) -> Result<ParsedQuote> {
             .or_else(|| root.get("price"))
             .ok_or_else(|| anyhow!("missing binance price"))?,
     )?;
-    let observed_at =
-        parse_millis_timestamp(root.get("E").or_else(|| root.get("eventTime")))
-            .unwrap_or_else(Utc::now);
+    let observed_at = parse_millis_timestamp(root.get("E").or_else(|| root.get("eventTime")))
+        .unwrap_or_else(Utc::now);
     Ok(ParsedQuote {
         market_key: source_symbol,
         price,
@@ -458,12 +442,13 @@ fn parse_uniswap_quote(value: &Value) -> Result<ParsedQuote> {
         .ok_or_else(|| anyhow!("missing uniswap pair/symbol"))?
         .to_string();
     let price = parse_number(
-        value.get("price").or_else(|| value.get("mid_price"))
+        value
+            .get("price")
+            .or_else(|| value.get("mid_price"))
             .ok_or_else(|| anyhow!("missing uniswap price"))?,
     )?;
-    let observed_at =
-        parse_any_timestamp(value.get("timestamp").or_else(|| value.get("time")))
-            .unwrap_or_else(Utc::now);
+    let observed_at = parse_any_timestamp(value.get("timestamp").or_else(|| value.get("time")))
+        .unwrap_or_else(Utc::now);
     Ok(ParsedQuote {
         market_key: source_symbol,
         price,
@@ -480,12 +465,13 @@ fn parse_curve_quote(value: &Value) -> Result<ParsedQuote> {
         .ok_or_else(|| anyhow!("missing curve pair/symbol"))?
         .to_string();
     let price = parse_number(
-        value.get("price").or_else(|| value.get("virtual_price"))
+        value
+            .get("price")
+            .or_else(|| value.get("virtual_price"))
             .ok_or_else(|| anyhow!("missing curve price"))?,
     )?;
-    let observed_at =
-        parse_any_timestamp(value.get("timestamp").or_else(|| value.get("time")))
-            .unwrap_or_else(Utc::now);
+    let observed_at = parse_any_timestamp(value.get("timestamp").or_else(|| value.get("time")))
+        .unwrap_or_else(Utc::now);
     Ok(ParsedQuote {
         market_key: source_symbol,
         price,
@@ -502,13 +488,14 @@ fn parse_chainlink_quote(value: &Value) -> Result<ParsedQuote> {
         .ok_or_else(|| anyhow!("missing chainlink feed/symbol"))?
         .to_string();
     let price = parse_number(
-        value.get("answer").or_else(|| value.get("price"))
+        value
+            .get("answer")
+            .or_else(|| value.get("price"))
             .ok_or_else(|| anyhow!("missing chainlink answer/price"))?,
     )?;
-    let observed_at = parse_any_timestamp(
-        value.get("updated_at").or_else(|| value.get("timestamp")),
-    )
-    .unwrap_or_else(Utc::now);
+    let observed_at =
+        parse_any_timestamp(value.get("updated_at").or_else(|| value.get("timestamp")))
+            .unwrap_or_else(Utc::now);
     Ok(ParsedQuote {
         market_key: source_symbol,
         price,
@@ -525,7 +512,8 @@ fn parse_pyth_quote(value: &Value) -> Result<ParsedQuote> {
         .ok_or_else(|| anyhow!("missing pyth symbol"))?
         .to_string();
     let price = parse_number(
-        feed.get("price").ok_or_else(|| anyhow!("missing pyth price"))?,
+        feed.get("price")
+            .ok_or_else(|| anyhow!("missing pyth price"))?,
     )?;
     let observed_at =
         parse_any_timestamp(feed.get("publish_time").or_else(|| feed.get("timestamp")))

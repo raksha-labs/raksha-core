@@ -101,7 +101,9 @@ impl WebsocketStreamConnector {
                 }
                 Message::Ping(payload) => {
                     let Some(ws) = self.stream.as_mut() else {
-                        return Err(anyhow!("websocket connector disconnected while sending pong"));
+                        return Err(anyhow!(
+                            "websocket connector disconnected while sending pong"
+                        ));
                     };
                     ws.send(Message::Pong(payload))
                         .await
@@ -187,7 +189,9 @@ fn build_subscribe_messages(
     subscription_key: Option<&str>,
     filter_config: &Value,
 ) -> Vec<Value> {
-    let subscription_key = subscription_key.map(str::trim).filter(|value| !value.is_empty());
+    let subscription_key = subscription_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     if let Some(custom_message) = filter_config.get("subscribe_message") {
         return match custom_message {
             Value::Array(items) => items
@@ -259,7 +263,10 @@ fn build_subscribe_messages(
 
 fn parse_duration_from_seconds(value: Option<&Value>) -> Option<Duration> {
     let secs = value
-        .and_then(|raw| raw.as_f64().or_else(|| raw.as_str().and_then(|text| text.parse::<f64>().ok())))
+        .and_then(|raw| {
+            raw.as_f64()
+                .or_else(|| raw.as_str().and_then(|text| text.parse::<f64>().ok()))
+        })
         .filter(|raw| raw.is_finite() && *raw > 0.0)?;
     Some(Duration::from_secs_f64(secs))
 }

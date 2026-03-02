@@ -2,8 +2,8 @@ use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 
 use super::{
-    decode_hex_words, evm_log, observed_at, parse_i256_word_to_f64, parse_i64, parse_u256_word_to_f64,
-    scale_price, ParsedFeedEvent, ParserInput,
+    decode_hex_words, evm_log, observed_at, parse_i256_word_to_f64, parse_i64,
+    parse_u256_word_to_f64, scale_price, ParsedFeedEvent, ParserInput,
 };
 
 fn as_i32(value: Option<&Value>) -> Option<i32> {
@@ -30,12 +30,20 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         .get(1)
         .and_then(Value::as_str)
         .and_then(parse_i256_word_to_f64)
-        .or_else(|| data_words.first().and_then(|word| parse_i256_word_to_f64(word)));
+        .or_else(|| {
+            data_words
+                .first()
+                .and_then(|word| parse_i256_word_to_f64(word))
+        });
     let round_id = topics
         .get(2)
         .and_then(Value::as_str)
         .and_then(parse_u256_word_to_f64)
-        .or_else(|| data_words.get(1).and_then(|word| parse_u256_word_to_f64(word)));
+        .or_else(|| {
+            data_words
+                .get(1)
+                .and_then(|word| parse_u256_word_to_f64(word))
+        });
 
     let updated_at_seconds = parse_i64(payload.get("updatedAt")).or_else(|| {
         data_words
@@ -51,27 +59,21 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
     let price = raw_answer.and_then(|raw| scale_price(raw, decimals));
 
     parsed.event_type = input.event_type.to_string();
-    parsed.market_key = input
-        .market_key_hint
-        .map(ToString::to_string)
-        .or_else(|| {
+    parsed.market_key = input.market_key_hint.map(ToString::to_string).or_else(|| {
+        input
+            .filter_config
+            .get("market_key")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+    });
+    parsed.asset_pair = parsed.asset_pair.or_else(|| {
+        input.asset_pair_hint.map(ToString::to_string).or_else(|| {
             input
                 .filter_config
-                .get("market_key")
+                .get("asset_pair")
                 .and_then(Value::as_str)
                 .map(ToString::to_string)
-        });
-    parsed.asset_pair = parsed.asset_pair.or_else(|| {
-        input
-            .asset_pair_hint
-            .map(ToString::to_string)
-            .or_else(|| {
-                input
-                    .filter_config
-                    .get("asset_pair")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-            })
+        })
     });
     parsed.price = price;
     parsed.payload_event_ts = parsed.payload_event_ts.or(updated_at);

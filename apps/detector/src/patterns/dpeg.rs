@@ -11,12 +11,12 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use event_schema::{
-    AttackFamily, Chain, ContextClassification, DetectionResult, DetectionSignal, IncidentTransition,
-    LifecycleState, RiskScore, Severity, SignalType, UnifiedEvent,
+    AttackFamily, Chain, ContextClassification, DetectionResult, DetectionSignal,
+    IncidentTransition, LifecycleState, RiskScore, Severity, SignalType, UnifiedEvent,
 };
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use state_manager::{PostgresRepository};
+use state_manager::PostgresRepository;
 use uuid::Uuid;
 
 use super::DetectionPattern;
@@ -172,10 +172,10 @@ where
     let value = Value::deserialize(deserializer)?;
     match value {
         Value::Null => Ok(HashMap::new()),
-        Value::Object(map) => serde_json::from_value::<HashMap<String, DpegSourceOverride>>(
-            Value::Object(map),
-        )
-        .map_err(de::Error::custom),
+        Value::Object(map) => {
+            serde_json::from_value::<HashMap<String, DpegSourceOverride>>(Value::Object(map))
+                .map_err(de::Error::custom)
+        }
         Value::Array(items) => {
             let parsed = serde_json::from_value::<Vec<DpegSourceOverride>>(Value::Array(items))
                 .map_err(de::Error::custom)?;
@@ -227,7 +227,10 @@ impl DpegPolicy {
     }
 
     fn source_enabled(&self, source_id: &str, source_kind: &str) -> bool {
-        if !self.source_filter.source_kind_allowed(source_id, source_kind) {
+        if !self
+            .source_filter
+            .source_kind_allowed(source_id, source_kind)
+        {
             return false;
         }
         self.source_overrides
@@ -253,12 +256,12 @@ impl DpegPolicy {
     }
 
     fn enabled_source_count(&self) -> usize {
-        let configured_enabled = self
-            .source_overrides
-            .values()
-            .filter(|v| v.enabled)
-            .count();
-        if configured_enabled == 0 { self.min_sources } else { configured_enabled }
+        let configured_enabled = self.source_overrides.values().filter(|v| v.enabled).count();
+        if configured_enabled == 0 {
+            self.min_sources
+        } else {
+            configured_enabled
+        }
     }
 
     fn isolated_bands(&self) -> DpegSeverityBands {
@@ -347,7 +350,9 @@ impl DpegPattern {
                 continue;
             };
             let quote_values = quotes.values().cloned().collect::<Vec<_>>();
-            if let Some(divergence_pct) = market_divergence_pct(candidate_policy, &quote_values, now) {
+            if let Some(divergence_pct) =
+                market_divergence_pct(candidate_policy, &quote_values, now)
+            {
                 if divergence_pct >= policy.systemic_floor_pct {
                     systemic_markets += 1;
                 }
@@ -366,10 +371,7 @@ impl DetectionPattern for DpegPattern {
         PATTERN_ID
     }
 
-    async fn reload_config(
-        &mut self,
-        config_map: &HashMap<(String, String), Value>,
-    ) -> Result<()> {
+    async fn reload_config(&mut self, config_map: &HashMap<(String, String), Value>) -> Result<()> {
         let mut new_policies = HashMap::new();
         for ((tenant_id, pattern_id), config) in config_map {
             if pattern_id != PATTERN_ID {
@@ -450,7 +452,11 @@ impl DetectionPattern for DpegPattern {
             self.state_cache.insert(policy_key.clone(), loaded);
         }
 
-        let current_state = self.state_cache.get(&policy_key).cloned().unwrap_or_default();
+        let current_state = self
+            .state_cache
+            .get(&policy_key)
+            .cloned()
+            .unwrap_or_default();
         let quotes: Vec<QuoteInput> = market_quotes.values().cloned().collect();
         let classification = self.classify_context(&policy, now);
         let outcome = evaluate_policy(&policy, &quotes, &current_state, now, classification)?;
@@ -627,9 +633,8 @@ fn evaluate_policy(
         policy.peg_target,
     );
     let threshold_breach = divergence_pct >= trigger_floor_pct && severity.is_some();
-    let breach_active = quorum_met
-        && threshold_breach
-        && (!policy.toggles.oracle_confirmation || oracle_confirmed);
+    let breach_active =
+        quorum_met && threshold_breach && (!policy.toggles.oracle_confirmation || oracle_confirmed);
 
     let mut next_state = current_state.clone();
     let mut should_emit_alert = false;
@@ -642,9 +647,7 @@ fn evaluate_policy(
             next_state.breach_started_at = Some(now);
         }
         let breach_started = next_state.breach_started_at.unwrap();
-        let sustained = now
-            .signed_duration_since(breach_started)
-            .num_milliseconds()
+        let sustained = now.signed_duration_since(breach_started).num_milliseconds()
             >= policy.sustained_window_ms;
 
         let cooldown_active = next_state
@@ -758,7 +761,11 @@ fn evaluate_policy(
     })
 }
 
-fn market_divergence_pct(policy: &DpegPolicy, quotes: &[QuoteInput], now: DateTime<Utc>) -> Option<f64> {
+fn market_divergence_pct(
+    policy: &DpegPolicy,
+    quotes: &[QuoteInput],
+    now: DateTime<Utc>,
+) -> Option<f64> {
     let mut weighted_points = Vec::<(f64, f64)>::new();
     for quote in quotes {
         if !policy.source_enabled(&quote.source_id, &quote.source_kind) {
@@ -826,14 +833,26 @@ fn compute_confidence_breakdown(
         .count();
     let source_agreement = (agreement_count as f64 / eligible_quotes.len() as f64) * 100.0;
     let oracle_score = if policy.toggles.oracle_confirmation {
-        if oracle_confirmed { 100.0 } else { 0.0 }
+        if oracle_confirmed {
+            100.0
+        } else {
+            0.0
+        }
     } else {
         50.0
     };
     let volume_score = 50.0;
     let source_weight: f64 = 0.7;
-    let oracle_weight: f64 = if policy.toggles.oracle_confirmation { 0.2 } else { 0.0 };
-    let volume_weight: f64 = if policy.toggles.volume_confirmation { 0.1 } else { 0.0 };
+    let oracle_weight: f64 = if policy.toggles.oracle_confirmation {
+        0.2
+    } else {
+        0.0
+    };
+    let volume_weight: f64 = if policy.toggles.volume_confirmation {
+        0.1
+    } else {
+        0.0
+    };
     let total_weight = (source_weight + oracle_weight + volume_weight).max(f64::EPSILON);
     let total = ((source_agreement * source_weight)
         + (oracle_score * oracle_weight)
@@ -1075,7 +1094,12 @@ mod tests {
         }
     }
 
-    fn quote(source_id: &str, source_kind: &str, price: f64, observed_at: DateTime<Utc>) -> QuoteInput {
+    fn quote(
+        source_id: &str,
+        source_kind: &str,
+        price: f64,
+        observed_at: DateTime<Utc>,
+    ) -> QuoteInput {
         QuoteInput {
             source_id: source_id.to_string(),
             source_kind: source_kind.to_string(),
@@ -1111,9 +1135,10 @@ mod tests {
         let mut pattern = DpegPattern::default();
         let mut policy = base_policy();
         policy.toggles.contagion_detection = false;
-        pattern
-            .policies
-            .insert((policy.tenant_id.clone(), policy.market_key.clone()), policy.clone());
+        pattern.policies.insert(
+            (policy.tenant_id.clone(), policy.market_key.clone()),
+            policy.clone(),
+        );
 
         let classification = pattern.classify_context(&policy, now);
         assert!(matches!(classification, ContextClassification::Isolated));
@@ -1190,7 +1215,10 @@ mod tests {
                 assert!(!outcome.should_emit_alert);
             } else {
                 assert!(outcome.should_emit_alert);
-                assert!(matches!(outcome.transition, Some(IncidentTransition::Resolve)));
+                assert!(matches!(
+                    outcome.transition,
+                    Some(IncidentTransition::Resolve)
+                ));
             }
             state = outcome.next_state;
         }

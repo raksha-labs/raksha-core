@@ -30,8 +30,7 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let health_status = start_health_check_server("detector");
@@ -39,8 +38,8 @@ async fn main() -> Result<()> {
     let redis_url = std::env::var("REDIS_URL").context("REDIS_URL not set")?;
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL not set")?;
 
-    let stream = RedisStreamPublisher::from_url(&redis_url)
-        .context("failed to connect to Redis")?;
+    let stream =
+        RedisStreamPublisher::from_url(&redis_url).context("failed to connect to Redis")?;
 
     let repo = PostgresRepository::from_database_url(&database_url)
         .await

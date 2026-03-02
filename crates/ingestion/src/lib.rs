@@ -8,11 +8,11 @@ pub mod normalize;
 pub mod protocol_map;
 
 pub use adapter::{EvmChainAdapter, RpcProviderStatus};
-pub use connector::{CexWebsocketConnector, DataSourceConnector, EvmChainConnector};
 pub use config::{
     default_protocol_category_for_chain, parse_protocol_category, EvmChainConfig,
     EvmProtocolConfig, EvmProtocolConfigFile, FlashLoanSourceConfig,
 };
+pub use connector::{CexWebsocketConnector, DataSourceConnector, EvmChainConnector};
 pub use mock::{EvmMockAdapter, MockProtocol};
 pub use protocol_map::{
     build_oracle_protocol_map, parse_oracle_addresses, parse_oracle_addresses_csv,

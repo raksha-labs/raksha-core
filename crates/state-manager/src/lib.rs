@@ -1,23 +1,23 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use common::EventBus;
 use event_schema::{
     AlertEvent, DetectionResult, FinalityUpdate, NormalizedEvent, ReorgNotice, UnifiedEvent,
 };
-use common::EventBus;
 use redis::{streams::StreamReadReply, FromRedisValue};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracing::info;
 
 mod correlation;
+mod dead_letter_queue;
 mod finality;
 mod persistence;
-mod dead_letter_queue;
 
 pub use correlation::*;
+pub use dead_letter_queue::*;
 pub use finality::*;
 pub use persistence::*;
-pub use dead_letter_queue::*;
 
 pub const STREAM_NORMALIZED_EVENTS: &str = "raksha:normalized-events";
 pub const STREAM_REORG_NOTICES: &str = "raksha:reorg-notices";
@@ -88,7 +88,8 @@ impl RedisStreamPublisher {
     }
 
     pub async fn publish_unified_event(&self, event: &UnifiedEvent) -> Result<()> {
-        self.publish_struct(&self.unified_events_stream, event).await
+        self.publish_struct(&self.unified_events_stream, event)
+            .await
     }
 
     pub async fn healthcheck(&self) -> Result<()> {
@@ -249,8 +250,14 @@ impl RedisStreamPublisher {
         count: usize,
         block_ms: usize,
     ) -> Result<Vec<(String, UnifiedEvent)>> {
-        self.read_group_payloads(&self.unified_events_stream, group, consumer, count, block_ms)
-            .await
+        self.read_group_payloads(
+            &self.unified_events_stream,
+            group,
+            consumer,
+            count,
+            block_ms,
+        )
+        .await
     }
 
     pub async fn ack_normalized_event(&self, group: &str, entry_id: &str) -> Result<()> {

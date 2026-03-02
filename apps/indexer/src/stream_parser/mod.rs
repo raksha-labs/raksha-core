@@ -2,14 +2,14 @@ use chrono::{DateTime, TimeZone, Utc};
 use ethers::types::U256;
 use serde_json::{json, Value};
 
+mod aerodrome_swap_price;
 mod binance_miniticker;
 mod bybit_tickers_v5;
 mod chainlink_answer_updated;
 mod coinbase_ticker;
 mod evm_log;
-mod gemini_marketdata_v1;
 mod gate_ticker_v4;
-mod aerodrome_swap_price;
+mod gemini_marketdata_v1;
 mod kraken_ticker_v2;
 mod okx_tickers_v5;
 mod pyth_hermes_v2;
@@ -90,7 +90,11 @@ pub(super) fn parse_f64(value: Option<&Value>) -> Option<f64> {
     None
 }
 
-pub(super) fn parse_ts_from_path(payload: &Value, path: Option<&str>, unit: &str) -> Option<DateTime<Utc>> {
+pub(super) fn parse_ts_from_path(
+    payload: &Value,
+    path: Option<&str>,
+    unit: &str,
+) -> Option<DateTime<Utc>> {
     let path = path?;
     let path = path.strip_prefix("$.").unwrap_or(path);
     let value = payload.get(path)?;
@@ -117,19 +121,28 @@ pub(super) fn source_event_id(payload: &Value) -> Option<String> {
         .get("id")
         .and_then(Value::as_str)
         .map(ToString::to_string)
-        .or_else(|| payload.get("event_id").and_then(Value::as_str).map(ToString::to_string))
-        .or_else(|| payload.get("sequence_num").and_then(|value| {
-            value
-                .as_str()
+        .or_else(|| {
+            payload
+                .get("event_id")
+                .and_then(Value::as_str)
                 .map(ToString::to_string)
-                .or_else(|| value.as_u64().map(|number| number.to_string()))
-        }))
-        .or_else(|| payload.get("socket_sequence").and_then(|value| {
-            value
-                .as_str()
-                .map(ToString::to_string)
-                .or_else(|| value.as_u64().map(|number| number.to_string()))
-        }))
+        })
+        .or_else(|| {
+            payload.get("sequence_num").and_then(|value| {
+                value
+                    .as_str()
+                    .map(ToString::to_string)
+                    .or_else(|| value.as_u64().map(|number| number.to_string()))
+            })
+        })
+        .or_else(|| {
+            payload.get("socket_sequence").and_then(|value| {
+                value
+                    .as_str()
+                    .map(ToString::to_string)
+                    .or_else(|| value.as_u64().map(|number| number.to_string()))
+            })
+        })
 }
 
 pub(super) fn symbol_to_market_key(symbol: &str) -> Option<String> {
@@ -141,10 +154,7 @@ pub(super) fn symbol_to_market_key(symbol: &str) -> Option<String> {
 }
 
 pub(super) fn split_symbol_pair(symbol: &str) -> Option<(String, String)> {
-    let cleaned = symbol
-        .trim()
-        .to_ascii_uppercase()
-        .replace([':', ' '], "");
+    let cleaned = symbol.trim().to_ascii_uppercase().replace([':', ' '], "");
     if cleaned.is_empty() {
         return None;
     }
@@ -215,11 +225,7 @@ pub(super) fn parse_i256_word_to_f64(word: &str) -> Option<f64> {
     }
 
     let magnitude = (!value).overflowing_add(U256::from(1u8)).0;
-    magnitude
-        .to_string()
-        .parse::<f64>()
-        .ok()
-        .map(|v| -v)
+    magnitude.to_string().parse::<f64>().ok().map(|v| -v)
 }
 
 pub(super) fn scale_price(raw_value: f64, decimals: i32) -> Option<f64> {

@@ -6,8 +6,8 @@ use anyhow::Result;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tracing::info;
 
 /// Health check status information
@@ -33,7 +33,7 @@ impl Default for HealthStatus {
 }
 
 /// Simple HTTP health check server
-/// 
+///
 /// Runs in background and responds to:
 /// - GET /health - Liveness probe (always returns 200)
 /// - GET /ready - Readiness probe (returns 200 if ready, 503 if not)
@@ -63,9 +63,7 @@ impl HealthCheckServer {
 
     /// Start the health check server in the background
     pub fn start(self) -> tokio::task::JoinHandle<Result<()>> {
-        tokio::spawn(async move {
-            self.run().await
-        })
+        tokio::spawn(async move { self.run().await })
     }
 
     async fn run(self) -> Result<()> {
@@ -78,11 +76,11 @@ impl HealthCheckServer {
 
             tokio::spawn(async move {
                 let mut buffer = [0u8; 1024];
-                
+
                 match socket.read(&mut buffer).await {
                     Ok(n) if n > 0 => {
                         let request = String::from_utf8_lossy(&buffer[..n]);
-                        
+
                         let response = if request.starts_with("GET /health") {
                             Self::health_response()
                         } else if request.starts_with("GET /ready") {
@@ -106,7 +104,7 @@ impl HealthCheckServer {
             "status": "ok",
             "message": "service is alive"
         });
-        
+
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             body.to_string().len(),
@@ -116,7 +114,7 @@ impl HealthCheckServer {
 
     async fn ready_response(status: &Arc<tokio::sync::RwLock<HealthStatus>>) -> String {
         let status = status.read().await;
-        
+
         if status.is_ready {
             let body = json!({
                 "status": "ready",
@@ -125,7 +123,7 @@ impl HealthCheckServer {
                 "postgres": status.postgres_connected,
                 "details": status.details
             });
-            
+
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 body.to_string().len(),
@@ -139,7 +137,7 @@ impl HealthCheckServer {
                 "postgres": status.postgres_connected,
                 "details": status.details
             });
-            
+
             format!(
                 "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 body.to_string().len(),
@@ -150,14 +148,14 @@ impl HealthCheckServer {
 
     async fn metrics_response(status: &Arc<tokio::sync::RwLock<HealthStatus>>) -> String {
         let status = status.read().await;
-        
+
         let body = json!({
             "service": status.service_name,
             "redis_connected": if status.redis_connected { 1 } else { 0 },
             "postgres_connected": if status.postgres_connected { 1 } else { 0 },
             "is_ready": if status.is_ready { 1 } else { 0 }
         });
-        
+
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             body.to_string().len(),
@@ -170,7 +168,7 @@ impl HealthCheckServer {
             "error": "not found",
             "available_endpoints": ["/health", "/ready", "/metrics"]
         });
-        
+
         format!(
             "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             body.to_string().len(),
@@ -180,7 +178,9 @@ impl HealthCheckServer {
 }
 
 /// Helper to start health check server with defaults from environment
-pub fn start_health_check_server(service_name: impl Into<String>) -> Option<Arc<tokio::sync::RwLock<HealthStatus>>> {
+pub fn start_health_check_server(
+    service_name: impl Into<String>,
+) -> Option<Arc<tokio::sync::RwLock<HealthStatus>>> {
     let port = std::env::var("HEALTH_CHECK_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
@@ -198,9 +198,9 @@ pub fn start_health_check_server(service_name: impl Into<String>) -> Option<Arc<
 
     let server = HealthCheckServer::new(port, service_name);
     let status = server.status_handle();
-    
+
     server.start();
-    
+
     Some(status)
 }
 
@@ -212,14 +212,14 @@ mod tests {
     async fn test_health_check_server() {
         let server = HealthCheckServer::new(0, "test-service");
         let status_handle = server.status_handle();
-        
+
         // Update status
         {
             let mut status = status_handle.write().await;
             status.is_ready = true;
             status.redis_connected = true;
         }
-        
+
         // Verify status
         let status = status_handle.read().await;
         assert!(status.is_ready);

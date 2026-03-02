@@ -13,7 +13,10 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         "swap_amounts".to_string(),
         parse_swap_amounts(payload.get("data").and_then(Value::as_str)),
     );
-    normalized.insert("decoded_by".to_string(), Value::String("uniswap_v2_swap_v1".to_string()));
+    normalized.insert(
+        "decoded_by".to_string(),
+        Value::String("uniswap_v2_swap_v1".to_string()),
+    );
     parsed.normalized_fields = Value::Object(normalized);
     Ok(parsed)
 }

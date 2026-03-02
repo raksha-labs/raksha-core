@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use common::ChainAdapter;
 use ethers::{
     providers::{Middleware, Provider, Ws},
-    types::{Address, Filter, H256, Log, U64},
+    types::{Address, Filter, Log, H256, U64},
 };
 use event_schema::{NormalizedEvent, ProtocolCategory};
 use tracing::{info, warn};
@@ -209,9 +209,13 @@ impl EvmChainAdapter {
                 continue;
             }
 
-            let addresses = parse_oracle_addresses(&source.contract_addresses).with_context(|| {
-                format!("invalid contract addresses for flash loan source '{}'", source.id)
-            })?;
+            let addresses =
+                parse_oracle_addresses(&source.contract_addresses).with_context(|| {
+                    format!(
+                        "invalid contract addresses for flash loan source '{}'",
+                        source.id
+                    )
+                })?;
             if addresses.is_empty() {
                 warn!(chain = %self.chain_slug, source_id, "skipping flash source with no contract addresses");
                 continue;

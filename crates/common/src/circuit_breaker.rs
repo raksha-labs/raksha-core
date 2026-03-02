@@ -287,9 +287,7 @@ mod tests {
 
         // Simulate failures
         for _ in 0..3 {
-            let _ = breaker
-                .call(|| async { Err::<(), _>("error") })
-                .await;
+            let _ = breaker.call(|| async { Err::<(), _>("error") }).await;
         }
 
         // Circuit should be open
@@ -308,9 +306,7 @@ mod tests {
 
         // Open the circuit
         for _ in 0..2 {
-            let _ = breaker
-                .call(|| async { Err::<(), _>("error") })
-                .await;
+            let _ = breaker.call(|| async { Err::<(), _>("error") }).await;
         }
 
         assert_eq!(breaker.get_state(), CircuitBreakerState::Open);
@@ -320,9 +316,7 @@ mod tests {
 
         // Successful calls should close the circuit
         for _ in 0..2 {
-            let _ = breaker
-                .call(|| async { Ok::<_, String>("success") })
-                .await;
+            let _ = breaker.call(|| async { Ok::<_, String>("success") }).await;
         }
 
         assert_eq!(breaker.get_state(), CircuitBreakerState::Closed);

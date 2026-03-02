@@ -1,8 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{
-    decode_hex_words, evm_log, parse_u256_word_to_f64, ParsedFeedEvent, ParserInput,
-};
+use super::{decode_hex_words, evm_log, parse_u256_word_to_f64, ParsedFeedEvent, ParserInput};
 
 fn read_string(config: &Value, key: &str, default_value: &str) -> String {
     config
@@ -45,21 +43,32 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         return Err("invalid_uniswap_v2_swap_data".to_string());
     }
 
-    let amount0_in_raw = parse_u256_word_to_f64(&words[0]).ok_or_else(|| "invalid_amount0_in".to_string())?;
-    let amount1_in_raw = parse_u256_word_to_f64(&words[1]).ok_or_else(|| "invalid_amount1_in".to_string())?;
-    let amount0_out_raw = parse_u256_word_to_f64(&words[2]).ok_or_else(|| "invalid_amount0_out".to_string())?;
-    let amount1_out_raw = parse_u256_word_to_f64(&words[3]).ok_or_else(|| "invalid_amount1_out".to_string())?;
+    let amount0_in_raw =
+        parse_u256_word_to_f64(&words[0]).ok_or_else(|| "invalid_amount0_in".to_string())?;
+    let amount1_in_raw =
+        parse_u256_word_to_f64(&words[1]).ok_or_else(|| "invalid_amount1_in".to_string())?;
+    let amount0_out_raw =
+        parse_u256_word_to_f64(&words[2]).ok_or_else(|| "invalid_amount0_out".to_string())?;
+    let amount1_out_raw =
+        parse_u256_word_to_f64(&words[3]).ok_or_else(|| "invalid_amount1_out".to_string())?;
 
-    let token0_symbol = read_string(input.filter_config, "token0_symbol", "TOKEN0").to_ascii_uppercase();
-    let token1_symbol = read_string(input.filter_config, "token1_symbol", "TOKEN1").to_ascii_uppercase();
-    let base_symbol = read_string(input.filter_config, "base_symbol", &token0_symbol).to_ascii_uppercase();
+    let token0_symbol =
+        read_string(input.filter_config, "token0_symbol", "TOKEN0").to_ascii_uppercase();
+    let token1_symbol =
+        read_string(input.filter_config, "token1_symbol", "TOKEN1").to_ascii_uppercase();
+    let base_symbol =
+        read_string(input.filter_config, "base_symbol", &token0_symbol).to_ascii_uppercase();
     let token0_decimals = read_i32(input.filter_config, "token0_decimals", 18);
     let token1_decimals = read_i32(input.filter_config, "token1_decimals", 18);
 
-    let amount0_in = scale_amount(amount0_in_raw, token0_decimals).ok_or_else(|| "invalid_scaled_amount0_in".to_string())?;
-    let amount1_in = scale_amount(amount1_in_raw, token1_decimals).ok_or_else(|| "invalid_scaled_amount1_in".to_string())?;
-    let amount0_out = scale_amount(amount0_out_raw, token0_decimals).ok_or_else(|| "invalid_scaled_amount0_out".to_string())?;
-    let amount1_out = scale_amount(amount1_out_raw, token1_decimals).ok_or_else(|| "invalid_scaled_amount1_out".to_string())?;
+    let amount0_in = scale_amount(amount0_in_raw, token0_decimals)
+        .ok_or_else(|| "invalid_scaled_amount0_in".to_string())?;
+    let amount1_in = scale_amount(amount1_in_raw, token1_decimals)
+        .ok_or_else(|| "invalid_scaled_amount1_in".to_string())?;
+    let amount0_out = scale_amount(amount0_out_raw, token0_decimals)
+        .ok_or_else(|| "invalid_scaled_amount0_out".to_string())?;
+    let amount1_out = scale_amount(amount1_out_raw, token1_decimals)
+        .ok_or_else(|| "invalid_scaled_amount1_out".to_string())?;
 
     let token0_price_in_token1 = if amount0_in > 0.0 && amount1_out > 0.0 {
         Some(amount1_out / amount0_in)
@@ -87,16 +96,13 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
 
     parsed.event_type = input.event_type.to_string();
     parsed.price = Some(raw_price);
-    parsed.market_key = input
-        .market_key_hint
-        .map(ToString::to_string)
-        .or_else(|| {
-            if matches!(quote_asset.as_str(), "USD" | "USDT" | "USDC") {
-                Some(format!("{base_symbol}/USD"))
-            } else {
-                Some(format!("{base_symbol}/{quote_asset}"))
-            }
-        });
+    parsed.market_key = input.market_key_hint.map(ToString::to_string).or_else(|| {
+        if matches!(quote_asset.as_str(), "USD" | "USDT" | "USDC") {
+            Some(format!("{base_symbol}/USD"))
+        } else {
+            Some(format!("{base_symbol}/{quote_asset}"))
+        }
+    });
     parsed.asset_pair = parsed.asset_pair.or_else(|| {
         input
             .asset_pair_hint

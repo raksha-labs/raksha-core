@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use event_schema::{EventStatus, EventType, LifecycleState, NormalizedEvent, ProtocolCategory};
 use common::ChainAdapter;
+use event_schema::{EventStatus, EventType, LifecycleState, NormalizedEvent, ProtocolCategory};
 use uuid::Uuid;
 
 use crate::normalize::chain_from_slug;

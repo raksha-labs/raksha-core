@@ -13,10 +13,12 @@ pub mod shutdown;
 pub use shutdown::ShutdownSignal;
 
 pub mod circuit_breaker;
-pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, CircuitBreakerState};
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, CircuitBreakerState,
+};
 
 pub mod health_check;
-pub use health_check::{HealthCheckServer, HealthStatus, start_health_check_server};
+pub use health_check::{start_health_check_server, HealthCheckServer, HealthStatus};
 
 pub mod data_source;
 pub use data_source::DataSourceConfig;
@@ -36,7 +38,10 @@ pub mod errors {
 pub fn init_logging(default_filter: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
-    tracing_subscriber::fmt().with_env_filter(filter).compact().init();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .compact()
+        .init();
 }
 
 pub fn event_id(input: &str) -> String {

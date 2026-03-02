@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use event_schema::{Attribution, DetectionResult, RiskScore, Severity, SignalType};
 use common::RiskScorer;
+use event_schema::{Attribution, DetectionResult, RiskScore, Severity, SignalType};
 
 pub struct DeterministicRiskScorer;
 
@@ -69,7 +69,10 @@ impl RiskScorer for DeterministicRiskScorer {
                 attribution.push(Attribution {
                     feature: "oracle_divergence".to_string(),
                     contribution: 25.0,
-                    detail: signal.label.clone().unwrap_or_else(|| format!("divergence value: {:.4}", signal.value)),
+                    detail: signal
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| format!("divergence value: {:.4}", signal.value)),
                 });
             }
         }

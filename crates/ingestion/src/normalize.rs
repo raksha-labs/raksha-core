@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use event_schema::{Chain, EventStatus, EventType, LifecycleState, NormalizedEvent, ProtocolCategory};
 use ethers::types::Log;
+use event_schema::{
+    Chain, EventStatus, EventType, LifecycleState, NormalizedEvent, ProtocolCategory,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -127,12 +129,10 @@ pub fn normalize_flash_loan_candidate_event(
     );
     metadata.insert(
         "flash_loan.asset_address".to_string(),
-        serde_json::json!(
-            decoded
-                .asset_address
-                .map(|asset| format!("{asset:?}"))
-                .unwrap_or_default()
-        ),
+        serde_json::json!(decoded
+            .asset_address
+            .map(|asset| format!("{asset:?}"))
+            .unwrap_or_default()),
     );
     metadata.insert(
         "flash_loan.loan_amount_raw".to_string(),

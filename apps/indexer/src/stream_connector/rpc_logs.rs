@@ -3,7 +3,7 @@ use std::{collections::VecDeque, time::Duration};
 use anyhow::{anyhow, Context, Result};
 use ethers::{
     providers::{Middleware, Provider, Ws},
-    types::{Address, BlockNumber, Filter, H256, ValueOrArray, U64},
+    types::{Address, BlockNumber, Filter, ValueOrArray, H256, U64},
 };
 use serde_json::Value;
 use tokio::time::sleep;
@@ -36,11 +36,18 @@ impl RpcLogsConnector {
     }
 
     pub async fn connect(&mut self) -> Result<()> {
-        let ws = Ws::connect(self.endpoint.as_str())
-            .await
-            .with_context(|| format!("failed connecting rpc websocket endpoint: {}", self.endpoint))?;
+        let ws = Ws::connect(self.endpoint.as_str()).await.with_context(|| {
+            format!(
+                "failed connecting rpc websocket endpoint: {}",
+                self.endpoint
+            )
+        })?;
         let provider = Provider::new(ws);
-        let chain_id = provider.get_chainid().await.ok().map(|value| value.as_u64() as i64);
+        let chain_id = provider
+            .get_chainid()
+            .await
+            .ok()
+            .map(|value| value.as_u64() as i64);
         self.chain_id = chain_id;
         self.provider = Some(provider);
         Ok(())
@@ -85,7 +92,8 @@ impl RpcLogsConnector {
         self.last_block = Some(head);
 
         for log in logs {
-            let mut payload = serde_json::to_value(&log).context("failed to serialize log payload")?;
+            let mut payload =
+                serde_json::to_value(&log).context("failed to serialize log payload")?;
             if let Some(chain_id) = self.chain_id {
                 if let Some(object) = payload.as_object_mut() {
                     object.insert("chainId".to_string(), serde_json::json!(chain_id));
@@ -107,9 +115,9 @@ fn build_filter(filter_config: &Value, from: U64, to: U64) -> Result<Filter> {
     for key in ["addresses", "contracts", "contract_addresses"] {
         if let Some(items) = filter_config.get(key).and_then(Value::as_array) {
             for item in items.iter().filter_map(Value::as_str) {
-                let address = item
-                    .parse::<Address>()
-                    .with_context(|| format!("invalid contract address in filter config: {item}"))?;
+                let address = item.parse::<Address>().with_context(|| {
+                    format!("invalid contract address in filter config: {item}")
+                })?;
                 addresses.push(address);
             }
             if !addresses.is_empty() {

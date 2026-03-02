@@ -1,8 +1,8 @@
 use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, Result};
-use event_schema::ProtocolCategory;
 use ethers::types::Address;
+use event_schema::ProtocolCategory;
 
 #[derive(Debug, Clone)]
 pub struct ProtocolBinding {

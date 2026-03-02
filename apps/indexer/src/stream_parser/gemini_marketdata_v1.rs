@@ -44,11 +44,11 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
     }
 
     let price = price.ok_or_else(|| "missing_gemini_price".to_string())?;
-    let payload_event_ts = parse_ts_from_path(payload, input.payload_ts_path, input.payload_ts_unit)
-        .or_else(|| {
-            event_ts
-                .as_ref()
-                .and_then(|value| parse_ts_value(value, "ms").or_else(|| parse_ts_value(value, "s")))
+    let payload_event_ts =
+        parse_ts_from_path(payload, input.payload_ts_path, input.payload_ts_unit).or_else(|| {
+            event_ts.as_ref().and_then(|value| {
+                parse_ts_value(value, "ms").or_else(|| parse_ts_value(value, "s"))
+            })
         });
     let observed_at = observed_at(payload_event_ts);
 

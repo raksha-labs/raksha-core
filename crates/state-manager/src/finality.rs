@@ -6,8 +6,8 @@ use std::{
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use event_schema::{Chain, FinalityUpdate, LifecycleState, NormalizedEvent, ReorgNotice};
 use common::FinalityEngine;
+use event_schema::{Chain, FinalityUpdate, LifecycleState, NormalizedEvent, ReorgNotice};
 
 #[derive(Clone, Default)]
 pub struct InMemoryFinalityEngine {

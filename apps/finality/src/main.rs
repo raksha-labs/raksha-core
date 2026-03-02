@@ -1,9 +1,9 @@
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::Result;
-use event_schema::Chain;
 use common::{start_health_check_server, FinalityEngine, ShutdownSignal};
 use dotenvy::dotenv;
+use event_schema::Chain;
 use state_manager::RedisStreamPublisher;
 use state_manager::{ChainFinalityTracker, InMemoryFinalityEngine, PostgresRepository};
 use tracing::{info, warn};
@@ -53,8 +53,8 @@ async fn main() -> Result<()> {
         std::env::var("FINALITY_NORMALIZED_START_ID").unwrap_or_else(|_| "0-0".to_string());
     let mut reorg_last_id =
         std::env::var("FINALITY_REORG_START_ID").unwrap_or_else(|_| "0-0".to_string());
-    let finality_group =
-        std::env::var("FINALITY_STREAM_GROUP").unwrap_or_else(|_| "state-manager-workers".to_string());
+    let finality_group = std::env::var("FINALITY_STREAM_GROUP")
+        .unwrap_or_else(|_| "state-manager-workers".to_string());
     let finality_consumer = std::env::var("FINALITY_STREAM_CONSUMER")
         .unwrap_or_else(|_| default_consumer_name("finality"));
 
@@ -323,11 +323,8 @@ fn load_tracker_from_db(
         "states": state.states,
     });
 
-    let tracker = ChainFinalityTracker::from_json(
-        chain.clone(),
-        confirmation_depth,
-        combined_json,
-    )?;
+    let tracker =
+        ChainFinalityTracker::from_json(chain.clone(), confirmation_depth, combined_json)?;
 
     Ok(Some(tracker))
 }
@@ -345,8 +342,14 @@ async fn persist_tracker(
     let states_json = state_json["states"].clone();
     let confirmation_depth = default_confirmation_depth_for_chain(chain) as i32;
 
-    repo.save_finality_state(&chain_str, confirmation_depth, head_block, blocks_json, states_json)
-        .await?;
+    repo.save_finality_state(
+        &chain_str,
+        confirmation_depth,
+        head_block,
+        blocks_json,
+        states_json,
+    )
+    .await?;
 
     Ok(())
 }

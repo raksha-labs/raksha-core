@@ -29,9 +29,9 @@ mod stream_worker;
 use stream_supervisor::run_stream_supervisor;
 
 const DEFAULT_RULE_RELATIVE_ROOTS: [&str; 3] = [
-    "./rules",      // Running from raksha-core/
-    "../rules",     // Running from raksha-core/apps/
-    "../../rules",  // Running from raksha-core/apps/indexer/
+    "./rules",     // Running from raksha-core/
+    "../rules",    // Running from raksha-core/apps/
+    "../../rules", // Running from raksha-core/apps/indexer/
 ];
 const DEFAULT_INGESTION_POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_INGESTION_BLOCK_BATCH_SIZE: u64 = 8;
@@ -346,7 +346,8 @@ impl IndexerStateStore {
             .transpose()?;
         let confirmation_depth = to_i64(event.confirmation_depth, "event.confirmation_depth")?;
         let chain = enum_to_string(&event.chain, "event.chain")?;
-        let protocol_category = enum_to_string(&event.protocol_category, "event.protocol_category")?;
+        let protocol_category =
+            enum_to_string(&event.protocol_category, "event.protocol_category")?;
         let event_type = enum_to_string(&event.event_type, "event.event_type")?;
         let status = enum_to_string(&event.status, "event.status")?;
         let lifecycle_state = enum_to_string(&event.lifecycle_state, "event.lifecycle_state")?;
@@ -552,10 +553,7 @@ async fn main() -> Result<()> {
                             warn!(error = ?err, "stream supervisor task terminated");
                         }
                     });
-                    info!(
-                        stream_purge_enabled,
-                        "db-driven stream supervisor started",
-                    );
+                    info!(stream_purge_enabled, "db-driven stream supervisor started",);
                 }
                 Err(err) => warn!(
                     error = ?err,
@@ -1086,7 +1084,11 @@ async fn build_chain_adapter_from_rules(
     let mut map_entries = Vec::new();
     let mut mock_protocols = Vec::new();
 
-    for protocol in protocols_file.protocols.into_iter().filter(|entry| entry.enabled) {
+    for protocol in protocols_file
+        .protocols
+        .into_iter()
+        .filter(|entry| entry.enabled)
+    {
         let protocol_category = protocol
             .protocol_category
             .as_deref()

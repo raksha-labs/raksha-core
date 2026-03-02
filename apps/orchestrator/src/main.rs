@@ -1,14 +1,17 @@
 use std::{collections::HashMap, time::Duration};
 
-use notifier::NotifierGatewayClient;
 use anyhow::Result;
 use chrono::Utc;
-use event_schema::{
-    AlertEvent, Chain, DetectionResult, FinalityStatus, IncidentTransition, LifecycleState, Severity,
-};
 use common::{start_health_check_server, ShutdownSignal};
 use dotenvy::dotenv;
-use state_manager::{EntityExposureRecord, IncidentKey, IncidentRecord, PostgresRepository, RedisStreamPublisher};
+use event_schema::{
+    AlertEvent, Chain, DetectionResult, FinalityStatus, IncidentTransition, LifecycleState,
+    Severity,
+};
+use notifier::NotifierGatewayClient;
+use state_manager::{
+    EntityExposureRecord, IncidentKey, IncidentRecord, PostgresRepository, RedisStreamPublisher,
+};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -122,7 +125,8 @@ async fn main() -> Result<()> {
 
             let alert = alert_from_detection(&detection);
             let alert = attach_incident_context(alert, &detection, repository.as_ref()).await;
-            let dispatched = dispatch_alert(&alert, &notifier_gateway, repository.as_ref(), &stream).await;
+            let dispatched =
+                dispatch_alert(&alert, &notifier_gateway, repository.as_ref(), &stream).await;
             alerts_by_event_key.insert(event_key.to_string(), dispatched);
             processed += 1;
 
@@ -194,9 +198,14 @@ async fn main() -> Result<()> {
             if let Some(repo) = repository.as_ref() {
                 if let Some(incident_id) = updated_alert.incident_id.as_deref() {
                     let severity_text = format!("{:?}", updated_alert.severity).to_lowercase();
-                    let (transition, status, closes_incident, reason) = match update.lifecycle_state {
-                        LifecycleState::Retracted => ("retract", "retracted", true, "finality_reorg_retraction"),
-                        LifecycleState::Confirmed => ("update", "active", false, "finality_confirmation"),
+                    let (transition, status, closes_incident, reason) = match update.lifecycle_state
+                    {
+                        LifecycleState::Retracted => {
+                            ("retract", "retracted", true, "finality_reorg_retraction")
+                        }
+                        LifecycleState::Confirmed => {
+                            ("update", "active", false, "finality_confirmation")
+                        }
                         _ => ("update", "active", false, "finality_update"),
                     };
                     if let Err(error) = repo
@@ -239,8 +248,13 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            let dispatched =
-                dispatch_alert(&updated_alert, &notifier_gateway, repository.as_ref(), &stream).await;
+            let dispatched = dispatch_alert(
+                &updated_alert,
+                &notifier_gateway,
+                repository.as_ref(),
+                &stream,
+            )
+            .await;
             alerts_by_event_key.insert(update.event_key.clone(), dispatched);
             processed += 1;
 
@@ -329,7 +343,10 @@ async fn attach_incident_context(
         .unwrap_or(IncidentTransition::Trigger);
     let transition_str = incident_transition_str(&transition);
     let incident_status = incident_status_for_transition(&transition);
-    let closes_incident = matches!(transition, IncidentTransition::Resolve | IncidentTransition::Retract);
+    let closes_incident = matches!(
+        transition,
+        IncidentTransition::Resolve | IncidentTransition::Retract
+    );
     let now = Utc::now();
     let key = IncidentKey {
         tenant_id: &tenant_id,
@@ -340,9 +357,7 @@ async fn attach_incident_context(
     };
 
     let incident = match repo.find_active_incident(key).await {
-        Ok(Some(existing)) => {
-            existing
-        }
+        Ok(Some(existing)) => existing,
         Ok(None) => {
             let created = IncidentRecord {
                 incident_id: Uuid::new_v4().to_string(),
@@ -407,12 +422,8 @@ async fn attach_incident_context(
                         let loss_10pct = capital * 0.10;
                         // Estimated slippage scales with the depeg magnitude (capped at 100 %)
                         let slippage = divergence_pct.min(100.0);
-                        let liquidity = if is_critical {
-                            "at_risk"
-                        } else {
-                            "degraded"
-                        }
-                        .to_string();
+                        let liquidity =
+                            if is_critical { "at_risk" } else { "degraded" }.to_string();
                         // Estimated savings = capital that could have been protected if exit
                         // was triggered at the initial peg floor rather than current price.
                         let savings = capital * (divergence_pct / 100.0).max(0.0);
@@ -438,11 +449,7 @@ async fn attach_incident_context(
                     .collect();
 
                 if let Err(err) = repo
-                    .save_incident_entity_exposures(
-                        &incident.incident_id,
-                        &tenant_id,
-                        &exposures,
-                    )
+                    .save_incident_entity_exposures(&incident.incident_id, &tenant_id, &exposures)
                     .await
                 {
                     warn!(
@@ -453,10 +460,8 @@ async fn attach_incident_context(
                 }
 
                 alert.blast_radius = exposures.iter().map(|e| e.entity_id.clone()).collect();
-                let total_capital: f64 =
-                    exposures.iter().map(|e| e.capital_at_risk_usd).sum();
-                let total_loss_5pct: f64 =
-                    exposures.iter().map(|e| e.loss_scenario_5pct_usd).sum();
+                let total_capital: f64 = exposures.iter().map(|e| e.capital_at_risk_usd).sum();
+                let total_loss_5pct: f64 = exposures.iter().map(|e| e.loss_scenario_5pct_usd).sum();
                 let total_loss_10pct: f64 =
                     exposures.iter().map(|e| e.loss_scenario_10pct_usd).sum();
                 alert.exposure_summary.insert(
@@ -475,10 +480,9 @@ async fn attach_incident_context(
                     "total_loss_scenario_10pct_usd".to_string(),
                     serde_json::json!(total_loss_10pct),
                 );
-                alert.exposure_summary.insert(
-                    "asset_symbol".to_string(),
-                    serde_json::json!(symbol),
-                );
+                alert
+                    .exposure_summary
+                    .insert("asset_symbol".to_string(), serde_json::json!(symbol));
             }
             Ok(_) => {
                 // No monitored entities for this asset — blast_radius stays empty.
@@ -619,13 +623,8 @@ async fn dispatch_alert(
                     );
 
                     persist_and_publish_alert(&suppressed, repository, stream).await;
-                    record_usage_event(
-                        repo,
-                        &tenant_id,
-                        "alert_suppressed_quota",
-                        &suppressed,
-                    )
-                    .await;
+                    record_usage_event(repo, &tenant_id, "alert_suppressed_quota", &suppressed)
+                        .await;
                     return suppressed;
                 }
                 Ok(None) => {}
@@ -711,7 +710,10 @@ async fn check_quota_exceeded(
     repository: &PostgresRepository,
     tenant_id: &str,
 ) -> Result<Option<(i64, i64)>> {
-    let Some(limit) = repository.load_tenant_monthly_alert_quota(tenant_id).await? else {
+    let Some(limit) = repository
+        .load_tenant_monthly_alert_quota(tenant_id)
+        .await?
+    else {
         return Ok(None);
     };
     if limit < 0 {

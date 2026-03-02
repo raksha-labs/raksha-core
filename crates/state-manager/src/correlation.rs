@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use event_schema::{DependencyEdge, DetectionResult};
 use common::CorrelationEngine;
+use event_schema::{DependencyEdge, DetectionResult};
 
 #[derive(Default)]
 pub struct NoopCorrelationEngine;

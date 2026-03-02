@@ -143,7 +143,10 @@ async fn stop_worker(handle: WorkerHandle) {
     }
 }
 
-fn to_runtime_config(cfg: EffectiveStreamConfig, tenant_targets: Vec<String>) -> RuntimeStreamConfig {
+fn to_runtime_config(
+    cfg: EffectiveStreamConfig,
+    tenant_targets: Vec<String>,
+) -> RuntimeStreamConfig {
     RuntimeStreamConfig {
         stream_config_id: cfg.stream_config_id,
         source_id: cfg.source_id,
@@ -162,7 +165,9 @@ fn to_runtime_config(cfg: EffectiveStreamConfig, tenant_targets: Vec<String>) ->
         filter_config: cfg.filter_config,
         payload_ts_path: cfg.payload_ts_path,
         payload_ts_unit: cfg.payload_ts_unit,
-        poll_interval_ms: cfg.poll_interval_ms.and_then(|value| u64::try_from(value).ok()),
+        poll_interval_ms: cfg
+            .poll_interval_ms
+            .and_then(|value| u64::try_from(value).ok()),
         tenant_targets,
     }
 }
@@ -198,7 +203,8 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
     let (tx, rx) = mpsc::channel(32);
     tokio::spawn(async move {
         loop {
-            let (client, mut connection) = match tokio_postgres::connect(&database_url, NoTls).await {
+            let (client, mut connection) = match tokio_postgres::connect(&database_url, NoTls).await
+            {
                 Ok(value) => value,
                 Err(error) => {
                     warn!(error = ?error, "failed to connect for stream config LISTEN");
@@ -207,7 +213,10 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
                 }
             };
 
-            if let Err(error) = client.batch_execute("LISTEN source_stream_config_changed").await {
+            if let Err(error) = client
+                .batch_execute("LISTEN source_stream_config_changed")
+                .await
+            {
                 warn!(error = ?error, "failed to execute LISTEN source_stream_config_changed");
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;

@@ -124,7 +124,7 @@ mod tests {
     fn test_shutdown_signal_clone() {
         let signal = ShutdownSignal::new();
         let cloned = signal.clone();
-        
+
         signal.trigger();
         assert!(cloned.is_shutdown_requested());
     }

@@ -1,3 +1,4 @@
+use chrono::TimeZone;
 /// Parser for the Pyth Network Hermes HTTP/SSE price-feed API (v2).
 ///
 /// Hermes delivers individual price updates as JSON objects with the following shape:
@@ -38,7 +39,6 @@
 /// `{ "price_feed": { "id": ..., "price": {...}, "ema_price": {...} } }`.
 /// Both shapes are handled transparently.
 use serde_json::{json, Value};
-use chrono::TimeZone;
 
 use super::{observed_at, ParsedFeedEvent, ParserInput};
 
@@ -49,7 +49,10 @@ use super::{observed_at, ParsedFeedEvent, ParserInput};
 fn decode_pyth_price(obj: &Value) -> Option<f64> {
     let mantissa_str = obj.get("price").and_then(Value::as_str)?;
     let mantissa: f64 = mantissa_str.parse().ok()?;
-    let expo: i32 = obj.get("expo").and_then(Value::as_i64).and_then(|e| i32::try_from(e).ok())?;
+    let expo: i32 = obj
+        .get("expo")
+        .and_then(Value::as_i64)
+        .and_then(|e| i32::try_from(e).ok())?;
     let result = mantissa * 10f64.powi(expo);
     if result.is_finite() && result > 0.0 {
         Some(result)
@@ -60,9 +63,7 @@ fn decode_pyth_price(obj: &Value) -> Option<f64> {
 
 /// Extract the publish_time from a Pyth price object.
 fn decode_pyth_ts(obj: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
-    let secs = obj
-        .get("publish_time")
-        .and_then(Value::as_i64)?;
+    let secs = obj.get("publish_time").and_then(Value::as_i64)?;
     chrono::Utc.timestamp_opt(secs, 0).single()
 }
 
@@ -108,11 +109,9 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         .unwrap_or(false);
 
     let price_obj = if use_spot {
-        feed.get("price")
-            .or_else(|| feed.get("ema_price"))
+        feed.get("price").or_else(|| feed.get("ema_price"))
     } else {
-        feed.get("ema_price")
-            .or_else(|| feed.get("price"))
+        feed.get("ema_price").or_else(|| feed.get("price"))
     }
     .ok_or_else(|| "missing_pyth_price_object".to_string())?;
 
@@ -132,8 +131,7 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         .filter(|c| c.is_finite());
 
     // Derive publish timestamp.
-    let payload_event_ts = decode_pyth_ts(price_obj)
-        .or_else(|| decode_pyth_ts(feed));
+    let payload_event_ts = decode_pyth_ts(price_obj).or_else(|| decode_pyth_ts(feed));
     let observed_at = observed_at(payload_event_ts);
 
     // Symbol / market key.
@@ -154,23 +152,16 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         .map(ToString::to_string)
         .or_else(|| raw_symbol.as_deref().map(market_key_from_pyth_symbol));
 
-    let asset_pair = input
-        .asset_pair_hint
-        .map(ToString::to_string)
-        .or_else(|| {
-            raw_symbol.as_deref().map(|s| {
-                s.split('.').next_back().unwrap_or(s).to_ascii_uppercase()
-            })
-        });
+    let asset_pair = input.asset_pair_hint.map(ToString::to_string).or_else(|| {
+        raw_symbol
+            .as_deref()
+            .map(|s| s.split('.').next_back().unwrap_or(s).to_ascii_uppercase())
+    });
 
     // Spot price for cross-check (always include in normalized_fields).
-    let spot_price = feed
-        .get("price")
-        .and_then(decode_pyth_price);
+    let spot_price = feed.get("price").and_then(decode_pyth_price);
 
-    let ema_price = feed
-        .get("ema_price")
-        .and_then(decode_pyth_price);
+    let ema_price = feed.get("ema_price").and_then(decode_pyth_price);
 
     Ok(ParsedFeedEvent {
         event_type: input.event_type.to_string(),

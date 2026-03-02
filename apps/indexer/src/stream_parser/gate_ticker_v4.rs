@@ -79,14 +79,13 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         .or_else(|| parse_f64(ticker.get("close")))
         .or_else(|| parse_f64(ticker.get("lastPrice")));
 
-    let raw_pair = raw_pair
-        .ok_or_else(|| "missing_gate_currency_pair".to_string())?;
+    let raw_pair = raw_pair.ok_or_else(|| "missing_gate_currency_pair".to_string())?;
     let price = price.ok_or_else(|| "missing_gate_last_price".to_string())?;
 
     // Normalise to "BASE/QUOTE" form.
     let symbol = normalise_gate_pair(&raw_pair);
-    let (base, quote) = split_gate_pair(&raw_pair)
-        .ok_or_else(|| format!("unparseable_gate_pair:{raw_pair}"))?;
+    let (base, quote) =
+        split_gate_pair(&raw_pair).ok_or_else(|| format!("unparseable_gate_pair:{raw_pair}"))?;
 
     let payload_event_ts =
         parse_ts_from_path(payload, input.payload_ts_path, input.payload_ts_unit)
