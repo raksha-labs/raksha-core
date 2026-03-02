@@ -991,6 +991,7 @@ impl PostgresRepository {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn append_incident_event(
         &self,
         incident_id: &str,

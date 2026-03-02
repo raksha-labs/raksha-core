@@ -219,10 +219,10 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
                 let message = poll_fn(|cx| connection.poll_message(cx)).await;
                 match message {
                     Some(Ok(AsyncMessage::Notification(notification))) => {
-                        if notification.channel() == "source_stream_config_changed" {
-                            if tx.send(()).await.is_err() {
-                                return;
-                            }
+                        if notification.channel() == "source_stream_config_changed"
+                            && tx.send(()).await.is_err()
+                        {
+                            return;
                         }
                     }
                     Some(Ok(_)) => {}

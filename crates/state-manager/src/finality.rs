@@ -135,7 +135,7 @@ impl ChainFinalityTracker {
 
         self.head_block = self.head_block.max(event_block);
 
-        if self.states.get(&event.event_key).is_none() {
+        if !self.states.contains_key(&event.event_key) {
             self.states
                 .insert(event.event_key.clone(), LifecycleState::Provisional);
             batch.updates.push(FinalityUpdate {

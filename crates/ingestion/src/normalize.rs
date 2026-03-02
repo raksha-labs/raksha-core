@@ -19,6 +19,7 @@ pub fn chain_from_slug(chain_slug: &str) -> Chain {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn normalize_answer_updated_event(
     chain_slug: &str,
     chain_id: u64,

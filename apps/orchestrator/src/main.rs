@@ -807,9 +807,7 @@ fn extract_asset_symbol(subject_key: Option<&str>) -> Option<String> {
 }
 
 async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
-    let Some(publisher_result) = RedisStreamPublisher::from_env() else {
-        return None;
-    };
+    let publisher_result = RedisStreamPublisher::from_env()?;
 
     let publisher = match publisher_result {
         Ok(publisher) => publisher,

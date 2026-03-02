@@ -74,9 +74,7 @@ impl WebsocketStreamConnector {
             self.ensure_heartbeat_not_timed_out()?;
 
             let maybe_message = match timeout(Duration::from_secs(1), async {
-                let Some(ws) = self.stream.as_mut() else {
-                    return None;
-                };
+                let ws = self.stream.as_mut()?;
                 ws.next().await
             })
             .await

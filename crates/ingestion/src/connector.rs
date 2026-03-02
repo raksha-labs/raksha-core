@@ -382,7 +382,7 @@ fn subscribe_binance(symbols: &[String]) -> Vec<Value> {
     let params: Vec<String> = symbols
         .iter()
         .map(|s| {
-            s.replace('/', "").replace('-', "").to_ascii_lowercase() + "@ticker"
+            s.replace(['/', '-'], "").to_ascii_lowercase() + "@ticker"
         })
         .collect();
     if params.is_empty() {

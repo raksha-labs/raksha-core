@@ -144,8 +144,7 @@ pub(super) fn split_symbol_pair(symbol: &str) -> Option<(String, String)> {
     let cleaned = symbol
         .trim()
         .to_ascii_uppercase()
-        .replace(':', "")
-        .replace(' ', "");
+        .replace([':', ' '], "");
     if cleaned.is_empty() {
         return None;
     }

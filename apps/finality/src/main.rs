@@ -250,9 +250,7 @@ fn default_consumer_name(prefix: &str) -> String {
 }
 
 async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
-    let Some(publisher_result) = RedisStreamPublisher::from_env() else {
-        return None;
-    };
+    let publisher_result = RedisStreamPublisher::from_env()?;
 
     let publisher = match publisher_result {
         Ok(publisher) => publisher,
@@ -295,9 +293,7 @@ fn default_confirmation_depth_for_chain(chain: &Chain) -> u64 {
 }
 
 async fn init_repository() -> Option<PostgresRepository> {
-    let Some(database_url) = PostgresRepository::from_env() else {
-        return None;
-    };
+    let database_url = PostgresRepository::from_env()?;
 
     match PostgresRepository::from_database_url(&database_url).await {
         Ok(repo) => Some(repo),

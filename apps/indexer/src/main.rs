@@ -989,9 +989,7 @@ where
 }
 
 async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
-    let Some(publisher_result) = RedisStreamPublisher::from_env() else {
-        return None;
-    };
+    let publisher_result = RedisStreamPublisher::from_env()?;
 
     let publisher = match publisher_result {
         Ok(publisher) => publisher,
@@ -1503,7 +1501,7 @@ fn confirmation_depth_for_chain(chain_slug: &str) -> u64 {
     std::env::var(chain_specific_env)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or_else(|| match chain_slug {
+        .unwrap_or(match chain_slug {
             "base" => 64,
             _ => 3,
         })

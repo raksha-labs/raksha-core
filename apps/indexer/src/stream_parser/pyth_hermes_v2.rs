@@ -74,7 +74,7 @@ fn decode_pyth_ts(obj: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
 fn market_key_from_pyth_symbol(raw_symbol: &str) -> String {
     let symbol = raw_symbol
         .split('.')
-        .last()
+        .next_back()
         .unwrap_or(raw_symbol)
         .to_ascii_uppercase();
 
@@ -159,18 +159,18 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         .map(ToString::to_string)
         .or_else(|| {
             raw_symbol.as_deref().map(|s| {
-                s.split('.').last().unwrap_or(s).to_ascii_uppercase()
+                s.split('.').next_back().unwrap_or(s).to_ascii_uppercase()
             })
         });
 
     // Spot price for cross-check (always include in normalized_fields).
     let spot_price = feed
         .get("price")
-        .and_then(|p| decode_pyth_price(p));
+        .and_then(decode_pyth_price);
 
     let ema_price = feed
         .get("ema_price")
-        .and_then(|p| decode_pyth_price(p));
+        .and_then(decode_pyth_price);
 
     Ok(ParsedFeedEvent {
         event_type: input.event_type.to_string(),

@@ -166,16 +166,9 @@ impl NotifierGatewayClient {
 }
 
 /// NotifierGatewaySink sends alert to notifier-gateway once and lets gateway route channels.
+#[derive(Default)]
 pub struct NotifierGatewaySink {
     gateway: NotifierGatewayClient,
-}
-
-impl Default for NotifierGatewaySink {
-    fn default() -> Self {
-        Self {
-            gateway: NotifierGatewayClient::from_env(),
-        }
-    }
 }
 
 impl NotifierGatewaySink {
@@ -480,7 +473,7 @@ impl TelegramSink {
         };
 
         let message = format!(
-            "{} <b>{} Alert</b>\n\n\
+            "{} <b>{:?} Alert</b>\n\n\
             <b>Protocol:</b> {}\n\
             <b>Chain:</b> {:?}\n\
             <b>Risk Score:</b> {}/100\n\
@@ -488,7 +481,7 @@ impl TelegramSink {
             <b>Transaction:</b> <code>{}</code>\n\n\
             <b>Actions:</b>\n{}",
             severity_emoji,
-            format!("{:?}", alert.severity),
+            alert.severity,
             alert.protocol,
             alert.chain,
             alert.risk_score,
