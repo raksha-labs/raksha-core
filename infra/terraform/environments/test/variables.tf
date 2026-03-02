@@ -131,7 +131,7 @@ variable "fargate_spot_scaling_classes" {
 variable "ec2_instance_type" {
   description = "ECS instance type in EC2 mode"
   type        = string
-  default     = "t4g.medium"
+  default     = "t4g.micro"
 }
 
 variable "ec2_desired_capacity" {

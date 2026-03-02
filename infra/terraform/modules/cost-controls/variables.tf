@@ -32,6 +32,12 @@ variable "anomaly_total_impact_absolute_usd" {
   default     = 20
 }
 
+variable "create_anomaly_monitor" {
+  description = "Whether to create Cost Explorer anomaly monitor/subscription"
+  type        = bool
+  default     = true
+}
+
 variable "enable_billing_estimated_charges_alarm" {
   description = "Create CloudWatch billing alarm on AWS/Billing EstimatedCharges (requires us-east-1)"
   type        = bool

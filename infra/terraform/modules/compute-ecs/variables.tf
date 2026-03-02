@@ -170,7 +170,7 @@ variable "fargate_spot_scaling_classes" {
 variable "ec2_instance_type" {
   description = "Instance type for ECS container instances in test mode"
   type        = string
-  default     = "t4g.medium"
+  default     = "t4g.micro"
 }
 
 variable "ecs_ami_ssm_parameter_name" {

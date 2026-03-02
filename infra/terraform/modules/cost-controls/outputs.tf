@@ -9,7 +9,7 @@ output "budget_name" {
 }
 
 output "anomaly_monitor_arn" {
-  value       = aws_ce_anomaly_monitor.main.arn
+  value       = try(aws_ce_anomaly_monitor.main[0].arn, null)
   description = "Cost anomaly monitor ARN"
 }
 

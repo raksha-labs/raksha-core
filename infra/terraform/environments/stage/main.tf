@@ -255,7 +255,7 @@ module "cost_controls" {
   anomaly_total_impact_absolute_usd      = var.anomaly_total_impact_absolute_usd
   enable_billing_estimated_charges_alarm = var.enable_billing_estimated_charges_alarm
   billing_estimated_charges_alarm_usd    = var.billing_estimated_charges_alarm_usd
-  name_prefix                            = "raksha"
+  name_prefix                            = "raksha-core"
   tags                                   = var.tags
 }
 

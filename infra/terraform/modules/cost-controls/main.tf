@@ -57,16 +57,20 @@ resource "aws_budgets_budget" "monthly" {
 }
 
 resource "aws_ce_anomaly_monitor" "main" {
+  count = var.create_anomaly_monitor ? 1 : 0
+
   name              = "${var.name_prefix}-${var.environment}-anomaly-monitor"
   monitor_type      = "DIMENSIONAL"
   monitor_dimension = "SERVICE"
 }
 
 resource "aws_ce_anomaly_subscription" "main" {
+  count = var.create_anomaly_monitor ? 1 : 0
+
   name      = "${var.name_prefix}-${var.environment}-anomaly-subscription"
   frequency = "DAILY"
 
-  monitor_arn_list = [aws_ce_anomaly_monitor.main.arn]
+  monitor_arn_list = [aws_ce_anomaly_monitor.main[0].arn]
 
   subscriber {
     type    = "SNS"

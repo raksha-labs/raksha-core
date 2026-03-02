@@ -185,6 +185,38 @@ import_cicd_roles_if_needed() {
   done
 }
 
+import_compute_iam_if_needed() {
+  local task_exec_role="raksha-${ENVIRONMENT}-ecs-task-execution-role"
+  local task_role="raksha-${ENVIRONMENT}-ecs-task-role"
+  local instance_role="raksha-${ENVIRONMENT}-ecs-instance-role"
+  local instance_profile="raksha-${ENVIRONMENT}-ecs-instance-profile"
+
+  local role_names=("${task_exec_role}" "${task_role}" "${instance_role}")
+  local role_addresses=(
+    "module.compute.aws_iam_role.ecs_task_execution"
+    "module.compute.aws_iam_role.ecs_task"
+    "module.compute.aws_iam_role.ecs_instance[0]"
+  )
+
+  local i
+  for i in "${!role_names[@]}"; do
+    if resource_in_state "${role_addresses[$i]}"; then
+      continue
+    fi
+    if aws iam get-role --role-name "${role_names[$i]}" >/dev/null 2>&1; then
+      log "import existing ECS IAM role into state: ${role_names[$i]}"
+      tf_import "${role_addresses[$i]}" "${role_names[$i]}"
+    fi
+  done
+
+  if ! resource_in_state "module.compute.aws_iam_instance_profile.ecs_instance[0]"; then
+    if aws iam get-instance-profile --instance-profile-name "${instance_profile}" >/dev/null 2>&1; then
+      log "import existing ECS instance profile into state: ${instance_profile}"
+      tf_import "module.compute.aws_iam_instance_profile.ecs_instance[0]" "${instance_profile}"
+    fi
+  fi
+}
+
 import_ecr_repositories_if_needed() {
   local svc
   local repo
@@ -303,6 +335,7 @@ log "terraform apply (${ENVIRONMENT}) image_tag=${IMAGE_TAG_INPUT}"
 print_state_lock_guard
 force_unlock_stale_if_needed
 import_cicd_roles_if_needed
+import_compute_iam_if_needed
 import_ecr_repositories_if_needed
 import_shared_secrets_if_needed
 import_log_groups_if_needed

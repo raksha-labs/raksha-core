@@ -154,6 +154,14 @@ resource "aws_iam_role_policy" "deploy" {
           "ecs:DescribeClusters",
           "ecs:ListServices",
           "ecs:TagResource",
+          "ecr:GetAuthorizationToken",
+          "ecr:DescribeRepositories",
+          "ecr:PutImageTagMutability",
+          "ecr:PutLifecyclePolicy",
+          "ecr:TagResource",
+          "servicediscovery:ListTagsForResource",
+          "servicediscovery:TagResource",
+          "servicediscovery:UntagResource",
           "codedeploy:CreateDeployment",
           "codedeploy:GetDeployment",
           "codedeploy:GetDeploymentGroup",
@@ -163,7 +171,9 @@ resource "aws_iam_role_policy" "deploy" {
           "cloudwatch:DescribeAlarms",
           "logs:DescribeLogGroups",
           "iam:PassRole",
-          "elasticloadbalancing:DescribeTargetGroups"
+          "elasticloadbalancing:DescribeTargetGroups",
+          "elasticloadbalancing:DescribeListenerAttributes",
+          "elasticloadbalancing:ModifyListenerAttributes"
         ]
         Resource = "*"
       }
