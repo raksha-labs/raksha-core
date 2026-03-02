@@ -206,6 +206,12 @@ variable "github_allowed_branches" {
   default     = ["master", "release/*"]
 }
 
+variable "github_allowed_environments" {
+  description = "GitHub environments allowed to assume OIDC roles"
+  type        = list(string)
+  default     = ["test", "stage", "prod"]
+}
+
 variable "create_oidc_provider" {
   description = "Create GitHub OIDC provider"
   type        = bool

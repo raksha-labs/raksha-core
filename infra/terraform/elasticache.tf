@@ -9,7 +9,7 @@ resource "aws_elasticache_subnet_group" "main" {
 # ElastiCache Redis Replication Group
 resource "aws_elasticache_replication_group" "main" {
   replication_group_id = "raksha-redis"
-  description         = "Redis cluster for Raksha event streams"
+  description          = "Redis cluster for Raksha event streams"
 
   engine               = "redis"
   engine_version       = "7.1"
@@ -18,8 +18,8 @@ resource "aws_elasticache_replication_group" "main" {
   parameter_group_name = "default.redis7"
   port                 = 6379
 
-  subnet_group_name    = aws_elasticache_subnet_group.main.name
-  security_group_ids   = [aws_security_group.elasticache.id]
+  subnet_group_name  = aws_elasticache_subnet_group.main.name
+  security_group_ids = [aws_security_group.elasticache.id]
 
   automatic_failover_enabled = true
   multi_az_enabled           = true
@@ -50,9 +50,9 @@ resource "aws_secretsmanager_secret" "redis_url" {
 resource "aws_secretsmanager_secret_version" "redis_url" {
   secret_id = aws_secretsmanager_secret.redis_url.id
   secret_string = jsonencode({
-    REDIS_URL           = "redis://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379"
-    REDIS_HOST          = aws_elasticache_replication_group.main.primary_endpoint_address
-    REDIS_PORT          = 6379
+    REDIS_URL             = "redis://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379"
+    REDIS_HOST            = aws_elasticache_replication_group.main.primary_endpoint_address
+    REDIS_PORT            = 6379
     REDIS_READER_ENDPOINT = aws_elasticache_replication_group.main.reader_endpoint_address
   })
 }

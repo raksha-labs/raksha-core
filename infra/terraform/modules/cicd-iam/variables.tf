@@ -31,6 +31,12 @@ variable "allow_tag_refs" {
   default     = true
 }
 
+variable "github_allowed_environments" {
+  description = "GitHub environments allowed to assume OIDC roles"
+  type        = list(string)
+  default     = ["test", "stage", "prod"]
+}
+
 variable "create_oidc_provider" {
   description = "Create GitHub OIDC provider in account"
   type        = bool

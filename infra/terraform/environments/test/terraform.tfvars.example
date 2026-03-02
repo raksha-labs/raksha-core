@@ -14,6 +14,7 @@ image_tag             = "master-latest"
 github_org            = "raksha-labs"
 github_repo           = "raksha-core"
 github_allowed_branches = ["master"]
+github_allowed_environments = ["test", "stage", "prod"]
 
 # Set this to true only in one environment/account when bootstrapping OIDC.
 create_oidc_provider  = false

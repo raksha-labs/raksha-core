@@ -2,9 +2,11 @@ locals {
   branch_subjects = [for branch in var.github_allowed_branches : "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/${branch}"]
   tag_subjects    = var.allow_tag_refs ? ["repo:${var.github_org}/${var.github_repo}:ref:refs/tags/*"] : []
   pr_subjects     = var.allow_pull_request ? ["repo:${var.github_org}/${var.github_repo}:pull_request"] : []
-  subjects        = concat(local.branch_subjects, local.tag_subjects, local.pr_subjects)
+  env_subjects    = [for environment in var.github_allowed_environments : "repo:${var.github_org}/${var.github_repo}:environment:${environment}"]
+  subjects        = concat(local.branch_subjects, local.tag_subjects, local.pr_subjects, local.env_subjects)
 
-  effective_oidc_provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : var.oidc_provider_arn
+  # Fallback to the account's standard GitHub OIDC provider ARN when not explicitly provided.
+  effective_oidc_provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : coalesce(var.oidc_provider_arn, "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com")
 
   trust_policy = jsonencode({
     Version = "2012-10-17"
@@ -27,6 +29,8 @@ locals {
     ]
   })
 }
+
+data "aws_caller_identity" "current" {}
 
 resource "aws_iam_openid_connect_provider" "github" {
   count = var.create_oidc_provider ? 1 : 0
