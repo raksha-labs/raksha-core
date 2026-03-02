@@ -90,7 +90,7 @@ mod tests {
                 "0x000000000000000000000000recipient0000000000000000000000000000000000"
             ],
             "data": format!(
-                "0x{}{}{}{}{}{}{}", // amount0, amount1, sqrtPriceX96, liquidity, tick (5 words)
+                "0x{}{}{}{}{}", // amount0, amount1, sqrtPriceX96, liquidity, tick (5 words)
                 "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd8f0", // amount0 (negative i256)
                 "0000000000000000000000000000000000000000000000000000000000002710", // amount1 = 10000
                 sqrt_price_x96.trim_start_matches("0x"),
