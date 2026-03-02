@@ -72,6 +72,12 @@ locals {
     finality = {
       ALERT_FALLBACK_TENANT_ID = "glider"
     }
+    "history-worker" = {
+      HISTORY_WORKER_INTERVAL_SECS = "30"
+      HISTORY_WORKER_BATCH_SIZE    = "500"
+      HISTORY_PREFIX               = "history"
+      HEALTH_CHECK_PORT            = "8080"
+    }
   }
 
   service_secret_env = {

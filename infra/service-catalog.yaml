@@ -59,3 +59,18 @@ services:
       test: 1
       stage: 1
       prod: 2
+
+  - service_name: history-worker
+    image_repo: raksha-history-worker
+    container_port: 8080
+    health_path: /health
+    exposure: internal
+    deploy_strategy: rolling
+    scaling_class: fixed
+    cpu: 256
+    memory: 512
+    command: ["/app/bin/history-worker"]
+    desired_count:
+      test: 1
+      stage: 1
+      prod: 1
