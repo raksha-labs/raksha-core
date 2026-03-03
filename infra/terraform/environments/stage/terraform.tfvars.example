@@ -20,3 +20,17 @@ github_allowed_branches = ["master", "release/*"]
 
 create_oidc_provider    = false
 # oidc_provider_arn     = "arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com"
+
+# RPC WebSocket URLs for the indexer — stored as Secrets Manager secrets.
+# Without this the indexer runs in mock/synthetic-data mode.
+#
+# 1. Create the secret:
+#    aws secretsmanager create-secret \
+#      --name raksha/stage/rpc \
+#      --secret-string '{"ETH_WS_URL":"wss://...","BASE_WS_URL":"wss://..."}'
+#
+# 2. Set the ARNs here:
+# rpc_ws_url_secret_arns = {
+#   ETH_WS_URL  = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:raksha/stage/rpc-AbCdEf:ETH_WS_URL::"
+#   BASE_WS_URL = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:raksha/stage/rpc-AbCdEf:BASE_WS_URL::"
+# }

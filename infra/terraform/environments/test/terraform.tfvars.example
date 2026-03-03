@@ -25,6 +25,23 @@ create_oidc_provider  = false
 # Flip to true when you need to test the indexing/detection pipeline.
 streams_enabled = false
 
+# RPC WebSocket URLs for the indexer — stored as Secrets Manager secrets.
+# Without this the indexer runs in mock/synthetic-data mode (health check still
+# passes but no real blockchain events are indexed).
+#
+# 1. Create a Secrets Manager secret with JSON value:
+#    { "ETH_WS_URL": "wss://eth-mainnet.g.alchemy.com/v2/<key>",
+#      "BASE_WS_URL": "wss://base-mainnet.g.alchemy.com/v2/<key>" }
+#    e.g.: aws secretsmanager create-secret \
+#            --name raksha/test/rpc \
+#            --secret-string '{"ETH_WS_URL":"wss://...","BASE_WS_URL":"wss://..."}'
+#
+# 2. Set the ARN (with JSON key suffix) here:
+# rpc_ws_url_secret_arns = {
+#   ETH_WS_URL  = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:raksha/test/rpc-AbCdEf:ETH_WS_URL::"
+#   BASE_WS_URL = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:raksha/test/rpc-AbCdEf:BASE_WS_URL::"
+# }
+
 # service_desired_counts lets you override individual service counts on top of
 # streams_enabled. Example — run only the indexer:
 # service_desired_counts = {

@@ -82,11 +82,14 @@ locals {
 
   service_secret_env = {
     for service_name in keys(local.service_catalog_map) :
-    service_name => {
-      DATABASE_URL     = "${local.database_url_secret_arn}:DATABASE_URL::"
-      RAW_DATABASE_URL = "${local.raw_database_url_secret_arn}:RAW_DATABASE_URL::"
-      REDIS_URL        = "${local.redis_url_secret_arn}:REDIS_URL::"
-    }
+    service_name => merge(
+      {
+        DATABASE_URL     = "${local.database_url_secret_arn}:DATABASE_URL::"
+        RAW_DATABASE_URL = "${local.raw_database_url_secret_arn}:RAW_DATABASE_URL::"
+        REDIS_URL        = "${local.redis_url_secret_arn}:REDIS_URL::"
+      },
+      service_name == "indexer" ? var.rpc_ws_url_secret_arns : {}
+    )
   }
 }
 

@@ -230,6 +230,12 @@ variable "oidc_provider_arn" {
   default     = null
 }
 
+variable "rpc_ws_url_secret_arns" {
+  description = "Map of RPC WebSocket URL env var names to Secrets Manager valueFrom strings for the indexer. Each value must be a full ECS secrets valueFrom reference (e.g. \"arn:aws:secretsmanager:eu-west-1:123456789012:secret:raksha/stage/rpc-AbCdEf:ETH_WS_URL::\"). Without this the indexer falls back to mock/synthetic data."
+  type        = map(string)
+  default     = {}
+}
+
 variable "tags" {
   description = "Additional tags"
   type        = map(string)
