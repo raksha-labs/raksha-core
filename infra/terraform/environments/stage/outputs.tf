@@ -28,6 +28,11 @@ output "redis_url_secret_arn" {
   description = "REDIS_URL secret ARN"
 }
 
+output "raw_database_url_secret_arn" {
+  value       = var.enable_managed_data ? module.data_prod[0].raw_database_url_secret_arn : null
+  description = "RAW_DATABASE_URL secret ARN"
+}
+
 output "waf_arn" {
   value       = var.enable_waf && module.compute.public_alb_arn != null ? aws_wafv2_web_acl.public[0].arn : null
   description = "WAF ARN"

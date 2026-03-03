@@ -195,4 +195,4 @@ Access:
 For production deployment to AWS ECS:
 - See `terraform/` directory for infrastructure-as-code
 - Use `service-catalog.yaml` for service definitions
-- Database schema is in `sql/schema.sql` and `sql/seed_data.sql`
+- Database bootstrap files are in `sql/bootstrap/` (`core_schema.sql`, `history_schema.sql`, `seed_sources.sql`, `seed_patterns.sql`, and `raw_schema.sql` for `raksha_raw`)

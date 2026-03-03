@@ -81,8 +81,9 @@ module "data_prod" {
 }
 
 locals {
-  database_url_secret_arn = var.enable_managed_data ? module.data_prod[0].database_url_secret_arn : module.data_test[0].database_url_secret_arn
-  redis_url_secret_arn    = var.enable_managed_data ? module.data_prod[0].redis_url_secret_arn : module.data_test[0].redis_url_secret_arn
+  database_url_secret_arn     = var.enable_managed_data ? module.data_prod[0].database_url_secret_arn : module.data_test[0].database_url_secret_arn
+  raw_database_url_secret_arn = var.enable_managed_data ? module.data_prod[0].raw_database_url_secret_arn : module.data_test[0].raw_database_url_secret_arn
+  redis_url_secret_arn        = var.enable_managed_data ? module.data_prod[0].redis_url_secret_arn : module.data_test[0].redis_url_secret_arn
 
   service_static_env = {
     orchestrator = {
@@ -103,10 +104,25 @@ locals {
   service_secret_env = {
     for service_name in keys(local.service_catalog_map) :
     service_name => {
-      DATABASE_URL = "${local.database_url_secret_arn}:DATABASE_URL::"
-      REDIS_URL    = "${local.redis_url_secret_arn}:REDIS_URL::"
+      DATABASE_URL     = "${local.database_url_secret_arn}:DATABASE_URL::"
+      RAW_DATABASE_URL = "${local.raw_database_url_secret_arn}:RAW_DATABASE_URL::"
+      REDIS_URL        = "${local.redis_url_secret_arn}:REDIS_URL::"
     }
   }
+}
+
+locals {
+  # streams_enabled = true sets desired_count = 1 for the full data pipeline.
+  # service_desired_counts can override individual services on top of this.
+  streams_desired = var.streams_enabled ? {
+    indexer          = 1
+    detector         = 1
+    orchestrator     = 1
+    finality         = 1
+    "history-worker" = 1
+  } : {}
+
+  effective_desired_counts = merge(local.streams_desired, var.service_desired_counts)
 }
 
 module "compute" {
@@ -115,7 +131,7 @@ module "compute" {
   environment                  = var.environment
   aws_region                   = var.aws_region
   service_catalog              = local.service_catalog_map
-  service_desired_counts       = var.service_desired_counts
+  service_desired_counts       = local.effective_desired_counts
   service_cpu_memory           = var.service_cpu_memory
   compute_mode                 = var.compute_mode
   vpc_id                       = module.network.vpc_id
@@ -151,6 +167,7 @@ locals {
     var.environment,
     var.image_tag,
     local.database_url_secret_arn,
+    local.raw_database_url_secret_arn,
     local.redis_url_secret_arn,
     module.compute.service_discovery_namespace_name
   ]))
@@ -168,6 +185,14 @@ resource "aws_ssm_parameter" "core_redis_url_secret_arn" {
   name      = "/raksha/${var.environment}/core/redis_url_secret_arn"
   type      = "String"
   value     = local.redis_url_secret_arn
+  overwrite = true
+  tags      = var.tags
+}
+
+resource "aws_ssm_parameter" "core_raw_database_url_secret_arn" {
+  name      = "/raksha/${var.environment}/core/raw_database_url_secret_arn"
+  type      = "String"
+  value     = local.raw_database_url_secret_arn
   overwrite = true
   tags      = var.tags
 }

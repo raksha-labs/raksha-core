@@ -30,10 +30,11 @@
   - 30 second full resync fallback
 - Raw-first ordering is enforced for stream supervisor events:
   1. parse payload
-  2. persist one global row in `raw_events`
-  3. fan out tenant-scoped `UnifiedEvent`s to Redis
+  2. persist immutable raw payload in `raksha_raw.raw_ingest.*` (when `RAW_DATABASE_URL` is configured)
+  3. persist compact operational row in `ingest_operational_events`
+  4. fan out tenant-scoped `UnifiedEvent`s to Redis
 - `UnifiedEvent` schema remains unchanged; stream metadata is carried in payload (`raw_persisted`, `stream_config_id`, parser context).
-- `quote` and `trade` events are automatically purged after 5 minutes (rolling retention). Non-tick events such as `evm_log`/`swap` are not purged by this job.
+- `quote` and `trade` events are automatically purged from the operational ingest table on rolling retention.
 
 ## System Topology
 
@@ -66,10 +67,11 @@ flowchart LR
 
 ## Core Data Stores
 
-- PostgreSQL tables (via `infra/sql/*.sql`):
+- PostgreSQL tables (via `infra/sql/bootstrap/*.sql`):
   - Core: `detections`, `alerts`, `alert_lifecycle_events`, `finality_state`
   - Generic incident model: `incidents`, `incident_events`, `incident_context_snapshots`
   - Pattern system: `tenant_data_sources`, `tenant_pattern_configs`, `pattern_state`, `pattern_snapshots`
+  - Ingestion operational bus: `ingest_operational_events`, `ingest_activity_1m`, `ingest_latest_samples`
   - Tenant isolation: `detections.tenant_id`, `alerts.tenant_id`
   - Quota management: `usage_events`, `alert_delivery_attempts`
 - Redis streams:

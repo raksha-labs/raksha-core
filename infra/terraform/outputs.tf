@@ -65,6 +65,12 @@ output "redis_url_secret_arn" {
   sensitive   = true
 }
 
+output "raw_database_url_secret_arn" {
+  value       = aws_secretsmanager_secret.raw_database_url.arn
+  description = "ARN of Secrets Manager secret for RAW_DATABASE_URL"
+  sensitive   = true
+}
+
 output "ecs_task_execution_role_arn" {
   value       = aws_iam_role.ecs_task_execution.arn
   description = "ARN of ECS task execution role"

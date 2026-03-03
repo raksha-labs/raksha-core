@@ -40,13 +40,27 @@ variable "service_desired_counts" {
   default     = {}
 }
 
+variable "streams_enabled" {
+  description = "Enable stream-processing services (indexer, detector, orchestrator, finality, history-worker). Off by default in test — flip to true when testing the ingestion/detection pipeline."
+  type        = bool
+  default     = false
+}
+
 variable "service_cpu_memory" {
   description = "Optional CPU/memory overrides by service"
   type = map(object({
     cpu    = number
     memory = number
   }))
-  default = {}
+  # Reduced sizes for the single test EC2 instance. Memory is the hard ECS
+  # limit per task; CPU is a soft reservation share only.
+  default = {
+    indexer          = { cpu = 128, memory = 256 }
+    detector         = { cpu = 128, memory = 256 }
+    orchestrator     = { cpu = 128, memory = 256 }
+    finality         = { cpu = 128, memory = 256 }
+    "history-worker" = { cpu = 128, memory = 256 }
+  }
 }
 
 variable "log_retention_days" {
@@ -131,7 +145,9 @@ variable "fargate_spot_scaling_classes" {
 variable "ec2_instance_type" {
   description = "ECS instance type in EC2 mode"
   type        = string
-  default     = "t4g.micro"
+  # t4g.medium (4 GB ARM) fits all platform + core services at reduced test
+  # sizes. t4g.micro (1 GB) is too small once more than 3 services are live.
+  default     = "t4g.medium"
 }
 
 variable "ec2_desired_capacity" {

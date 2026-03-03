@@ -6,7 +6,7 @@
 --
 -- Pipeline order:
 --   1) Source catalog + stream configs
---   2) Raw feed event landing table (raw_events)
+--   2) Operational ingestion event bus
 --   3) Pattern catalog/config + runtime state
 --   4) Detections -> Alerts -> Alert lifecycle
 --   5) Finality + analytics/support tables
@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS data_sources (
     scope             TEXT NOT NULL DEFAULT 'global'
         CHECK (scope IN ('global', 'tenant')),
     owner_tenant_id   TEXT,
+    promoted_at       TIMESTAMPTZ,
+    promoted_from_tenant_id TEXT,
+    active_sharing_offer_id UUID,
     enabled           BOOLEAN NOT NULL DEFAULT TRUE,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CHECK (
@@ -96,6 +99,483 @@ CREATE TABLE IF NOT EXISTS source_stream_tenant_targets (
 CREATE INDEX IF NOT EXISTS idx_source_stream_tenant_targets_tenant_enabled
     ON source_stream_tenant_targets (tenant_id, enabled);
 
+CREATE TABLE IF NOT EXISTS source_requests (
+    request_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    requesting_tenant_id  TEXT NOT NULL,
+    requested_source_type TEXT NOT NULL,
+    requested_stream_spec JSONB NOT NULL DEFAULT '{}'::jsonb,
+    justification         TEXT,
+    status                TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved_private', 'approved_global', 'rejected', 'cancelled')),
+    resolved_source_id    TEXT REFERENCES data_sources(source_id) ON DELETE SET NULL,
+    review_notes          TEXT,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at           TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_requests_tenant_status
+    ON source_requests (requesting_tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_source_requests_status_created
+    ON source_requests (status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS source_sharing_offers (
+    offer_id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_id                      TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
+    offering_tenant_id             TEXT NOT NULL,
+    status                         TEXT NOT NULL DEFAULT 'draft'
+        CHECK (status IN ('draft', 'active', 'paused', 'closed', 'promoted', 'cancelled')),
+    title                          TEXT NOT NULL,
+    description                    TEXT,
+    auto_promote_at_subscribers    INTEGER CHECK (auto_promote_at_subscribers IS NULL OR auto_promote_at_subscribers > 0),
+    published_at                   TIMESTAMPTZ,
+    closed_at                      TIMESTAMPTZ,
+    created_at                     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_sharing_offers_source
+    ON source_sharing_offers (source_id);
+CREATE INDEX IF NOT EXISTS idx_source_sharing_offers_status_published
+    ON source_sharing_offers (status, published_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_sharing_offers_active_source
+    ON source_sharing_offers (source_id)
+    WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS source_sharing_consents (
+    consent_id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    offer_id                UUID NOT NULL REFERENCES source_sharing_offers(offer_id) ON DELETE CASCADE,
+    subscribing_tenant_id   TEXT NOT NULL,
+    status                  TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'revoked', 'blocked')),
+    accepted_at             TIMESTAMPTZ,
+    revoked_at              TIMESTAMPTZ,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (offer_id, subscribing_tenant_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_sharing_consents_tenant_status
+    ON source_sharing_consents (subscribing_tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_source_sharing_consents_offer_status
+    ON source_sharing_consents (offer_id, status);
+
+CREATE TABLE IF NOT EXISTS source_sharing_offer_audit_log (
+    audit_id          BIGSERIAL PRIMARY KEY,
+    entity_type       TEXT NOT NULL CHECK (entity_type IN ('offer', 'consent', 'request', 'promotion')),
+    entity_id         TEXT NOT NULL,
+    from_status       TEXT,
+    to_status         TEXT,
+    actor_tenant_id   TEXT,
+    actor_user_id     TEXT,
+    reason            TEXT,
+    metadata          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_sharing_offer_audit_entity
+    ON source_sharing_offer_audit_log (entity_type, entity_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS source_promotion_outbox (
+    event_id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    offer_id              UUID NOT NULL REFERENCES source_sharing_offers(offer_id) ON DELETE CASCADE,
+    source_id             TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
+    old_owner_tenant_id   TEXT,
+    event_type            TEXT NOT NULL DEFAULT 'source_promoted'
+        CHECK (event_type IN ('source_promoted')),
+    status                TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+    attempts              INTEGER NOT NULL DEFAULT 0,
+    last_error            TEXT,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (offer_id, event_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_promotion_outbox_status_created
+    ON source_promotion_outbox (status, created_at);
+
+-- Idempotent column migration: add active_sharing_offer_id to data_sources if
+-- the table was created before this column was introduced.
+ALTER TABLE data_sources
+    ADD COLUMN IF NOT EXISTS active_sharing_offer_id UUID;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'fk_data_sources_active_sharing_offer'
+    ) THEN
+        ALTER TABLE data_sources
+            ADD CONSTRAINT fk_data_sources_active_sharing_offer
+            FOREIGN KEY (active_sharing_offer_id)
+            REFERENCES source_sharing_offers(offer_id)
+            ON DELETE SET NULL;
+    END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION fn_source_sharing_set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION fn_validate_source_sharing_offer_owner()
+RETURNS TRIGGER AS $$
+DECLARE
+    source_owner TEXT;
+    source_scope TEXT;
+BEGIN
+    IF NEW.status IN ('draft', 'active', 'paused') THEN
+        SELECT owner_tenant_id, scope
+        INTO source_owner, source_scope
+        FROM data_sources
+        WHERE source_id = NEW.source_id;
+
+        IF source_scope IS NULL THEN
+            RAISE EXCEPTION 'source_not_found';
+        END IF;
+        IF source_scope <> 'tenant' THEN
+            RAISE EXCEPTION 'source_not_tenant_owned';
+        END IF;
+        IF source_owner IS DISTINCT FROM NEW.offering_tenant_id THEN
+            RAISE EXCEPTION 'source_not_owned_by_offering_tenant';
+        END IF;
+    END IF;
+
+    IF NEW.status = 'active' AND NEW.published_at IS NULL THEN
+        NEW.published_at := NOW();
+    END IF;
+    IF NEW.status IN ('closed', 'promoted', 'cancelled') AND NEW.closed_at IS NULL THEN
+        NEW.closed_at := NOW();
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION fn_sync_data_source_active_offer_pointer()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.status = 'active' THEN
+        UPDATE data_sources
+        SET active_sharing_offer_id = NEW.offer_id
+        WHERE source_id = NEW.source_id;
+    ELSIF TG_OP = 'UPDATE' AND OLD.status = 'active' AND NEW.status <> 'active' THEN
+        UPDATE data_sources
+        SET active_sharing_offer_id = NULL
+        WHERE source_id = NEW.source_id
+          AND active_sharing_offer_id = NEW.offer_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION fn_log_source_sharing_offer_status_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM NEW.status THEN
+        INSERT INTO source_sharing_offer_audit_log (
+            entity_type,
+            entity_id,
+            from_status,
+            to_status,
+            actor_tenant_id,
+            metadata
+        )
+        VALUES (
+            'offer',
+            NEW.offer_id::text,
+            CASE WHEN TG_OP = 'INSERT' THEN NULL ELSE OLD.status END,
+            NEW.status,
+            NEW.offering_tenant_id,
+            jsonb_build_object('source_id', NEW.source_id)
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION fn_validate_source_sharing_consent()
+RETURNS TRIGGER AS $$
+DECLARE
+    offer_owner TEXT;
+    offer_status TEXT;
+BEGIN
+    SELECT offering_tenant_id, status
+    INTO offer_owner, offer_status
+    FROM source_sharing_offers
+    WHERE offer_id = NEW.offer_id;
+
+    IF offer_owner IS NULL THEN
+        RAISE EXCEPTION 'sharing_offer_not_found';
+    END IF;
+    IF NEW.subscribing_tenant_id = offer_owner THEN
+        RAISE EXCEPTION 'owner_cannot_subscribe_own_offer';
+    END IF;
+    IF NEW.status = 'active' AND offer_status NOT IN ('active', 'promoted') THEN
+        RAISE EXCEPTION 'offer_not_subscribable';
+    END IF;
+
+    IF NEW.status = 'active' AND NEW.accepted_at IS NULL THEN
+        NEW.accepted_at := NOW();
+    END IF;
+    IF NEW.status = 'revoked' AND NEW.revoked_at IS NULL THEN
+        NEW.revoked_at := NOW();
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION fn_log_source_sharing_consent_status_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM NEW.status THEN
+        INSERT INTO source_sharing_offer_audit_log (
+            entity_type,
+            entity_id,
+            from_status,
+            to_status,
+            actor_tenant_id,
+            metadata
+        )
+        VALUES (
+            'consent',
+            NEW.consent_id::text,
+            CASE WHEN TG_OP = 'INSERT' THEN NULL ELSE OLD.status END,
+            NEW.status,
+            NEW.subscribing_tenant_id,
+            jsonb_build_object('offer_id', NEW.offer_id)
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION fn_promote_source_to_global(p_offer_id UUID)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_offer source_sharing_offers%ROWTYPE;
+    v_old_owner TEXT;
+BEGIN
+    SELECT *
+    INTO v_offer
+    FROM source_sharing_offers
+    WHERE offer_id = p_offer_id
+    FOR UPDATE;
+
+    IF v_offer.offer_id IS NULL THEN
+        RETURN FALSE;
+    END IF;
+    IF v_offer.status = 'promoted' THEN
+        RETURN TRUE;
+    END IF;
+    IF v_offer.status NOT IN ('active', 'paused') THEN
+        RETURN FALSE;
+    END IF;
+
+    SELECT owner_tenant_id
+    INTO v_old_owner
+    FROM data_sources
+    WHERE source_id = v_offer.source_id
+    FOR UPDATE;
+
+    UPDATE data_sources
+    SET scope = 'global',
+        owner_tenant_id = NULL,
+        promoted_at = NOW(),
+        promoted_from_tenant_id = COALESCE(promoted_from_tenant_id, v_old_owner),
+        active_sharing_offer_id = NULL
+    WHERE source_id = v_offer.source_id;
+
+    UPDATE source_sharing_offers
+    SET status = 'promoted',
+        closed_at = NOW(),
+        updated_at = NOW()
+    WHERE offer_id = p_offer_id;
+
+    INSERT INTO source_promotion_outbox (
+        offer_id,
+        source_id,
+        old_owner_tenant_id,
+        event_type,
+        status
+    )
+    VALUES (
+        p_offer_id,
+        v_offer.source_id,
+        v_old_owner,
+        'source_promoted',
+        'pending'
+    )
+    ON CONFLICT (offer_id, event_type) DO NOTHING;
+
+    INSERT INTO source_sharing_offer_audit_log (
+        entity_type,
+        entity_id,
+        from_status,
+        to_status,
+        actor_tenant_id,
+        metadata
+    )
+    VALUES (
+        'promotion',
+        p_offer_id::text,
+        v_offer.status,
+        'promoted',
+        v_old_owner,
+        jsonb_build_object('source_id', v_offer.source_id)
+    );
+
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION fn_sync_tenant_subscription_from_consent()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_source_id TEXT;
+    v_threshold INTEGER;
+    v_active_count INTEGER;
+BEGIN
+    SELECT source_id, auto_promote_at_subscribers
+    INTO v_source_id, v_threshold
+    FROM source_sharing_offers
+    WHERE offer_id = NEW.offer_id;
+
+    IF v_source_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    IF NEW.status = 'active' THEN
+        INSERT INTO tenant_data_sources (tenant_id, source_id, enabled, override_config, created_at)
+        VALUES (NEW.subscribing_tenant_id, v_source_id, TRUE, '{}'::jsonb, NOW())
+        ON CONFLICT (tenant_id, source_id) DO UPDATE SET
+            enabled = TRUE;
+
+        INSERT INTO source_stream_tenant_targets (
+            stream_config_id,
+            tenant_id,
+            enabled,
+            created_by,
+            created_at
+        )
+        SELECT
+            ssc.stream_config_id,
+            NEW.subscribing_tenant_id,
+            TRUE,
+            'source-sharing',
+            NOW()
+        FROM source_stream_configs ssc
+        WHERE ssc.source_id = v_source_id
+        ON CONFLICT (stream_config_id, tenant_id) DO UPDATE SET
+            enabled = TRUE,
+            updated_by = 'source-sharing',
+            updated_at = NOW();
+
+        IF v_threshold IS NOT NULL THEN
+            SELECT COUNT(*)::INTEGER
+            INTO v_active_count
+            FROM source_sharing_consents
+            WHERE offer_id = NEW.offer_id
+              AND status = 'active';
+
+            IF v_active_count >= v_threshold THEN
+                PERFORM fn_promote_source_to_global(NEW.offer_id);
+            END IF;
+        END IF;
+    ELSIF TG_OP = 'UPDATE' AND OLD.status = 'active' AND NEW.status <> 'active' THEN
+        UPDATE tenant_data_sources
+        SET enabled = FALSE
+        WHERE tenant_id = NEW.subscribing_tenant_id
+          AND source_id = v_source_id;
+
+        UPDATE source_stream_tenant_targets stt
+        SET enabled = FALSE,
+            updated_by = 'source-sharing',
+            updated_at = NOW()
+        FROM source_stream_configs ssc
+        WHERE ssc.stream_config_id = stt.stream_config_id
+          AND ssc.source_id = v_source_id
+          AND stt.tenant_id = NEW.subscribing_tenant_id;
+    END IF;
+
+    PERFORM pg_notify('source_stream_config_changed', 'source-sharing');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION fn_source_sharing_block_audit_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'source_sharing_offer_audit_log is append-only';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_source_requests_set_updated_at ON source_requests;
+CREATE TRIGGER trg_source_requests_set_updated_at
+    BEFORE UPDATE ON source_requests
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_source_sharing_set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_source_sharing_offers_set_updated_at ON source_sharing_offers;
+CREATE TRIGGER trg_source_sharing_offers_set_updated_at
+    BEFORE UPDATE ON source_sharing_offers
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_source_sharing_set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_source_sharing_offers_validate_owner ON source_sharing_offers;
+CREATE TRIGGER trg_source_sharing_offers_validate_owner
+    BEFORE INSERT OR UPDATE ON source_sharing_offers
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_validate_source_sharing_offer_owner();
+
+DROP TRIGGER IF EXISTS trg_source_sharing_offers_sync_pointer ON source_sharing_offers;
+CREATE TRIGGER trg_source_sharing_offers_sync_pointer
+    AFTER INSERT OR UPDATE ON source_sharing_offers
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_sync_data_source_active_offer_pointer();
+
+DROP TRIGGER IF EXISTS trg_source_sharing_offers_audit ON source_sharing_offers;
+CREATE TRIGGER trg_source_sharing_offers_audit
+    AFTER INSERT OR UPDATE ON source_sharing_offers
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_log_source_sharing_offer_status_change();
+
+DROP TRIGGER IF EXISTS trg_source_sharing_consents_set_updated_at ON source_sharing_consents;
+CREATE TRIGGER trg_source_sharing_consents_set_updated_at
+    BEFORE UPDATE ON source_sharing_consents
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_source_sharing_set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_source_sharing_consents_validate ON source_sharing_consents;
+CREATE TRIGGER trg_source_sharing_consents_validate
+    BEFORE INSERT OR UPDATE ON source_sharing_consents
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_validate_source_sharing_consent();
+
+DROP TRIGGER IF EXISTS trg_source_sharing_consents_audit ON source_sharing_consents;
+CREATE TRIGGER trg_source_sharing_consents_audit
+    AFTER INSERT OR UPDATE ON source_sharing_consents
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_log_source_sharing_consent_status_change();
+
+DROP TRIGGER IF EXISTS trg_source_sharing_consents_sync ON source_sharing_consents;
+CREATE TRIGGER trg_source_sharing_consents_sync
+    AFTER INSERT OR UPDATE OF status ON source_sharing_consents
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_sync_tenant_subscription_from_consent();
+
+DROP TRIGGER IF EXISTS trg_source_sharing_audit_block_update ON source_sharing_offer_audit_log;
+CREATE TRIGGER trg_source_sharing_audit_block_update
+    BEFORE UPDATE OR DELETE ON source_sharing_offer_audit_log
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_source_sharing_block_audit_mutation();
+
 CREATE TABLE IF NOT EXISTS source_required_pairs (
     source_id             TEXT        NOT NULL,
     market_key            TEXT        NOT NULL,
@@ -108,57 +588,6 @@ CREATE TABLE IF NOT EXISTS source_required_pairs (
 CREATE INDEX IF NOT EXISTS idx_source_required_pairs_source_market
     ON source_required_pairs (source_id, market_key);
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 2) Raw Feed Event Landing (first write in ingestion pipeline)
--- ─────────────────────────────────────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS raw_events (
-    raw_event_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    stream_config_id  UUID,
-    source_id         TEXT        NOT NULL,
-    source_type       TEXT        NOT NULL,
-    event_type        TEXT        NOT NULL,
-    event_id          TEXT,
-    market_key        TEXT,
-    asset_pair        TEXT,
-    chain_id          BIGINT,
-    block_number      BIGINT,
-    tx_hash           TEXT,
-    log_index         BIGINT,
-    topic0            TEXT,
-    price             DOUBLE PRECISION,
-    payload_event_ts  TIMESTAMPTZ,
-    received_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    observed_at       TIMESTAMPTZ NOT NULL,
-    parse_status      TEXT        NOT NULL CHECK (parse_status IN ('parsed', 'partial', 'raw_only', 'error')),
-    parse_error       TEXT,
-    payload           JSONB       NOT NULL,
-    normalized_fields JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    dedup_key         TEXT,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_raw_events_source_observed
-    ON raw_events (source_id, observed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_raw_events_source_market_observed
-    ON raw_events (source_id, market_key, observed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_raw_events_stream_observed
-    ON raw_events (stream_config_id, observed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_raw_events_event_type_observed
-    ON raw_events (event_type, observed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_raw_events_market_observed
-    ON raw_events (market_key, observed_at DESC)
-    WHERE market_key IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_raw_events_tx
-    ON raw_events (tx_hash, log_index)
-    WHERE tx_hash IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_events_event_id
-    ON raw_events (event_id)
-    WHERE event_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_events_dedup
-    ON raw_events (dedup_key)
-    WHERE dedup_key IS NOT NULL;
-
 CREATE TABLE IF NOT EXISTS data_source_health (
     tenant_id       TEXT        NOT NULL,
     source_id       TEXT        NOT NULL,
@@ -168,6 +597,129 @@ CREATE TABLE IF NOT EXISTS data_source_health (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, source_id)
 );
+
+-- Ingestion operational bus (lean envelope + raw pointers)
+CREATE TABLE IF NOT EXISTS ingest_operational_events (
+    ingest_event_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    stream_id           UUID,
+    source_id           TEXT        NOT NULL,
+    source_type         TEXT        NOT NULL,
+    tenant_id           TEXT,
+    event_type          TEXT        NOT NULL,
+    event_id            TEXT,
+    market_key          TEXT,
+    asset_pair          TEXT,
+    chain_id            BIGINT,
+    block_number        BIGINT,
+    tx_hash             TEXT,
+    log_index           BIGINT,
+    topic0              TEXT,
+    price               DOUBLE PRECISION,
+    payload_event_ts    TIMESTAMPTZ,
+    observed_at         TIMESTAMPTZ NOT NULL,
+    parse_status        TEXT        NOT NULL CHECK (parse_status IN ('parsed', 'partial', 'raw_only', 'error')),
+    parse_error         TEXT,
+    payload             JSONB       NOT NULL,
+    normalized_fields   JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    dedup_key           TEXT,
+    raw_ref_type        TEXT,
+    raw_ref_id          TEXT,
+    raw_s3_uri          TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_source_observed
+    ON ingest_operational_events (source_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_market_observed
+    ON ingest_operational_events (market_key, observed_at DESC)
+    WHERE market_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_event_type_observed
+    ON ingest_operational_events (event_type, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_stream_observed
+    ON ingest_operational_events (stream_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_tx
+    ON ingest_operational_events (tx_hash, log_index)
+    WHERE tx_hash IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_operational_event_id
+    ON ingest_operational_events (event_id)
+    WHERE event_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_operational_dedup
+    ON ingest_operational_events (dedup_key)
+    WHERE dedup_key IS NOT NULL;
+
+CREATE OR REPLACE VIEW source_registry AS
+SELECT
+    ds.source_id,
+    ds.source_type,
+    ds.source_name,
+    ds.connection_config,
+    ds.filters,
+    ds.scope,
+    ds.owner_tenant_id,
+    ds.enabled,
+    ds.created_at
+FROM data_sources ds;
+
+CREATE OR REPLACE VIEW source_stream_registry AS
+SELECT
+    ssc.stream_config_id AS stream_id,
+    ssc.source_id,
+    ssc.connector_mode,
+    ssc.stream_name,
+    ssc.subscription_key,
+    ssc.event_type,
+    ssc.parser_name,
+    ssc.market_key,
+    ssc.asset_pair,
+    ssc.filter_config,
+    ssc.auth_secret_ref,
+    ssc.auth_config,
+    ssc.payload_ts_path,
+    ssc.payload_ts_unit,
+    ssc.poll_interval_ms,
+    ssc.enabled,
+    ssc.created_by,
+    ssc.created_at,
+    ssc.updated_by,
+    ssc.updated_at
+FROM source_stream_configs ssc;
+
+CREATE OR REPLACE VIEW tenant_stream_targets AS
+SELECT
+    stt.stream_config_id AS stream_id,
+    stt.tenant_id,
+    stt.enabled,
+    stt.created_by,
+    stt.created_at,
+    stt.updated_by,
+    stt.updated_at
+FROM source_stream_tenant_targets stt;
+
+CREATE OR REPLACE VIEW ingest_activity_1m AS
+SELECT
+    ioe.source_id,
+    ioe.market_key,
+    ioe.event_type,
+    date_trunc('minute', ioe.observed_at) AS bucket_1m,
+    COUNT(*)::bigint AS events_count,
+    MAX(ioe.observed_at) AS last_observed_at
+FROM ingest_operational_events ioe
+GROUP BY ioe.source_id, ioe.market_key, ioe.event_type, date_trunc('minute', ioe.observed_at);
+
+CREATE OR REPLACE VIEW ingest_latest_samples AS
+SELECT DISTINCT ON (ioe.source_id, COALESCE(ioe.market_key, ''), ioe.event_type)
+    ioe.source_id,
+    ioe.market_key,
+    ioe.event_type,
+    ioe.event_id,
+    ioe.price,
+    ioe.observed_at,
+    ioe.payload,
+    ioe.raw_ref_type,
+    ioe.raw_ref_id,
+    ioe.raw_s3_uri
+FROM ingest_operational_events ioe
+ORDER BY ioe.source_id, COALESCE(ioe.market_key, ''), ioe.event_type, ioe.observed_at DESC;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 3) Pattern Catalog, Tenant Bindings, and Runtime State
@@ -712,6 +1264,39 @@ CREATE INDEX IF NOT EXISTS idx_history_ml_feature_registry_case
 CREATE INDEX IF NOT EXISTS idx_history_ml_feature_registry_tenant_feature
     ON history.ml_feature_registry (tenant_id, feature_set_version, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS history.dataset_manifests (
+    manifest_id        TEXT PRIMARY KEY,
+    tenant_id          TEXT NOT NULL,
+    case_id            TEXT REFERENCES history.cases(case_id) ON DELETE SET NULL,
+    dataset_version    TEXT NOT NULL,
+    checksum           TEXT NOT NULL,
+    source_export_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    payload            JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_history_dataset_manifests_tenant_version
+    ON history.dataset_manifests (tenant_id, dataset_version, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_dataset_manifests_case
+    ON history.dataset_manifests (case_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS history.case_data_provenance (
+    provenance_id   TEXT PRIMARY KEY,
+    case_id         TEXT NOT NULL REFERENCES history.cases(case_id) ON DELETE CASCADE,
+    tenant_id       TEXT NOT NULL,
+    provider        TEXT NOT NULL,
+    query_window    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    hash_chain      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    source_manifest TEXT,
+    metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_history_case_data_provenance_case
+    ON history.case_data_provenance (case_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_case_data_provenance_tenant_provider
+    ON history.case_data_provenance (tenant_id, provider, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS history.ingest_offsets (
     source_name   TEXT PRIMARY KEY,
     last_seen_ts  TIMESTAMPTZ NOT NULL DEFAULT to_timestamp(0),
@@ -723,7 +1308,7 @@ CREATE TABLE IF NOT EXISTS history.ingest_offsets (
 -- Notes
 -- ============================================================================
 -- For high-volume production workloads, consider:
--- 1. Time-based partitioning on raw_events, detections, alerts
+-- 1. Time-based partitioning on ingest_operational_events, detections, alerts
 -- 2. Retention/archive jobs for historical rows
 -- 3. Connection pooling (PgBouncer)
 -- 4. Read replicas for analytics

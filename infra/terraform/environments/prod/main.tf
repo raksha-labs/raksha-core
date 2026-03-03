@@ -60,8 +60,9 @@ module "data_prod" {
 }
 
 locals {
-  database_url_secret_arn = module.data_prod.database_url_secret_arn
-  redis_url_secret_arn    = module.data_prod.redis_url_secret_arn
+  database_url_secret_arn     = module.data_prod.database_url_secret_arn
+  raw_database_url_secret_arn = module.data_prod.raw_database_url_secret_arn
+  redis_url_secret_arn        = module.data_prod.redis_url_secret_arn
 
   service_static_env = {
     orchestrator = {
@@ -82,8 +83,9 @@ locals {
   service_secret_env = {
     for service_name in keys(local.service_catalog_map) :
     service_name => {
-      DATABASE_URL = "${local.database_url_secret_arn}:DATABASE_URL::"
-      REDIS_URL    = "${local.redis_url_secret_arn}:REDIS_URL::"
+      DATABASE_URL     = "${local.database_url_secret_arn}:DATABASE_URL::"
+      RAW_DATABASE_URL = "${local.raw_database_url_secret_arn}:RAW_DATABASE_URL::"
+      REDIS_URL        = "${local.redis_url_secret_arn}:REDIS_URL::"
     }
   }
 }
@@ -126,6 +128,7 @@ locals {
     var.environment,
     var.image_tag,
     local.database_url_secret_arn,
+    local.raw_database_url_secret_arn,
     local.redis_url_secret_arn,
     module.compute.service_discovery_namespace_name
   ]))
@@ -143,6 +146,14 @@ resource "aws_ssm_parameter" "core_redis_url_secret_arn" {
   name      = "/raksha/${var.environment}/core/redis_url_secret_arn"
   type      = "String"
   value     = local.redis_url_secret_arn
+  overwrite = true
+  tags      = var.tags
+}
+
+resource "aws_ssm_parameter" "core_raw_database_url_secret_arn" {
+  name      = "/raksha/${var.environment}/core/raw_database_url_secret_arn"
+  type      = "String"
+  value     = local.raw_database_url_secret_arn
   overwrite = true
   tags      = var.tags
 }

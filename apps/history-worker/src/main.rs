@@ -84,6 +84,24 @@ async fn main() -> Result<()> {
 
     validate_schema(&client).await?;
 
+    // Optional raw database connectivity check for ingestion provenance workflows.
+    if let Ok(raw_database_url) = std::env::var("RAW_DATABASE_URL") {
+        match tokio_postgres::connect(&raw_database_url, NoTls).await {
+            Ok((_raw_client, raw_connection)) => {
+                tokio::spawn(async move {
+                    if let Err(err) = raw_connection.await {
+                        tracing::warn!(error = ?err, "history-worker raw postgres background connection error");
+                    }
+                });
+                info!("history-worker raw database connectivity check passed");
+            }
+            Err(err) => warn!(
+                error = ?err,
+                "history-worker RAW_DATABASE_URL configured but connection failed"
+            ),
+        }
+    }
+
     if let Some(status) = health_status.as_ref() {
         let mut health = status.write().await;
         health.postgres_connected = true;
@@ -175,6 +193,8 @@ async fn validate_schema(client: &Client) -> Result<()> {
         ("history", "case_alert_links"),
         ("history", "replay_catalog"),
         ("history", "ml_feature_registry"),
+        ("history", "dataset_manifests"),
+        ("history", "case_data_provenance"),
         ("history", "ingest_offsets"),
     ];
 
@@ -192,7 +212,7 @@ async fn validate_schema(client: &Client) -> Result<()> {
             .await?;
         if exists.is_none() {
             anyhow::bail!(
-                "missing required table {}.{}. Apply schema.sql / upgrade_history_intelligence.sql first",
+                "missing required table {}.{}. Apply bootstrap/core_schema.sql + bootstrap/history_schema.sql first",
                 schema,
                 table
             );

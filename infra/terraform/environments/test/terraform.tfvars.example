@@ -1,6 +1,7 @@
 aws_region            = "eu-west-1"
 environment           = "test"
 compute_mode          = "ec2"
+ec2_instance_type     = "t4g.medium"  # 4 GB ARM — fits all services at reduced test sizes
 enable_managed_data   = false
 budget_limit_usd      = 100
 # Optional cost controls:
@@ -20,10 +21,18 @@ github_allowed_environments = ["test", "stage", "prod"]
 create_oidc_provider  = false
 # oidc_provider_arn   = "arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com"
 
+# Stream-processing services are OFF by default in test (desired_count = 0).
+# Flip to true when you need to test the indexing/detection pipeline.
+streams_enabled = false
+
+# service_desired_counts lets you override individual service counts on top of
+# streams_enabled. Example — run only the indexer:
 # service_desired_counts = {
-#   detector = 2
+#   indexer = 1
 # }
 
+# service_cpu_memory defaults to 128 CPU / 256 MB per service in test.
+# Override only if a service is OOM-killed or needs more headroom.
 # service_cpu_memory = {
-#   detector = { cpu = 1024, memory = 2048 }
+#   detector = { cpu = 512, memory = 512 }
 # }

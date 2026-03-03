@@ -4,7 +4,9 @@ use anyhow::Result;
 use futures_util::future::poll_fn;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use state_manager::{EffectiveStreamConfig, PostgresRepository, RedisStreamPublisher};
+use state_manager::{
+    EffectiveStreamConfig, PostgresRawRepository, PostgresRepository, RedisStreamPublisher,
+};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -31,17 +33,31 @@ pub async fn run_stream_supervisor(
     database_url: String,
     purge_enabled: bool,
 ) -> Result<()> {
+    let raw_repo = match PostgresRawRepository::from_env().await {
+        Some(Ok(repo)) => Some(repo),
+        Some(Err(error)) => {
+            warn!(error = ?error, "RAW_DATABASE_URL configured but raw repository init failed; continuing without raw writer");
+            None
+        }
+        None => {
+            warn!(
+                "RAW_DATABASE_URL not set; stream supervisor using core operational storage only"
+            );
+            None
+        }
+    };
+
     let mut workers: HashMap<String, WorkerHandle> = HashMap::new();
     let mut notify_rx = spawn_config_notify_listener(database_url);
     let mut reconcile_tick = interval(Duration::from_secs(DEFAULT_RECONCILE_INTERVAL_SECS));
     let mut purge_tick = interval(Duration::from_secs(DEFAULT_PURGE_INTERVAL_SECS));
 
-    reconcile(&repo, &stream, &mut workers).await?;
+    reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await?;
 
     loop {
         tokio::select! {
             _ = reconcile_tick.tick() => {
-                if let Err(error) = reconcile(&repo, &stream, &mut workers).await {
+                if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
                     warn!(error = ?error, "stream supervisor periodic reconcile failed");
                 }
             }
@@ -49,7 +65,7 @@ pub async fn run_stream_supervisor(
                 if signal.is_none() {
                     warn!("stream config notify listener stopped; continuing with periodic reconcile only");
                 }
-                if let Err(error) = reconcile(&repo, &stream, &mut workers).await {
+                if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
                     warn!(error = ?error, "stream supervisor notify-driven reconcile failed");
                 }
             }
@@ -69,6 +85,7 @@ pub async fn run_stream_supervisor(
 
 async fn reconcile(
     repo: &PostgresRepository,
+    raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     workers: &mut HashMap<String, WorkerHandle>,
 ) -> Result<()> {
@@ -104,9 +121,17 @@ async fn reconcile(
         let stream_config_id = runtime_cfg.stream_config_id.clone();
         let source_id = runtime_cfg.source_id.clone();
         let repo_clone = repo.clone();
+        let raw_repo_clone = raw_repo.cloned();
         let stream_clone = stream.clone();
         let join_handle = tokio::spawn(async move {
-            run_stream_worker(runtime_cfg, repo_clone, stream_clone, stop_rx).await;
+            run_stream_worker(
+                runtime_cfg,
+                repo_clone,
+                raw_repo_clone,
+                stream_clone,
+                stop_rx,
+            )
+            .await;
         });
 
         info!(stream_config_id = %stream_config_id, source_id = %source_id, "stream worker started by reconcile");

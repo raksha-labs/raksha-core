@@ -39,6 +39,7 @@ resource "aws_iam_role_policy" "ecs_task_execution_custom" {
         ]
         Resource = [
           aws_secretsmanager_secret.database_url.arn,
+          aws_secretsmanager_secret.raw_database_url.arn,
           aws_secretsmanager_secret.redis_url.arn,
           aws_secretsmanager_secret.db_password.arn,
           "arn:aws:secretsmanager:${var.aws_region}:*:secret:raksha-*"

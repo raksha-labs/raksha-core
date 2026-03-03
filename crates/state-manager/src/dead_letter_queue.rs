@@ -65,7 +65,7 @@ impl DeadLetterQueue {
 
         if exists.is_none() {
             anyhow::bail!(
-                "missing core schema table: dead_letter_queue. Run SQL bootstrap (schema.sql + seed_data.sql)"
+                "missing core schema table: dead_letter_queue. Run SQL bootstrap (bootstrap/core_schema.sql + bootstrap/seed_sources.sql + bootstrap/seed_patterns.sql)"
             );
         }
 

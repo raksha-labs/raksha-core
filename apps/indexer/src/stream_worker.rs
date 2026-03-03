@@ -5,7 +5,10 @@ use chrono::Utc;
 use event_schema::{SourceType, UnifiedEvent};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use state_manager::{PostgresRepository, RedisStreamPublisher, SourceFeedEventRecord};
+use state_manager::{
+    IngestFailureRecord, IngestOperationalEventRecord, PostgresRawRepository, PostgresRepository,
+    RawRecordPointer, RedisStreamPublisher, SourceEnvelopeV1,
+};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -20,6 +23,7 @@ const FX_LOOKUP_FRESHNESS_SECONDS: i64 = 30;
 const FX_CACHE_TTL_SECONDS: i64 = 3;
 const DEFAULT_RPC_LOGS_POLL_INTERVAL_MS: u64 = 2_000;
 const DEFAULT_HTTP_POLL_INTERVAL_MS: u64 = 5_000;
+const DEFAULT_RAW_LANDING_TIMEOUT_MS: u64 = 150;
 const MIN_POLL_INTERVAL_MS: u64 = 200;
 const MAX_POLL_INTERVAL_MS: u64 = 60_000;
 
@@ -57,6 +61,36 @@ pub struct RuntimeStreamConfig {
     pub tenant_targets: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RawLandingStatus {
+    Persisted,
+    Disabled,
+    TimedOut,
+    Failed,
+}
+
+impl RawLandingStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Persisted => "persisted",
+            Self::Disabled => "disabled",
+            Self::TimedOut => "timed_out",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn persisted(self) -> bool {
+        matches!(self, Self::Persisted)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RawLandingOutcome {
+    pointer: Option<RawRecordPointer>,
+    status: RawLandingStatus,
+    error: Option<String>,
+}
+
 fn resolve_poll_interval_duration(configured_ms: Option<u64>, default_ms: u64) -> Duration {
     let resolved_ms = configured_ms
         .unwrap_or(default_ms)
@@ -67,6 +101,7 @@ fn resolve_poll_interval_duration(configured_ms: Option<u64>, default_ms: u64) -
 pub async fn run_stream_worker(
     config: RuntimeStreamConfig,
     repo: PostgresRepository,
+    raw_repo: Option<PostgresRawRepository>,
     stream: RedisStreamPublisher,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -89,13 +124,37 @@ pub async fn run_stream_worker(
 
         let result = match config.connector_mode.as_str() {
             "websocket" => {
-                run_websocket_loop(&config, &repo, &stream, &mut shutdown, &mut fx_cache).await
+                run_websocket_loop(
+                    &config,
+                    &repo,
+                    raw_repo.as_ref(),
+                    &stream,
+                    &mut shutdown,
+                    &mut fx_cache,
+                )
+                .await
             }
             "rpc_logs" => {
-                run_rpc_logs_loop(&config, &repo, &stream, &mut shutdown, &mut fx_cache).await
+                run_rpc_logs_loop(
+                    &config,
+                    &repo,
+                    raw_repo.as_ref(),
+                    &stream,
+                    &mut shutdown,
+                    &mut fx_cache,
+                )
+                .await
             }
             "http_poll" => {
-                run_http_poll_loop(&config, &repo, &stream, &mut shutdown, &mut fx_cache).await
+                run_http_poll_loop(
+                    &config,
+                    &repo,
+                    raw_repo.as_ref(),
+                    &stream,
+                    &mut shutdown,
+                    &mut fx_cache,
+                )
+                .await
             }
             mode => Err(anyhow!("unsupported_connector_mode:{mode}")),
         };
@@ -136,6 +195,7 @@ pub async fn run_stream_worker(
 async fn run_websocket_loop(
     config: &RuntimeStreamConfig,
     repo: &PostgresRepository,
+    raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
     fx_cache: &mut FxRateCache,
@@ -158,7 +218,7 @@ async fn run_websocket_loop(
             }
             raw = connector.next_payload() => {
                 let payload = raw?;
-                process_payload(config, repo, stream, payload, None, fx_cache).await?;
+                process_payload(config, repo, raw_repo, stream, payload, None, fx_cache).await?;
             }
         }
     }
@@ -167,6 +227,7 @@ async fn run_websocket_loop(
 async fn run_rpc_logs_loop(
     config: &RuntimeStreamConfig,
     repo: &PostgresRepository,
+    raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
     fx_cache: &mut FxRateCache,
@@ -192,7 +253,7 @@ async fn run_rpc_logs_loop(
                         map.insert("chainId".to_string(), json!(chain_id));
                     }
                 }
-                process_payload(config, repo, stream, payload, connector.chain_id(), fx_cache).await?;
+                process_payload(config, repo, raw_repo, stream, payload, connector.chain_id(), fx_cache).await?;
             }
         }
     }
@@ -201,6 +262,7 @@ async fn run_rpc_logs_loop(
 async fn run_http_poll_loop(
     config: &RuntimeStreamConfig,
     repo: &PostgresRepository,
+    raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
     fx_cache: &mut FxRateCache,
@@ -220,7 +282,7 @@ async fn run_http_poll_loop(
             }
             raw = connector.next_payload() => {
                 match raw {
-                    Ok(payload) => process_payload(config, repo, stream, payload, None, fx_cache).await?,
+                    Ok(payload) => process_payload(config, repo, raw_repo, stream, payload, None, fx_cache).await?,
                     Err(error) => {
                         warn!(
                             stream_config_id = %config.stream_config_id,
@@ -235,9 +297,72 @@ async fn run_http_poll_loop(
     }
 }
 
+fn raw_landing_timeout_ms() -> u64 {
+    std::env::var("RAW_LANDING_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RAW_LANDING_TIMEOUT_MS)
+        .max(1)
+}
+
+fn raw_landing_required() -> bool {
+    std::env::var("RAW_LANDING_REQUIRED")
+        .ok()
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+async fn persist_raw_envelope(
+    raw_repo: Option<&PostgresRawRepository>,
+    envelope: &SourceEnvelopeV1,
+) -> RawLandingOutcome {
+    let Some(writer) = raw_repo else {
+        return RawLandingOutcome {
+            pointer: None,
+            status: RawLandingStatus::Disabled,
+            error: Some("raw_repo_not_configured".to_string()),
+        };
+    };
+
+    let timeout_ms = raw_landing_timeout_ms();
+    match tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        writer.write_source_envelope(envelope),
+    )
+    .await
+    {
+        Ok(Ok(pointer)) => {
+            if pointer.is_some() {
+                RawLandingOutcome {
+                    pointer,
+                    status: RawLandingStatus::Persisted,
+                    error: None,
+                }
+            } else {
+                RawLandingOutcome {
+                    pointer: None,
+                    status: RawLandingStatus::Failed,
+                    error: Some("raw_pointer_missing".to_string()),
+                }
+            }
+        }
+        Ok(Err(error)) => RawLandingOutcome {
+            pointer: None,
+            status: RawLandingStatus::Failed,
+            error: Some(error.to_string()),
+        },
+        Err(_) => RawLandingOutcome {
+            pointer: None,
+            status: RawLandingStatus::TimedOut,
+            error: Some(format!("raw_landing_timeout_ms={timeout_ms}")),
+        },
+    }
+}
+
 async fn process_payload(
     config: &RuntimeStreamConfig,
     repo: &PostgresRepository,
+    raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     payload: Value,
     chain_id_hint: Option<i64>,
@@ -264,15 +389,38 @@ async fn process_payload(
                     .await?;
 
             let dedup_key = build_dedup_key(config, &parsed, &payload);
-            let record = to_source_feed_record(
+            let envelope = to_source_envelope(
+                config,
+                &parsed,
+                payload_for_storage.clone(),
+                dedup_key.as_deref(),
+            );
+            let raw_landing = persist_raw_envelope(raw_repo, &envelope).await;
+            if raw_landing_required() && !raw_landing.status.persisted() {
+                return Err(anyhow!(
+                    "raw_landing_required_but_not_persisted status={} source_id={} stream_config_id={} error={}",
+                    raw_landing.status.as_str(),
+                    config.source_id,
+                    config.stream_config_id,
+                    raw_landing.error.clone().unwrap_or_else(|| "unknown".to_string()),
+                ));
+            }
+            annotate_ingestion_meta(
+                &mut parsed.normalized_fields,
+                "realtime",
+                raw_landing.status,
+                raw_landing.error.as_deref(),
+            );
+            let record = to_operational_record(
                 config,
                 &parsed,
                 payload_for_storage.clone(),
                 dedup_key.clone(),
                 parse_status,
                 parse_error,
+                raw_landing.pointer.clone(),
             );
-            let inserted = repo.insert_source_feed_event_record(&record).await?;
+            let inserted = repo.insert_ingest_operational_event(&record).await?;
             if !inserted {
                 debug!(
                     stream_config_id = %config.stream_config_id,
@@ -282,18 +430,64 @@ async fn process_payload(
                 return Ok(());
             }
             if should_fanout {
-                fanout_unified_events(config, stream, &payload_for_storage, &parsed, dedup_key)
-                    .await?;
+                fanout_unified_events(
+                    config,
+                    stream,
+                    &payload_for_storage,
+                    &parsed,
+                    dedup_key,
+                    raw_landing.status,
+                    raw_landing.error.as_deref(),
+                )
+                .await?;
             }
             Ok(())
         }
         Err(parse_error) => {
             let observed_at = Utc::now();
-            let dedup_key = Some(hash_payload_only(config, &payload, observed_at));
-            let record = SourceFeedEventRecord {
-                stream_config_id: Some(config.stream_config_id.clone()),
+            let dedup_key = hash_payload_only(config, &payload, observed_at);
+            let envelope = SourceEnvelopeV1 {
+                envelope_id: Uuid::new_v4().to_string(),
                 source_id: config.source_id.clone(),
                 source_type: config.source_type.clone(),
+                stream_id: config.stream_config_id.clone(),
+                schema_version: "v1".to_string(),
+                event_type: config.event_type.clone(),
+                event_ts: observed_at,
+                observed_at,
+                partition_key: observed_at.date_naive().to_string(),
+                idempotency_key: dedup_key.clone(),
+                payload: payload.clone(),
+                chain_id: chain_id_hint,
+                block_number: None,
+                tx_hash: None,
+                log_index: None,
+                topic0: None,
+                market_key: config.market_key.clone(),
+                price: None,
+            };
+            let raw_landing = persist_raw_envelope(raw_repo, &envelope).await;
+            if raw_landing_required() && !raw_landing.status.persisted() {
+                return Err(anyhow!(
+                    "raw_landing_required_but_not_persisted status={} source_id={} stream_config_id={} error={}",
+                    raw_landing.status.as_str(),
+                    config.source_id,
+                    config.stream_config_id,
+                    raw_landing.error.clone().unwrap_or_else(|| "unknown".to_string()),
+                ));
+            }
+            let mut normalized_fields = json!({});
+            annotate_ingestion_meta(
+                &mut normalized_fields,
+                "realtime",
+                raw_landing.status,
+                raw_landing.error.as_deref(),
+            );
+            let record = IngestOperationalEventRecord {
+                stream_id: Some(config.stream_config_id.clone()),
+                source_id: config.source_id.clone(),
+                source_type: config.source_type.clone(),
+                tenant_id: None,
                 event_type: config.event_type.clone(),
                 event_id: None,
                 market_key: config.market_key.clone(),
@@ -309,10 +503,31 @@ async fn process_payload(
                 parse_status: "error".to_string(),
                 parse_error: Some(parse_error),
                 payload,
-                normalized_fields: json!({}),
-                dedup_key,
+                normalized_fields,
+                dedup_key: Some(dedup_key),
+                raw_ref_type: raw_landing.pointer.as_ref().map(|p| p.raw_ref_type.clone()),
+                raw_ref_id: raw_landing.pointer.as_ref().map(|p| p.raw_ref_id.clone()),
+                raw_s3_uri: None,
             };
-            let _ = repo.insert_source_feed_event_record(&record).await?;
+            let _ = repo.insert_ingest_operational_event(&record).await?;
+            if let Some(writer) = raw_repo {
+                let _ = writer
+                    .record_ingest_failure(&IngestFailureRecord {
+                        stream_id: Some(config.stream_config_id.clone()),
+                        source_id: config.source_id.clone(),
+                        source_type: config.source_type.clone(),
+                        event_type: Some(config.event_type.clone()),
+                        payload_excerpt: record.payload.clone(),
+                        error_kind: "parse".to_string(),
+                        error_message: record
+                            .parse_error
+                            .clone()
+                            .unwrap_or_else(|| "unknown_parse_error".to_string()),
+                        retryable: false,
+                        observed_at,
+                    })
+                    .await;
+            }
             Ok(())
         }
     }
@@ -444,7 +659,7 @@ async fn lookup_usdt_usd_rate(
     }
 
     let latest = repo
-        .latest_market_price(FX_LOOKUP_MARKET_KEY, FX_LOOKUP_FRESHNESS_SECONDS)
+        .latest_operational_market_price(FX_LOOKUP_MARKET_KEY, FX_LOOKUP_FRESHNESS_SECONDS)
         .await?;
     if let Some(rate) = latest.filter(|value| value.is_finite() && *value > 0.0) {
         fx_cache.usdt_usd = Some(CachedFxRate {
@@ -523,18 +738,20 @@ async fn apply_usdt_normalization(
     Ok(("parsed", None, true))
 }
 
-fn to_source_feed_record(
+fn to_operational_record(
     config: &RuntimeStreamConfig,
     parsed: &ParsedFeedEvent,
     payload: Value,
     dedup_key: Option<String>,
     parse_status: &str,
     parse_error: Option<String>,
-) -> SourceFeedEventRecord {
-    SourceFeedEventRecord {
-        stream_config_id: Some(config.stream_config_id.clone()),
+    raw_pointer: Option<RawRecordPointer>,
+) -> IngestOperationalEventRecord {
+    IngestOperationalEventRecord {
+        stream_id: Some(config.stream_config_id.clone()),
         source_id: config.source_id.clone(),
         source_type: config.source_type.clone(),
+        tenant_id: None,
         event_type: parsed.event_type.clone(),
         event_id: parsed.event_id.clone(),
         market_key: parsed.market_key.clone(),
@@ -552,6 +769,79 @@ fn to_source_feed_record(
         payload,
         normalized_fields: parsed.normalized_fields.clone(),
         dedup_key,
+        raw_ref_type: raw_pointer
+            .as_ref()
+            .map(|pointer| pointer.raw_ref_type.clone()),
+        raw_ref_id: raw_pointer
+            .as_ref()
+            .map(|pointer| pointer.raw_ref_id.clone()),
+        raw_s3_uri: None,
+    }
+}
+
+fn annotate_ingestion_meta(
+    normalized_fields: &mut Value,
+    processing_mode: &str,
+    raw_landing_status: RawLandingStatus,
+    raw_landing_error: Option<&str>,
+) {
+    if !normalized_fields.is_object() {
+        *normalized_fields = json!({});
+    }
+    if let Some(obj) = normalized_fields.as_object_mut() {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "processing_mode".to_string(),
+            Value::String(processing_mode.to_string()),
+        );
+        meta.insert(
+            "raw_landing_status".to_string(),
+            Value::String(raw_landing_status.as_str().to_string()),
+        );
+        meta.insert(
+            "raw_persisted".to_string(),
+            Value::Bool(raw_landing_status.persisted()),
+        );
+        if let Some(error) = raw_landing_error {
+            if !error.trim().is_empty() {
+                meta.insert(
+                    "raw_landing_error".to_string(),
+                    Value::String(error.to_string()),
+                );
+            }
+        }
+        obj.insert("ingestion_meta".to_string(), Value::Object(meta));
+    }
+}
+
+fn to_source_envelope(
+    config: &RuntimeStreamConfig,
+    parsed: &ParsedFeedEvent,
+    payload: Value,
+    dedup_key: Option<&str>,
+) -> SourceEnvelopeV1 {
+    let observed_at = parsed.observed_at;
+    SourceEnvelopeV1 {
+        envelope_id: Uuid::new_v4().to_string(),
+        source_id: config.source_id.clone(),
+        source_type: config.source_type.clone(),
+        stream_id: config.stream_config_id.clone(),
+        schema_version: "v1".to_string(),
+        event_type: parsed.event_type.clone(),
+        event_ts: parsed.payload_event_ts.unwrap_or(observed_at),
+        observed_at,
+        partition_key: observed_at.date_naive().to_string(),
+        idempotency_key: dedup_key
+            .map(ToString::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        payload,
+        chain_id: parsed.chain_id,
+        block_number: parsed.block_number,
+        tx_hash: parsed.tx_hash.clone(),
+        log_index: parsed.log_index,
+        topic0: parsed.topic0.clone(),
+        market_key: parsed.market_key.clone(),
+        price: parsed.price,
     }
 }
 
@@ -561,6 +851,8 @@ async fn fanout_unified_events(
     payload: &Value,
     parsed: &ParsedFeedEvent,
     dedup_key: Option<String>,
+    raw_landing_status: RawLandingStatus,
+    raw_landing_error: Option<&str>,
 ) -> Result<()> {
     let source_type = map_source_type(&config.source_type);
 
@@ -569,8 +861,14 @@ async fn fanout_unified_events(
             .event_id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let enriched_payload =
-            enrich_payload_for_unified(config, payload, parsed, dedup_key.as_deref());
+        let enriched_payload = enrich_payload_for_unified(
+            config,
+            payload,
+            parsed,
+            dedup_key.as_deref(),
+            raw_landing_status,
+            raw_landing_error,
+        );
         let event = UnifiedEvent {
             event_id,
             tenant_id: tenant_id.to_string(),
@@ -596,13 +894,31 @@ fn enrich_payload_for_unified(
     payload: &Value,
     parsed: &ParsedFeedEvent,
     dedup_key: Option<&str>,
+    raw_landing_status: RawLandingStatus,
+    raw_landing_error: Option<&str>,
 ) -> Value {
     let mut enriched = payload.clone();
     if !enriched.is_object() {
         enriched = json!({ "raw_payload": payload });
     }
     if let Some(obj) = enriched.as_object_mut() {
-        obj.insert("raw_persisted".to_string(), Value::Bool(true));
+        obj.insert(
+            "raw_persisted".to_string(),
+            Value::Bool(raw_landing_status.persisted()),
+        );
+        obj.insert(
+            "raw_landing_status".to_string(),
+            Value::String(raw_landing_status.as_str().to_string()),
+        );
+        if let Some(error) = raw_landing_error {
+            if !error.trim().is_empty() {
+                obj.insert("raw_landing_error".to_string(), Value::String(error.to_string()));
+            }
+        }
+        obj.insert(
+            "processing_mode".to_string(),
+            Value::String("realtime".to_string()),
+        );
         obj.insert(
             "stream_config_id".to_string(),
             Value::String(config.stream_config_id.clone()),
@@ -674,12 +990,21 @@ fn resolve_endpoint_template(
     }
 
     if endpoint.contains("YOUR_ALCHEMY_KEY") {
-        if let Some(value) = extract_alchemy_key(auth_config) {
+        if let Some(value) = extract_alchemy_key(auth_config).or_else(load_alchemy_key_from_env) {
             endpoint = endpoint.replace("YOUR_ALCHEMY_KEY", &value);
         } else {
             return Err(anyhow!(
                 "missing auth_config.alchemy_api_key (or auth_config.api_key) for endpoint template"
             ));
+        }
+    }
+
+    for placeholder in collect_unresolved_placeholders(&endpoint) {
+        if placeholder == "subscription_key" {
+            continue;
+        }
+        if let Some(value) = resolve_placeholder_from_env(&placeholder) {
+            endpoint = endpoint.replace(&format!("{{{placeholder}}}"), &value);
         }
     }
 
@@ -724,6 +1049,43 @@ fn extract_alchemy_key(auth_config: &Value) -> Option<String> {
             return Some(parsed);
         }
     }
+    None
+}
+
+fn load_alchemy_key_from_env() -> Option<String> {
+    for key in ["ALCHEMY_API_KEY", "INDEXER_ALCHEMY_API_KEY"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn resolve_placeholder_from_env(placeholder: &str) -> Option<String> {
+    let normalized = placeholder
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    let candidates = [normalized.clone(), format!("INDEXER_{normalized}")];
+    for key in candidates {
+        if let Ok(value) = std::env::var(&key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
     None
 }
 

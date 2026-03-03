@@ -168,7 +168,7 @@ impl IndexerStateStore {
 
         if !missing_tables.is_empty() {
             anyhow::bail!(
-                "missing core schema tables: {}. Run SQL bootstrap (schema.sql + seed_data.sql)",
+                "missing core schema tables: {}. Run SQL bootstrap (bootstrap/core_schema.sql + bootstrap/seed_sources.sql + bootstrap/seed_patterns.sql)",
                 missing_tables.join(", ")
             );
         }
