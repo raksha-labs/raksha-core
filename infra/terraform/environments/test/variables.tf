@@ -147,7 +147,7 @@ variable "ec2_instance_type" {
   type        = string
   # t4g.medium (4 GB ARM) fits all platform + core services at reduced test
   # sizes. t4g.micro (1 GB) is too small once more than 3 services are live.
-  default     = "t4g.medium"
+  default = "t4g.medium"
 }
 
 variable "ec2_desired_capacity" {

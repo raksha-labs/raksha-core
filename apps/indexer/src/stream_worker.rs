@@ -912,7 +912,10 @@ fn enrich_payload_for_unified(
         );
         if let Some(error) = raw_landing_error {
             if !error.trim().is_empty() {
-                obj.insert("raw_landing_error".to_string(), Value::String(error.to_string()));
+                obj.insert(
+                    "raw_landing_error".to_string(),
+                    Value::String(error.to_string()),
+                );
             }
         }
         obj.insert(
