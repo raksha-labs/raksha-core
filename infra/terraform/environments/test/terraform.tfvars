@@ -1,12 +1,12 @@
-aws_region            = "eu-west-1"
-environment           = "test"
-compute_mode          = "ec2"
-ec2_instance_type     = "t4g.medium"
-enable_managed_data   = false
-budget_limit_usd      = 100
-alarm_emails          = []
-admin_access_mode     = "private-only"
-image_tag             = "master-latest"
+aws_region          = "eu-west-1"
+environment         = "test"
+compute_mode        = "fargate_mix"
+create_nat_gateway  = true
+enable_managed_data = false
+budget_limit_usd    = 100
+alarm_emails        = []
+admin_access_mode   = "private-only"
+image_tag           = "master-latest"
 
 github_org                  = "raksha-labs"
 github_repo                 = "raksha-core"
