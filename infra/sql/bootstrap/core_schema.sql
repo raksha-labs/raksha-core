@@ -56,7 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_tenant_data_sources_tenant
 CREATE TABLE IF NOT EXISTS source_stream_configs (
     stream_config_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     source_id        TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
-    connector_mode   TEXT NOT NULL CHECK (connector_mode IN ('websocket', 'rpc_logs', 'http_poll')),
+    connector_mode   TEXT NOT NULL CHECK (connector_mode IN ('websocket', 'rpc_logs', 'rpc_state', 'http_poll')),
     stream_name      TEXT NOT NULL,
     subscription_key TEXT,
     event_type       TEXT NOT NULL,
@@ -84,6 +84,21 @@ CREATE INDEX IF NOT EXISTS idx_source_stream_configs_event_type
     ON source_stream_configs (event_type);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_source_stream_configs_natural
     ON source_stream_configs (source_id, stream_name, COALESCE(asset_pair, ''), COALESCE(subscription_key, ''));
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'source_stream_configs'
+    ) THEN
+        ALTER TABLE source_stream_configs
+            DROP CONSTRAINT IF EXISTS source_stream_configs_connector_mode_check;
+        ALTER TABLE source_stream_configs
+            ADD CONSTRAINT source_stream_configs_connector_mode_check
+            CHECK (connector_mode IN ('websocket', 'rpc_logs', 'rpc_state', 'http_poll'));
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS source_stream_tenant_targets (
     stream_config_id UUID NOT NULL REFERENCES source_stream_configs(stream_config_id) ON DELETE CASCADE,

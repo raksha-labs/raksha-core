@@ -12,6 +12,8 @@ mod gate_ticker_v4;
 mod gemini_marketdata_v1;
 mod kraken_ticker_v2;
 mod okx_tickers_v5;
+mod protocol_pause;
+mod protocol_tvl;
 mod pyth_hermes_v2;
 mod uniswap_v2_swap;
 mod uniswap_v2_swap_price;
@@ -61,6 +63,8 @@ pub fn parse_payload(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedF
         "uniswap_v2_swap_price_v1" => uniswap_v2_swap_price::parse(input, payload),
         "uniswap_v3_swap_price_v1" => uniswap_v3_swap_price::parse(input, payload),
         "aerodrome_swap_price_v1" => aerodrome_swap_price::parse(input, payload),
+        "protocol_tvl_v1" => protocol_tvl::parse(input, payload),
+        "protocol_pause_v1" => protocol_pause::parse(input, payload),
         other => Err(format!("unsupported_parser:{other}")),
     }
 }

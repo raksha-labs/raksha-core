@@ -152,6 +152,9 @@ pub enum SignalType {
     LoanVolumeSpike,
     PriceDeviation,
     ProfitExtracted,
+    TvlDropDetected,
+    TvlVelocityDrop,
+    ProtocolPauseState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -159,6 +162,8 @@ pub enum SignalType {
 pub enum EventType {
     OracleUpdate,
     FlashLoanCandidate,
+    ProtocolState,
+    ProtocolPause,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

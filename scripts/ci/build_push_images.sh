@@ -46,11 +46,24 @@ while IFS= read -r service; do
       --repository-name "${repo}" \
       --image-ids imageTag=latest \
       --region "${AWS_REGION}" >/dev/null 2>&1; then
-      log "skipping ${latest_image}; immutable tag 'latest' already exists"
+      log "skipping ${latest_image}: immutable tag 'latest' already exists"
     else
       log "pushing ${latest_image}"
       docker tag "${BUNDLE_IMAGE}" "${latest_image}"
-      docker push "${latest_image}"
+      # Push latest but treat immutable-tag errors as soft failures.
+      # Two concurrent master runs can both pass the describe-images check above
+      # (race window), then the second push fails with "tag invalid / immutable".
+      # The sha-tagged image is already pushed successfully, so this is safe to skip.
+      _push_log=$(mktemp)
+      if ! docker push "${latest_image}" 2>&1 | tee "${_push_log}"; then
+        if grep -qi "immutable\|tag invalid" "${_push_log}"; then
+          log "::warning::skipping ${latest_image}: immutable tag conflict (concurrent push race)"
+        else
+          rm -f "${_push_log}"
+          exit 1
+        fi
+      fi
+      rm -f "${_push_log}"
     fi
   fi
 done < <(catalog_services)
