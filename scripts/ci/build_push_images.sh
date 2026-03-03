@@ -42,8 +42,15 @@ while IFS= read -r service; do
 
   if [[ "${PUSH_LATEST}" == "true" ]]; then
     latest_image="${REGISTRY}/${repo}:latest"
-    log "pushing ${latest_image}"
-    docker tag "${BUNDLE_IMAGE}" "${latest_image}"
-    docker push "${latest_image}"
+    if aws ecr describe-images \
+      --repository-name "${repo}" \
+      --image-ids imageTag=latest \
+      --region "${AWS_REGION}" >/dev/null 2>&1; then
+      log "skipping ${latest_image}; immutable tag 'latest' already exists"
+    else
+      log "pushing ${latest_image}"
+      docker tag "${BUNDLE_IMAGE}" "${latest_image}"
+      docker push "${latest_image}"
+    fi
   fi
 done < <(catalog_services)
