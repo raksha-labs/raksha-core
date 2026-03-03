@@ -21,6 +21,8 @@ use crate::stream_parser::{parse_payload, ParsedFeedEvent, ParserInput};
 const FX_LOOKUP_MARKET_KEY: &str = "USDT/USD";
 const FX_LOOKUP_FRESHNESS_SECONDS: i64 = 30;
 const FX_CACHE_TTL_SECONDS: i64 = 3;
+const MARKET_TRUTH_FRESHNESS_SECONDS: i64 = 30;
+const MARKET_TRUTH_PEG_TARGET: f64 = 1.0;
 const DEFAULT_RPC_LOGS_POLL_INTERVAL_MS: u64 = 2_000;
 const DEFAULT_HTTP_POLL_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_RAW_LANDING_TIMEOUT_MS: u64 = 150;
@@ -36,6 +38,15 @@ struct CachedFxRate {
 #[derive(Debug, Default, Clone)]
 struct FxRateCache {
     usdt_usd: Option<CachedFxRate>,
+}
+
+#[derive(Debug, Clone)]
+struct MarketTruthSnapshot {
+    market_key: String,
+    median_price: f64,
+    deviation_pct: f64,
+    source_count: usize,
+    peg_target: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -387,6 +398,7 @@ async fn process_payload(
             let (parse_status, parse_error, should_fanout) =
                 apply_usdt_normalization(repo, &mut parsed, &mut payload_for_storage, fx_cache)
                     .await?;
+            apply_market_truth_context(repo, config, &mut parsed, &mut payload_for_storage).await?;
 
             let dedup_key = build_dedup_key(config, &parsed, &payload);
             let envelope = to_source_envelope(
@@ -736,6 +748,166 @@ async fn apply_usdt_normalization(
         true,
     );
     Ok(("parsed", None, true))
+}
+
+fn compute_median(values: &mut [f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        Some((values[mid - 1] + values[mid]) / 2.0)
+    } else {
+        Some(values[mid])
+    }
+}
+
+fn build_market_truth_snapshot(
+    market_key: &str,
+    source_prices: &std::collections::HashMap<String, f64>,
+) -> Option<MarketTruthSnapshot> {
+    if source_prices.is_empty() {
+        return None;
+    }
+
+    let mut values: Vec<f64> = source_prices
+        .values()
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .collect();
+    let source_count = values.len();
+    let median_price = compute_median(&mut values)?;
+    let deviation_pct =
+        ((median_price - MARKET_TRUTH_PEG_TARGET).abs() / MARKET_TRUTH_PEG_TARGET) * 100.0;
+
+    Some(MarketTruthSnapshot {
+        market_key: market_key.to_string(),
+        median_price,
+        deviation_pct,
+        source_count,
+        peg_target: MARKET_TRUTH_PEG_TARGET,
+    })
+}
+
+fn upsert_market_truth_payload(payload: &mut Value, snapshot: &MarketTruthSnapshot) {
+    ensure_object_payload(payload);
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("median_price".to_string(), json!(snapshot.median_price));
+        obj.insert("deviation_pct".to_string(), json!(snapshot.deviation_pct));
+        obj.insert(
+            "true_price_median".to_string(),
+            json!(snapshot.median_price),
+        );
+        obj.insert(
+            "true_price_deviation_pct".to_string(),
+            json!(snapshot.deviation_pct),
+        );
+        obj.insert(
+            "true_price_peg_target".to_string(),
+            json!(snapshot.peg_target),
+        );
+        obj.insert(
+            "true_price_source_count".to_string(),
+            json!(snapshot.source_count),
+        );
+        obj.insert(
+            "true_price_scope".to_string(),
+            Value::String("platform_global".to_string()),
+        );
+        obj.insert(
+            "true_price_market_key".to_string(),
+            Value::String(snapshot.market_key.clone()),
+        );
+        obj.insert(
+            "platform_context".to_string(),
+            json!({
+                "market_truth": {
+                    "market_key": snapshot.market_key.clone(),
+                    "median_price": snapshot.median_price,
+                    "deviation_pct": snapshot.deviation_pct,
+                    "peg_target": snapshot.peg_target,
+                    "source_count": snapshot.source_count,
+                    "scope": "platform_global",
+                }
+            }),
+        );
+    }
+}
+
+fn upsert_market_truth_normalized_fields(
+    parsed: &mut ParsedFeedEvent,
+    snapshot: &MarketTruthSnapshot,
+) {
+    let mut normalized = parsed
+        .normalized_fields
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    normalized.insert("median_price".to_string(), json!(snapshot.median_price));
+    normalized.insert("deviation_pct".to_string(), json!(snapshot.deviation_pct));
+    normalized.insert(
+        "true_price_median".to_string(),
+        json!(snapshot.median_price),
+    );
+    normalized.insert(
+        "true_price_deviation_pct".to_string(),
+        json!(snapshot.deviation_pct),
+    );
+    normalized.insert(
+        "true_price_peg_target".to_string(),
+        json!(snapshot.peg_target),
+    );
+    normalized.insert(
+        "true_price_source_count".to_string(),
+        json!(snapshot.source_count),
+    );
+    normalized.insert(
+        "true_price_scope".to_string(),
+        Value::String("platform_global".to_string()),
+    );
+    normalized.insert(
+        "true_price_market_key".to_string(),
+        Value::String(snapshot.market_key.clone()),
+    );
+    parsed.normalized_fields = Value::Object(normalized);
+}
+
+async fn apply_market_truth_context(
+    repo: &PostgresRepository,
+    config: &RuntimeStreamConfig,
+    parsed: &mut ParsedFeedEvent,
+    payload: &mut Value,
+) -> Result<()> {
+    let Some(market_key) = parsed.market_key.as_deref() else {
+        return Ok(());
+    };
+    let Some(current_price) = parsed
+        .price
+        .filter(|value| value.is_finite() && *value > 0.0)
+    else {
+        return Ok(());
+    };
+
+    let latest = repo
+        .latest_operational_source_prices(market_key, MARKET_TRUTH_FRESHNESS_SECONDS)
+        .await?;
+    let mut source_prices = std::collections::HashMap::<String, f64>::new();
+    for item in latest {
+        if item.price.is_finite() && item.price > 0.0 {
+            source_prices.insert(item.source_id, item.price);
+        }
+    }
+
+    // Ensure the current event participates even before it is persisted.
+    source_prices.insert(config.source_id.clone(), current_price);
+
+    if let Some(snapshot) = build_market_truth_snapshot(market_key, &source_prices) {
+        upsert_market_truth_normalized_fields(parsed, &snapshot);
+        upsert_market_truth_payload(payload, &snapshot);
+    }
+
+    Ok(())
 }
 
 fn to_operational_record(

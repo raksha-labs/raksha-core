@@ -126,6 +126,13 @@ pub struct IngestOperationalEventRecord {
     pub raw_s3_uri: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct OperationalSourcePrice {
+    pub source_id: String,
+    pub price: f64,
+    pub observed_at: DateTime<Utc>,
+}
+
 #[derive(Clone)]
 pub struct PostgresRepository {
     client: Arc<Client>,
@@ -720,6 +727,41 @@ impl PostgresRepository {
             .await?;
 
         Ok(row.map(|record| record.get::<usize, f64>(0)))
+    }
+
+    pub async fn latest_operational_source_prices(
+        &self,
+        market_key: &str,
+        max_age_seconds: i64,
+    ) -> Result<Vec<OperationalSourcePrice>> {
+        let freshness_seconds = max_age_seconds.max(1);
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT DISTINCT ON (source_id)
+                    source_id,
+                    price,
+                    observed_at
+                FROM ingest_operational_events
+                WHERE market_key = $1
+                  AND price IS NOT NULL
+                  AND parse_status IN ('parsed', 'partial')
+                  AND observed_at >= NOW() - ($2::BIGINT * INTERVAL '1 second')
+                ORDER BY source_id, observed_at DESC
+                "#,
+                &[&market_key, &freshness_seconds],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| OperationalSourcePrice {
+                source_id: row.get(0),
+                price: row.get(1),
+                observed_at: row.get(2),
+            })
+            .collect())
     }
 
     pub async fn insert_raw_event(&self, event: &UnifiedEvent) -> Result<()> {
