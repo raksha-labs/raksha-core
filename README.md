@@ -87,19 +87,15 @@ This starts Postgres, Redis, indexer, and detector.
 
 ## SQL migrations
 
-Apply in order:
+Apply bootstrap SQL in order:
 
 ```bash
-for f in infra/sql/001_init.sql \
-          infra/sql/002_lifecycle_tenant.sql \
-          infra/sql/003_market_dpeg.sql \
-          infra/sql/004_multi_tenant_dpeg_alerting.sql \
-          infra/sql/005_unified_pattern_architecture.sql \
-          infra/sql/006_seed_patterns.sql; do
-  docker exec -i raksha-postgres psql -U postgres -d raksha < "$f"
-done
-# Run 007 only after the new pipeline is confirmed healthy:
-# docker exec -i raksha-postgres psql -U postgres -d raksha < infra/sql/007_cleanup_legacy_tables.sql
+docker exec -i raksha-postgres psql -U postgres -d raksha < infra/sql/bootstrap/core_schema.sql
+docker exec -i raksha-postgres psql -U postgres -d raksha < infra/sql/bootstrap/history_schema.sql
+docker exec -i raksha-postgres psql -U postgres -d raksha < infra/sql/bootstrap/seed_sources.sql
+docker exec -i raksha-postgres psql -U postgres -d raksha < infra/sql/bootstrap/seed_patterns.sql
+
+docker exec -i raksha-postgres-raw psql -U postgres -d raksha_raw < infra/sql/bootstrap/raw_schema.sql
 ```
 
 ## Run checks

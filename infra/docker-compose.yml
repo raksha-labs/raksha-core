@@ -11,10 +11,32 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # Mount SQL files for easy access
-      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-      - ./sql/seed_data.sql:/docker-entrypoint-initdb.d/02-seed_data.sql:ro
+      - ./sql/bootstrap/core_schema.sql:/docker-entrypoint-initdb.d/01-core-schema.sql:ro
+      - ./sql/bootstrap/history_schema.sql:/docker-entrypoint-initdb.d/02-history-schema.sql:ro
+      - ./sql/bootstrap/seed_sources.sql:/docker-entrypoint-initdb.d/03-seed-sources.sql:ro
+      - ./sql/bootstrap/seed_patterns.sql:/docker-entrypoint-initdb.d/04-seed-patterns.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - raksha
+
+  postgres_raw:
+    image: postgres:15-alpine
+    container_name: raksha-postgres-raw
+    environment:
+      POSTGRES_DB: raksha_raw
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_raw_data:/var/lib/postgresql/data
+      - ./sql/bootstrap/raw_schema.sql:/docker-entrypoint-initdb.d/01-raw-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d raksha_raw"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -46,6 +68,7 @@ services:
     command: ["/app/bin/indexer"]
     environment:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/raksha
+      RAW_DATABASE_URL: postgresql://postgres:password@postgres_raw:5432/raksha_raw
       REDIS_URL: redis://redis:6379
       RULES_REPO_PATH: /app/rules
       RUST_LOG: info
@@ -58,6 +81,8 @@ services:
       INGESTION_RETRY_BACKOFF_MS: ${INGESTION_RETRY_BACKOFF_MS:-2000}
     depends_on:
       postgres:
+        condition: service_healthy
+      postgres_raw:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -219,6 +244,8 @@ services:
 
 volumes:
   postgres_data:
+    driver: local
+  postgres_raw_data:
     driver: local
   redis_data:
     driver: local

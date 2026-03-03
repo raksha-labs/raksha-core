@@ -11,7 +11,7 @@ services:
     memory: 1024
     command: ["/app/bin/indexer"]
     desired_count:
-      test: 1
+      test: 0  # off by default — enable via streams_enabled = true in tfvars
       stage: 1
       prod: 2
 
@@ -26,7 +26,7 @@ services:
     memory: 2048
     command: ["/app/bin/detector"]
     desired_count:
-      test: 1
+      test: 0  # off by default — enable via streams_enabled = true in tfvars
       stage: 3
       prod: 5
 
@@ -41,7 +41,7 @@ services:
     memory: 1024
     command: ["/app/bin/orchestrator"]
     desired_count:
-      test: 1
+      test: 0  # off by default — enable via streams_enabled = true in tfvars
       stage: 2
       prod: 3
 
@@ -56,7 +56,7 @@ services:
     memory: 512
     command: ["/app/bin/finality"]
     desired_count:
-      test: 1
+      test: 0  # off by default — enable via streams_enabled = true in tfvars
       stage: 1
       prod: 2
 
@@ -71,6 +71,6 @@ services:
     memory: 512
     command: ["/app/bin/history-worker"]
     desired_count:
-      test: 1
+      test: 0  # off by default — enable via streams_enabled = true in tfvars
       stage: 1
       prod: 1

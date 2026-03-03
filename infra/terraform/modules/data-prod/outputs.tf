@@ -18,6 +18,11 @@ output "redis_url_secret_arn" {
   description = "Secret ARN for REDIS_URL"
 }
 
+output "raw_database_url_secret_arn" {
+  value       = aws_secretsmanager_secret.raw_database.arn
+  description = "Secret ARN for RAW_DATABASE_URL"
+}
+
 output "kms_key_arn" {
   value       = aws_kms_key.data.arn
   description = "KMS key ARN for data tier encryption"

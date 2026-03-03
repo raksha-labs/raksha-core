@@ -212,10 +212,6 @@ fn parse_flash_loan_rules(config: &Value, tenant_id: &str) -> Vec<FlashLoanRule>
         return parsed;
     }
 
-    if let Some(rule) = parse_legacy_rule(config) {
-        return vec![rule];
-    }
-
     tracing::warn!(tenant_id = %tenant_id, "invalid flash_loan config; falling back to defaults");
     vec![default_flash_rule(
         "flash-default",
@@ -244,24 +240,6 @@ fn parse_rule_item(value: &Value, index: usize) -> Option<FlashLoanRule> {
     Some(FlashLoanRule {
         rule_id,
         name,
-        min_loan_amount_usd: parse_f64(object.get("min_loan_amount_usd"), DEFAULT_MIN_LOAN_USD),
-        profit_threshold_usd: parse_f64(
-            object.get("profit_threshold_usd"),
-            DEFAULT_PROFIT_THRESHOLD_USD,
-        ),
-        cooldown_sec: parse_i64(object.get("cooldown_sec"), DEFAULT_COOLDOWN_SEC),
-        enabled: object
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-    })
-}
-
-fn parse_legacy_rule(value: &Value) -> Option<FlashLoanRule> {
-    let object = value.as_object()?;
-    Some(FlashLoanRule {
-        rule_id: "flash-default".to_string(),
-        name: "Default Flash Loan Rule".to_string(),
         min_loan_amount_usd: parse_f64(object.get("min_loan_amount_usd"), DEFAULT_MIN_LOAN_USD),
         profit_threshold_usd: parse_f64(
             object.get("profit_threshold_usd"),

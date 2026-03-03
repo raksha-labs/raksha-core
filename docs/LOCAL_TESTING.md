@@ -74,8 +74,8 @@ Database rows:
 docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT count(*) FROM detections;"
 docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT count(*) FROM alerts;"
 docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT count(*) FROM pattern_snapshots;"
-docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT stream_config_id, source_id, event_type, observed_at FROM raw_events ORDER BY observed_at DESC LIMIT 20;"
-docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT count(*) FROM raw_events WHERE event_type IN ('quote','trade') AND observed_at < NOW() - INTERVAL '5 minutes';"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT stream_id, source_id, event_type, observed_at FROM ingest_operational_events ORDER BY observed_at DESC LIMIT 20;"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT count(*) FROM ingest_operational_events WHERE event_type IN ('quote','trade') AND observed_at < NOW() - INTERVAL '5 minutes';"
 ```
 
 Optional worker health endpoints (if enabled):

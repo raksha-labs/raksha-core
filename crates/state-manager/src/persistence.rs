@@ -98,6 +98,34 @@ pub struct SourceFeedEventRecord {
     pub dedup_key: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct IngestOperationalEventRecord {
+    pub stream_id: Option<String>,
+    pub source_id: String,
+    pub source_type: String,
+    pub tenant_id: Option<String>,
+    pub event_type: String,
+    pub event_id: Option<String>,
+    pub market_key: Option<String>,
+    pub asset_pair: Option<String>,
+    pub chain_id: Option<i64>,
+    pub block_number: Option<i64>,
+    pub tx_hash: Option<String>,
+    pub log_index: Option<i64>,
+    pub topic0: Option<String>,
+    pub price: Option<f64>,
+    pub payload_event_ts: Option<DateTime<Utc>>,
+    pub observed_at: DateTime<Utc>,
+    pub parse_status: String,
+    pub parse_error: Option<String>,
+    pub payload: Value,
+    pub normalized_fields: Value,
+    pub dedup_key: Option<String>,
+    pub raw_ref_type: Option<String>,
+    pub raw_ref_id: Option<String>,
+    pub raw_s3_uri: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct PostgresRepository {
     client: Arc<Client>,
@@ -154,10 +182,10 @@ impl PostgresRepository {
             "source_required_pairs",
             "tenant_pattern_alert_policies",
             "tenant_pattern_notification_channels",
-            "raw_events",
             "pattern_state",
             "pattern_snapshots",
             "data_source_health",
+            "ingest_operational_events",
         ];
 
         let mut missing_tables = Vec::new();
@@ -181,7 +209,7 @@ impl PostgresRepository {
 
         if !missing_tables.is_empty() {
             anyhow::bail!(
-                "missing core schema tables: {}. Run SQL bootstrap (schema.sql + seed_data.sql)",
+                "missing core schema tables: {}. Run SQL bootstrap (bootstrap/core_schema.sql + bootstrap/seed_sources.sql + bootstrap/seed_patterns.sql)",
                 missing_tables.join(", ")
             );
         }
@@ -465,10 +493,11 @@ impl PostgresRepository {
             .client
             .execute(
                 r#"
-                INSERT INTO raw_events (
-                    stream_config_id,
+                INSERT INTO ingest_operational_events (
+                    stream_id,
                     source_id,
                     source_type,
+                    tenant_id,
                     event_type,
                     event_id,
                     market_key,
@@ -485,12 +514,16 @@ impl PostgresRepository {
                     parse_error,
                     payload,
                     normalized_fields,
-                    dedup_key
+                    dedup_key,
+                    raw_ref_type,
+                    raw_ref_id,
+                    raw_s3_uri
                 )
                 VALUES (
                     ($1)::text::uuid,
                     $2,
                     $3,
+                    NULL,
                     $4,
                     $5,
                     $6,
@@ -507,7 +540,10 @@ impl PostgresRepository {
                     $17,
                     $18,
                     $19,
-                    $20
+                    $20,
+                    NULL,
+                    NULL,
+                    NULL
                 )
                 ON CONFLICT DO NOTHING
                 "#,
@@ -539,6 +575,100 @@ impl PostgresRepository {
         Ok(inserted > 0)
     }
 
+    pub async fn insert_ingest_operational_event(
+        &self,
+        record: &IngestOperationalEventRecord,
+    ) -> Result<bool> {
+        let inserted = self
+            .client
+            .execute(
+                r#"
+                INSERT INTO ingest_operational_events (
+                    stream_id,
+                    source_id,
+                    source_type,
+                    tenant_id,
+                    event_type,
+                    event_id,
+                    market_key,
+                    asset_pair,
+                    chain_id,
+                    block_number,
+                    tx_hash,
+                    log_index,
+                    topic0,
+                    price,
+                    payload_event_ts,
+                    observed_at,
+                    parse_status,
+                    parse_error,
+                    payload,
+                    normalized_fields,
+                    dedup_key,
+                    raw_ref_type,
+                    raw_ref_id,
+                    raw_s3_uri
+                )
+                VALUES (
+                    ($1)::text::uuid,
+                    $2,
+                    $3,
+                    $4,
+                    $5,
+                    $6,
+                    $7,
+                    $8,
+                    $9,
+                    $10,
+                    $11,
+                    $12,
+                    $13,
+                    $14,
+                    $15,
+                    $16,
+                    $17,
+                    $18,
+                    $19,
+                    $20,
+                    $21,
+                    $22,
+                    $23,
+                    $24
+                )
+                ON CONFLICT DO NOTHING
+                "#,
+                &[
+                    &record.stream_id.as_deref(),
+                    &record.source_id,
+                    &record.source_type,
+                    &record.tenant_id,
+                    &record.event_type,
+                    &record.event_id,
+                    &record.market_key,
+                    &record.asset_pair,
+                    &record.chain_id,
+                    &record.block_number,
+                    &record.tx_hash,
+                    &record.log_index,
+                    &record.topic0,
+                    &record.price,
+                    &record.payload_event_ts,
+                    &record.observed_at,
+                    &record.parse_status,
+                    &record.parse_error,
+                    &record.payload,
+                    &record.normalized_fields,
+                    &record.dedup_key,
+                    &record.raw_ref_type,
+                    &record.raw_ref_id,
+                    &record.raw_s3_uri,
+                ],
+            )
+            .await?;
+
+        Ok(inserted > 0)
+    }
+
     pub async fn purge_old_tick_events(&self, retention_seconds: i64) -> Result<u64> {
         let seconds = retention_seconds.max(0);
         let event_types = vec!["quote", "trade"];
@@ -546,13 +676,14 @@ impl PostgresRepository {
             .client
             .execute(
                 r#"
-                DELETE FROM raw_events
+                DELETE FROM ingest_operational_events
                 WHERE event_type = ANY($1)
                   AND observed_at < NOW() - ($2::BIGINT * INTERVAL '1 second')
                 "#,
                 &[&event_types, &seconds],
             )
             .await?;
+
         Ok(deleted)
     }
 
@@ -561,13 +692,22 @@ impl PostgresRepository {
         market_key: &str,
         max_age_seconds: i64,
     ) -> Result<Option<f64>> {
+        self.latest_operational_market_price(market_key, max_age_seconds)
+            .await
+    }
+
+    pub async fn latest_operational_market_price(
+        &self,
+        market_key: &str,
+        max_age_seconds: i64,
+    ) -> Result<Option<f64>> {
         let freshness_seconds = max_age_seconds.max(1);
-        let row = match self
+        let row = self
             .client
             .query_opt(
                 r#"
                 SELECT price
-                FROM raw_events
+                FROM ingest_operational_events
                 WHERE market_key = $1
                   AND price IS NOT NULL
                   AND parse_status IN ('parsed', 'partial')
@@ -577,17 +717,7 @@ impl PostgresRepository {
                 "#,
                 &[&market_key, &freshness_seconds],
             )
-            .await
-        {
-            Ok(value) => value,
-            Err(error) => {
-                if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
-                    warn!("raw_events table not found while reading market FX rate");
-                    return Ok(None);
-                }
-                return Err(error.into());
-            }
-        };
+            .await?;
 
         Ok(row.map(|record| record.get::<usize, f64>(0)))
     }
@@ -638,10 +768,11 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO raw_events (
-                    stream_config_id,
+                INSERT INTO ingest_operational_events (
+                    stream_id,
                     source_id,
                     source_type,
+                    tenant_id,
                     event_type,
                     event_id,
                     market_key,
@@ -658,12 +789,16 @@ impl PostgresRepository {
                     parse_error,
                     payload,
                     normalized_fields,
-                    dedup_key
+                    dedup_key,
+                    raw_ref_type,
+                    raw_ref_id,
+                    raw_s3_uri
                 )
                 VALUES (
                     NULL,
                     $1,
                     $2,
+                    NULL,
                     $3,
                     $4,
                     $5,
@@ -680,7 +815,10 @@ impl PostgresRepository {
                     NULL,
                     $14,
                     $15,
-                    $16
+                    $16,
+                    NULL,
+                    NULL,
+                    NULL
                 )
                 ON CONFLICT DO NOTHING
                 "#,

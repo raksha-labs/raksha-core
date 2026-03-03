@@ -83,3 +83,23 @@ resource "aws_secretsmanager_secret_version" "database_url" {
     DB_PASSWORD  = random_password.db_password.result
   })
 }
+
+# Store full RAW_DATABASE_URL in Secrets Manager
+resource "aws_secretsmanager_secret" "raw_database_url" {
+  name        = "raksha-raw-database-url-${var.environment}"
+  description = "Raw ingestion PostgreSQL connection string"
+
+  tags = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "raw_database_url" {
+  secret_id = aws_secretsmanager_secret.raw_database_url.id
+  secret_string = jsonencode({
+    RAW_DATABASE_URL = "postgres://${var.db_username}:${random_password.db_password.result}@${aws_db_instance.main.endpoint}/${var.db_name}"
+    DB_HOST          = aws_db_instance.main.address
+    DB_PORT          = aws_db_instance.main.port
+    DB_NAME          = var.db_name
+    DB_USERNAME      = var.db_username
+    DB_PASSWORD      = random_password.db_password.result
+  })
+}

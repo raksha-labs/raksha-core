@@ -1,6 +1,7 @@
 locals {
-  database_url = "postgresql://${var.db_username}:${var.db_password}@${var.postgres_host}:${var.postgres_port}/${var.db_name}"
-  redis_url    = "redis://${var.redis_host}:${var.redis_port}"
+  database_url     = "postgresql://${var.db_username}:${var.db_password}@${var.postgres_host}:${var.postgres_port}/${var.db_name}"
+  raw_database_url = local.database_url
+  redis_url        = "redis://${var.redis_host}:${var.redis_port}"
 }
 
 resource "aws_s3_bucket" "test_backup" {
@@ -54,6 +55,25 @@ resource "aws_secretsmanager_secret_version" "database" {
     DB_NAME      = var.db_name
     DB_USERNAME  = var.db_username
     DB_PASSWORD  = var.db_password
+  })
+}
+
+resource "aws_secretsmanager_secret" "raw_database" {
+  name        = "${var.secret_prefix}/shared/RAW_DATABASE_URL"
+  description = "Test environment raw ingestion PostgreSQL connection string"
+
+  tags = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "raw_database" {
+  secret_id = aws_secretsmanager_secret.raw_database.id
+  secret_string = jsonencode({
+    RAW_DATABASE_URL = local.raw_database_url
+    DB_HOST          = var.postgres_host
+    DB_PORT          = var.postgres_port
+    DB_NAME          = var.db_name
+    DB_USERNAME      = var.db_username
+    DB_PASSWORD      = var.db_password
   })
 }
 

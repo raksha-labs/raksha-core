@@ -61,8 +61,9 @@ module "data_prod" {
 }
 
 locals {
-  database_url_secret_arn = var.enable_managed_data ? module.data_prod[0].database_url_secret_arn : null
-  redis_url_secret_arn    = var.enable_managed_data ? module.data_prod[0].redis_url_secret_arn : null
+  database_url_secret_arn     = var.enable_managed_data ? module.data_prod[0].database_url_secret_arn : null
+  raw_database_url_secret_arn = var.enable_managed_data ? module.data_prod[0].raw_database_url_secret_arn : null
+  redis_url_secret_arn        = var.enable_managed_data ? module.data_prod[0].redis_url_secret_arn : null
 
   service_static_env = {
     orchestrator = {
@@ -84,6 +85,7 @@ locals {
     for service_name in keys(local.service_catalog_map) :
     service_name => merge(
       var.enable_managed_data ? { DATABASE_URL = "${local.database_url_secret_arn}:DATABASE_URL::" } : {},
+      var.enable_managed_data ? { RAW_DATABASE_URL = "${local.raw_database_url_secret_arn}:RAW_DATABASE_URL::" } : {},
       var.enable_managed_data ? { REDIS_URL = "${local.redis_url_secret_arn}:REDIS_URL::" } : {}
     )
   }
@@ -127,6 +129,7 @@ locals {
     var.environment,
     var.image_tag,
     local.database_url_secret_arn,
+    local.raw_database_url_secret_arn,
     local.redis_url_secret_arn,
     module.compute.service_discovery_namespace_name
   ])))
@@ -148,6 +151,16 @@ resource "aws_ssm_parameter" "core_redis_url_secret_arn" {
   name      = "/raksha/${var.environment}/core/redis_url_secret_arn"
   type      = "String"
   value     = local.redis_url_secret_arn
+  overwrite = true
+  tags      = var.tags
+}
+
+resource "aws_ssm_parameter" "core_raw_database_url_secret_arn" {
+  count = var.enable_managed_data ? 1 : 0
+
+  name      = "/raksha/${var.environment}/core/raw_database_url_secret_arn"
+  type      = "String"
+  value     = local.raw_database_url_secret_arn
   overwrite = true
   tags      = var.tags
 }

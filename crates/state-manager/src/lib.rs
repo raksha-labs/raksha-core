@@ -13,11 +13,13 @@ mod correlation;
 mod dead_letter_queue;
 mod finality;
 mod persistence;
+mod raw_repository;
 
 pub use correlation::*;
 pub use dead_letter_queue::*;
 pub use finality::*;
 pub use persistence::*;
+pub use raw_repository::*;
 
 pub const STREAM_NORMALIZED_EVENTS: &str = "raksha:normalized-events";
 pub const STREAM_REORG_NOTICES: &str = "raksha:reorg-notices";

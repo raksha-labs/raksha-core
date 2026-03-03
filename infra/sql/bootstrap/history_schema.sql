@@ -1,7 +1,3 @@
--- One-time upgrade script: history intelligence persistence for replay + case analytics.
--- Safe for repeated execution.
-
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE SCHEMA IF NOT EXISTS history;
 
 CREATE TABLE IF NOT EXISTS history.cases (
@@ -127,9 +123,43 @@ CREATE INDEX IF NOT EXISTS idx_history_ml_feature_registry_case
 CREATE INDEX IF NOT EXISTS idx_history_ml_feature_registry_tenant_feature
     ON history.ml_feature_registry (tenant_id, feature_set_version, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS history.dataset_manifests (
+    manifest_id        TEXT PRIMARY KEY,
+    tenant_id          TEXT NOT NULL,
+    case_id            TEXT REFERENCES history.cases(case_id) ON DELETE SET NULL,
+    dataset_version    TEXT NOT NULL,
+    checksum           TEXT NOT NULL,
+    source_export_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    payload            JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_history_dataset_manifests_tenant_version
+    ON history.dataset_manifests (tenant_id, dataset_version, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_dataset_manifests_case
+    ON history.dataset_manifests (case_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS history.case_data_provenance (
+    provenance_id   TEXT PRIMARY KEY,
+    case_id         TEXT NOT NULL REFERENCES history.cases(case_id) ON DELETE CASCADE,
+    tenant_id       TEXT NOT NULL,
+    provider        TEXT NOT NULL,
+    query_window    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    hash_chain      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    source_manifest TEXT,
+    metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_history_case_data_provenance_case
+    ON history.case_data_provenance (case_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_case_data_provenance_tenant_provider
+    ON history.case_data_provenance (tenant_id, provider, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS history.ingest_offsets (
     source_name   TEXT PRIMARY KEY,
     last_seen_ts  TIMESTAMPTZ NOT NULL DEFAULT to_timestamp(0),
     last_seen_id  TEXT NOT NULL DEFAULT '',
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+

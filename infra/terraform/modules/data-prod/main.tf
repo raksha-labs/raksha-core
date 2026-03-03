@@ -113,6 +113,26 @@ resource "aws_secretsmanager_secret_version" "database" {
   })
 }
 
+resource "aws_secretsmanager_secret" "raw_database" {
+  name        = "${var.secret_prefix}/shared/RAW_DATABASE_URL"
+  description = "Managed raw ingestion PostgreSQL connection string"
+  kms_key_id  = aws_kms_key.data.arn
+
+  tags = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "raw_database" {
+  secret_id = aws_secretsmanager_secret.raw_database.id
+  secret_string = jsonencode({
+    RAW_DATABASE_URL = "postgresql://${var.db_username}:${random_password.db_password.result}@${aws_db_instance.main.endpoint}/${var.db_name}"
+    DB_HOST          = aws_db_instance.main.address
+    DB_PORT          = aws_db_instance.main.port
+    DB_NAME          = var.db_name
+    DB_USERNAME      = var.db_username
+    DB_PASSWORD      = random_password.db_password.result
+  })
+}
+
 resource "aws_secretsmanager_secret" "redis" {
   name        = "${var.secret_prefix}/shared/REDIS_URL"
   description = "Managed Redis connection string"
