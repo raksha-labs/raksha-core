@@ -1,5 +1,9 @@
 CREATE SCHEMA IF NOT EXISTS history;
 
+-- Simlab cleanup contract:
+--   Key history tables keep is_simulated + simulation_run_id.
+--   Detailed lineage is stored in history.simulation_row_map.
+
 CREATE TABLE IF NOT EXISTS history.cases (
     case_id            TEXT PRIMARY KEY,
     tenant_id          TEXT NOT NULL,
@@ -27,6 +31,20 @@ CREATE INDEX IF NOT EXISTS idx_history_cases_tenant_class_start
 CREATE INDEX IF NOT EXISTS idx_history_cases_chain_protocol_start
     ON history.cases (chain_slug, protocol, incident_start_at DESC);
 
+CREATE TABLE IF NOT EXISTS history.simulation_row_map (
+    map_id              BIGSERIAL PRIMARY KEY,
+    simulation_run_id   TEXT NOT NULL,
+    table_name          TEXT NOT NULL,
+    row_pk              TEXT NOT NULL,
+    scenario_id         TEXT,
+    source_pk           TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (table_name, row_pk)
+);
+
+CREATE INDEX IF NOT EXISTS idx_history_simulation_row_map_run_table
+    ON history.simulation_row_map (simulation_run_id, table_name, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS history.case_events (
     event_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     case_id        TEXT NOT NULL REFERENCES history.cases(case_id) ON DELETE CASCADE,
@@ -36,6 +54,8 @@ CREATE TABLE IF NOT EXISTS history.case_events (
     source_table   TEXT NOT NULL,
     source_pk      TEXT NOT NULL,
     payload_json   JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_simulated   BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id TEXT,
     ingested_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (source_table, source_pk)
 );
@@ -44,6 +64,9 @@ CREATE INDEX IF NOT EXISTS idx_history_case_events_case_ts
     ON history.case_events (case_id, event_ts);
 CREATE INDEX IF NOT EXISTS idx_history_case_events_tenant_ts
     ON history.case_events (tenant_id, event_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_history_case_events_simulation_run
+    ON history.case_events (simulation_run_id, event_ts DESC)
+    WHERE is_simulated;
 
 CREATE TABLE IF NOT EXISTS history.case_alert_links (
     id              BIGSERIAL PRIMARY KEY,
@@ -54,6 +77,8 @@ CREATE TABLE IF NOT EXISTS history.case_alert_links (
     pattern_id      TEXT,
     severity        TEXT,
     delivery_status TEXT,
+    is_simulated    BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (case_id, alert_id)
 );
@@ -62,6 +87,9 @@ CREATE INDEX IF NOT EXISTS idx_history_case_alert_links_case_created
     ON history.case_alert_links (case_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_history_case_alert_links_tenant_pattern_created
     ON history.case_alert_links (tenant_id, pattern_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_case_alert_links_simulation_run
+    ON history.case_alert_links (simulation_run_id, created_at DESC)
+    WHERE is_simulated;
 
 CREATE TABLE IF NOT EXISTS history.replay_catalog (
     scenario_id                  TEXT PRIMARY KEY,
@@ -162,4 +190,3 @@ CREATE TABLE IF NOT EXISTS history.ingest_offsets (
     last_seen_id  TEXT NOT NULL DEFAULT '',
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-

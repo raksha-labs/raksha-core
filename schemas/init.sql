@@ -1,9 +1,26 @@
 -- Raksha Database Schema
 -- Version: 0.1.0
 -- Created: 2026-02-06
+-- Simlab cleanup contract:
+--   Key pipeline tables keep is_simulated + simulation_run_id.
+--   Detailed lineage is stored in simulation_row_map.
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE IF NOT EXISTS simulation_row_map (
+    map_id BIGSERIAL PRIMARY KEY,
+    simulation_run_id TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    row_pk TEXT NOT NULL,
+    scenario_id TEXT,
+    source_pk TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE (table_name, row_pk)
+);
+
+CREATE INDEX IF NOT EXISTS idx_simulation_row_map_run_table
+    ON simulation_row_map (simulation_run_id, table_name, created_at DESC);
 
 -- Detections table: Stores all rule evaluation results
 CREATE TABLE IF NOT EXISTS detections (
@@ -18,6 +35,8 @@ CREATE TABLE IF NOT EXISTS detections (
     signals JSONB NOT NULL,
     oracle_context JSONB NOT NULL,
     actions_recommended TEXT[],
+    is_simulated            BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id       TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -28,6 +47,9 @@ CREATE INDEX IF NOT EXISTS idx_detections_severity ON detections (severity);
 CREATE INDEX IF NOT EXISTS idx_detections_block ON detections (block_number);
 CREATE INDEX IF NOT EXISTS idx_detections_created ON detections (created_at);
 CREATE INDEX IF NOT EXISTS idx_detections_tx ON detections (tx_hash);
+CREATE INDEX IF NOT EXISTS idx_detections_simulation_run
+    ON detections (simulation_run_id, created_at DESC)
+    WHERE is_simulated;
 
 -- Alerts table: Stores alerts sent to external systems
 CREATE TABLE IF NOT EXISTS alerts (
@@ -51,6 +73,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     
     -- Deduplication
     dedup_key VARCHAR(255),
+    is_simulated            BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id       TEXT,
     
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -61,6 +85,9 @@ CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts (severity);
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts (delivery_status);
 CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts (created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_dedup ON alerts (dedup_key);
+CREATE INDEX IF NOT EXISTS idx_alerts_simulation_run
+    ON alerts (simulation_run_id, created_at DESC)
+    WHERE is_simulated;
 
 -- Incidents table: Groups related alerts into incidents
 CREATE TABLE IF NOT EXISTS incidents (
@@ -110,11 +137,16 @@ CREATE TABLE IF NOT EXISTS processed_events (
     chain VARCHAR(50) NOT NULL,
     processed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     reverted BOOLEAN DEFAULT FALSE,
+    is_simulated            BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id       TEXT,
     UNIQUE (tx_hash, block_number, chain)
 );
 
 CREATE INDEX IF NOT EXISTS idx_processed_tx ON processed_events (tx_hash);
 CREATE INDEX IF NOT EXISTS idx_processed_block ON processed_events (block_number);
+CREATE INDEX IF NOT EXISTS idx_processed_simulation_run
+    ON processed_events (simulation_run_id, processed_at DESC)
+    WHERE is_simulated;
 
 -- Normalized event store: Canonical ingestion payload persistence
 CREATE TABLE IF NOT EXISTS normalized_events (
@@ -138,6 +170,8 @@ CREATE TABLE IF NOT EXISTS normalized_events (
     observed_at TIMESTAMP WITH TIME ZONE NOT NULL,
     reverted BOOLEAN NOT NULL DEFAULT FALSE,
     payload JSONB NOT NULL,
+    is_simulated            BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id       TEXT,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
@@ -150,6 +184,9 @@ CREATE INDEX IF NOT EXISTS idx_normalized_events_observed_at
     ON normalized_events (observed_at);
 CREATE INDEX IF NOT EXISTS idx_normalized_events_reverted
     ON normalized_events (reverted);
+CREATE INDEX IF NOT EXISTS idx_normalized_events_simulation_run
+    ON normalized_events (simulation_run_id, observed_at DESC)
+    WHERE is_simulated;
 
 -- Alert delivery log: Track all delivery attempts
 CREATE TABLE IF NOT EXISTS alert_delivery_log (
