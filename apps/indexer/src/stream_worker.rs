@@ -14,7 +14,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::stream_connector::{
-    http_poll::HttpPollConnector, rpc_logs::RpcLogsConnector, websocket::WebsocketStreamConnector,
+    http_poll::HttpPollConnector, rpc_logs::RpcLogsConnector, rpc_state::RpcStateConnector,
+    websocket::WebsocketStreamConnector,
 };
 use crate::stream_parser::{parse_payload, ParsedFeedEvent, ParserInput};
 
@@ -24,6 +25,7 @@ const FX_CACHE_TTL_SECONDS: i64 = 3;
 const MARKET_TRUTH_FRESHNESS_SECONDS: i64 = 30;
 const MARKET_TRUTH_PEG_TARGET: f64 = 1.0;
 const DEFAULT_RPC_LOGS_POLL_INTERVAL_MS: u64 = 2_000;
+const DEFAULT_RPC_STATE_POLL_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_HTTP_POLL_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_RAW_LANDING_TIMEOUT_MS: u64 = 150;
 const MIN_POLL_INTERVAL_MS: u64 = 200;
@@ -147,6 +149,17 @@ pub async fn run_stream_worker(
             }
             "rpc_logs" => {
                 run_rpc_logs_loop(
+                    &config,
+                    &repo,
+                    raw_repo.as_ref(),
+                    &stream,
+                    &mut shutdown,
+                    &mut fx_cache,
+                )
+                .await
+            }
+            "rpc_state" => {
+                run_rpc_state_loop(
                     &config,
                     &repo,
                     raw_repo.as_ref(),
@@ -303,6 +316,41 @@ async fn run_http_poll_loop(
                         );
                     }
                 }
+            }
+        }
+    }
+}
+
+async fn run_rpc_state_loop(
+    config: &RuntimeStreamConfig,
+    repo: &PostgresRepository,
+    raw_repo: Option<&PostgresRawRepository>,
+    stream: &RedisStreamPublisher,
+    shutdown: &mut watch::Receiver<bool>,
+    fx_cache: &mut FxRateCache,
+) -> Result<()> {
+    let endpoint = endpoint_from_runtime_config(config)?;
+    let poll_interval =
+        resolve_poll_interval_duration(config.poll_interval_ms, DEFAULT_RPC_STATE_POLL_INTERVAL_MS);
+    let mut connector =
+        RpcStateConnector::new(endpoint, config.filter_config.clone(), poll_interval);
+    connector.connect().await?;
+
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_ok() && *shutdown.borrow() {
+                    return Ok(());
+                }
+            }
+            raw = connector.next_payload() => {
+                let mut payload = raw?;
+                if let Some(chain_id) = connector.chain_id() {
+                    if let Some(map) = payload.as_object_mut() {
+                        map.entry("chainId".to_string()).or_insert_with(|| json!(chain_id));
+                    }
+                }
+                process_payload(config, repo, raw_repo, stream, payload, connector.chain_id(), fx_cache).await?;
             }
         }
     }

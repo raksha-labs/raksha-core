@@ -6,6 +6,7 @@
 pub mod dpeg;
 pub mod flash_loan;
 pub mod generic_rule;
+pub mod tvl_drop;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -55,6 +56,7 @@ impl PatternRegistry {
             patterns: vec![
                 Box::new(dpeg::DpegPattern::default()),
                 Box::new(flash_loan::FlashLoanPattern::default()),
+                Box::new(tvl_drop::TvlDropPattern::default()),
                 Box::new(generic_rule::GenericRulePattern::default()),
             ],
         }
