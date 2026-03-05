@@ -1,6 +1,10 @@
 -- ============================================================================
 -- Raksha Raw Ingestion Schema (separate database: raksha_raw)
 -- ============================================================================
+-- Simlab cleanup contract:
+--   Rows produced by simulation MUST set:
+--   is_simulated=true + simulation_run_id on key raw tables.
+--   Detailed lineage is stored in raw_ingest.simulation_row_map.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -89,6 +93,8 @@ CREATE TABLE IF NOT EXISTS raw_ingest.chain_events (
     request_window     TEXT,
     schema_version     TEXT NOT NULL DEFAULT 'v1',
     idempotency_key    TEXT NOT NULL,
+    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id  TEXT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -100,6 +106,9 @@ CREATE INDEX IF NOT EXISTS idx_raw_chain_events_chain_block
     ON raw_ingest.chain_events (chain_id, block_number DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_chain_events_tx_log
     ON raw_ingest.chain_events (tx_hash, log_index);
+CREATE INDEX IF NOT EXISTS idx_raw_chain_events_simulation_run
+    ON raw_ingest.chain_events (simulation_run_id, observed_at DESC)
+    WHERE is_simulated;
 
 CREATE TABLE IF NOT EXISTS raw_ingest.dex_events (
     event_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -117,6 +126,8 @@ CREATE TABLE IF NOT EXISTS raw_ingest.dex_events (
     raw_payload        JSONB NOT NULL,
     schema_version     TEXT NOT NULL DEFAULT 'v1',
     idempotency_key    TEXT NOT NULL,
+    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id  TEXT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -128,6 +139,9 @@ CREATE INDEX IF NOT EXISTS idx_raw_dex_events_market_observed
     ON raw_ingest.dex_events (market_key, observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_dex_events_tx
     ON raw_ingest.dex_events (tx_hash);
+CREATE INDEX IF NOT EXISTS idx_raw_dex_events_simulation_run
+    ON raw_ingest.dex_events (simulation_run_id, observed_at DESC)
+    WHERE is_simulated;
 
 CREATE TABLE IF NOT EXISTS raw_ingest.cex_ticks (
     tick_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -146,6 +160,8 @@ CREATE TABLE IF NOT EXISTS raw_ingest.cex_ticks (
     payload            JSONB NOT NULL,
     schema_version     TEXT NOT NULL DEFAULT 'v1',
     idempotency_key    TEXT NOT NULL,
+    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id  TEXT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -157,6 +173,9 @@ CREATE INDEX IF NOT EXISTS idx_raw_cex_ticks_market_observed
     ON raw_ingest.cex_ticks (market_key, observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_cex_ticks_event_ts
     ON raw_ingest.cex_ticks (event_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_cex_ticks_simulation_run
+    ON raw_ingest.cex_ticks (simulation_run_id, observed_at DESC)
+    WHERE is_simulated;
 
 CREATE TABLE IF NOT EXISTS raw_ingest.reorg_compensations (
     compensation_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -182,6 +201,8 @@ CREATE TABLE IF NOT EXISTS raw_ingest.ingest_failures (
     error_message      TEXT NOT NULL,
     retryable          BOOLEAN NOT NULL DEFAULT FALSE,
     observed_at        TIMESTAMPTZ NOT NULL,
+    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id  TEXT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -189,6 +210,23 @@ CREATE INDEX IF NOT EXISTS idx_raw_ingest_failures_source_created
     ON raw_ingest.ingest_failures (source_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_ingest_failures_stream_created
     ON raw_ingest.ingest_failures (stream_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_ingest_failures_simulation_run
+    ON raw_ingest.ingest_failures (simulation_run_id, observed_at DESC)
+    WHERE is_simulated;
+
+CREATE TABLE IF NOT EXISTS raw_ingest.simulation_row_map (
+    map_id              BIGSERIAL PRIMARY KEY,
+    simulation_run_id   TEXT NOT NULL,
+    table_name          TEXT NOT NULL,
+    row_pk              TEXT NOT NULL,
+    scenario_id         TEXT,
+    source_pk           TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (table_name, row_pk)
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_simulation_row_map_run_table
+    ON raw_ingest.simulation_row_map (simulation_run_id, table_name, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS raw_ingest.export_manifest (
     snapshot_id      TEXT PRIMARY KEY,

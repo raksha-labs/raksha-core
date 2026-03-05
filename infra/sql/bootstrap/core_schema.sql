@@ -10,6 +10,10 @@
 --   3) Pattern catalog/config + runtime state
 --   4) Detections -> Alerts -> Alert lifecycle
 --   5) Finality + analytics/support tables
+--
+-- Simlab cleanup contract:
+--   Key pipeline tables keep is_simulated + simulation_run_id.
+--   Detailed lineage is stored in simulation_row_map.
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -57,6 +61,8 @@ CREATE TABLE IF NOT EXISTS source_stream_configs (
     stream_config_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     source_id        TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
     connector_mode   TEXT NOT NULL CHECK (connector_mode IN ('websocket', 'rpc_logs', 'rpc_state', 'http_poll')),
+    operating_mode_profile TEXT NOT NULL DEFAULT 'live'
+        CHECK (operating_mode_profile IN ('live', 'test', 'both')),
     stream_name      TEXT NOT NULL,
     subscription_key TEXT,
     event_type       TEXT NOT NULL,
@@ -64,6 +70,7 @@ CREATE TABLE IF NOT EXISTS source_stream_configs (
     market_key       TEXT,
     asset_pair       TEXT,
     filter_config    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    connection_config_override JSONB,
     auth_secret_ref  TEXT,
     auth_config      JSONB NOT NULL DEFAULT '{}'::jsonb,
     payload_ts_path  TEXT,
@@ -82,6 +89,8 @@ CREATE INDEX IF NOT EXISTS idx_source_stream_configs_source_enabled
     ON source_stream_configs (source_id, enabled);
 CREATE INDEX IF NOT EXISTS idx_source_stream_configs_event_type
     ON source_stream_configs (event_type);
+CREATE INDEX IF NOT EXISTS idx_source_stream_configs_operating_mode
+    ON source_stream_configs (operating_mode_profile, enabled);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_source_stream_configs_natural
     ON source_stream_configs (source_id, stream_name, COALESCE(asset_pair, ''), COALESCE(subscription_key, ''));
 
@@ -97,8 +106,16 @@ BEGIN
         ALTER TABLE source_stream_configs
             ADD CONSTRAINT source_stream_configs_connector_mode_check
             CHECK (connector_mode IN ('websocket', 'rpc_logs', 'rpc_state', 'http_poll'));
+        ALTER TABLE source_stream_configs
+            DROP CONSTRAINT IF EXISTS source_stream_configs_operating_mode_profile_check;
+        ALTER TABLE source_stream_configs
+            ADD CONSTRAINT source_stream_configs_operating_mode_profile_check
+            CHECK (operating_mode_profile IN ('live', 'test', 'both'));
     END IF;
 END $$;
+
+ALTER TABLE source_stream_configs
+    ADD COLUMN IF NOT EXISTS connection_config_override JSONB;
 
 CREATE TABLE IF NOT EXISTS source_stream_tenant_targets (
     stream_config_id UUID NOT NULL REFERENCES source_stream_configs(stream_config_id) ON DELETE CASCADE,
@@ -113,6 +130,29 @@ CREATE TABLE IF NOT EXISTS source_stream_tenant_targets (
 
 CREATE INDEX IF NOT EXISTS idx_source_stream_tenant_targets_tenant_enabled
     ON source_stream_tenant_targets (tenant_id, enabled);
+
+CREATE TABLE IF NOT EXISTS tenant_operating_mode (
+    tenant_id          TEXT PRIMARY KEY,
+    mode               TEXT NOT NULL CHECK (mode IN ('live', 'test')),
+    mode_note          TEXT,
+    requested_by       TEXT,
+    requested_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_operating_mode_mode
+    ON tenant_operating_mode (mode, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS tenant_mode_stream_snapshot (
+    tenant_id          TEXT NOT NULL,
+    stream_config_id   UUID NOT NULL REFERENCES source_stream_configs(stream_config_id) ON DELETE CASCADE,
+    enabled_before     BOOLEAN NOT NULL,
+    captured_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, stream_config_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_mode_stream_snapshot_tenant
+    ON tenant_mode_stream_snapshot (tenant_id, captured_at DESC);
 
 CREATE TABLE IF NOT EXISTS source_requests (
     request_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -640,6 +680,8 @@ CREATE TABLE IF NOT EXISTS ingest_operational_events (
     raw_ref_type        TEXT,
     raw_ref_id          TEXT,
     raw_s3_uri          TEXT,
+    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id  TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -661,6 +703,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_operational_event_id
 CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_operational_dedup
     ON ingest_operational_events (dedup_key)
     WHERE dedup_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_simulation_run
+    ON ingest_operational_events (simulation_run_id, observed_at DESC)
+    WHERE is_simulated;
 
 CREATE OR REPLACE VIEW source_registry AS
 SELECT
@@ -680,6 +725,7 @@ SELECT
     ssc.stream_config_id AS stream_id,
     ssc.source_id,
     ssc.connector_mode,
+    ssc.operating_mode_profile,
     ssc.stream_name,
     ssc.subscription_key,
     ssc.event_type,
@@ -687,6 +733,7 @@ SELECT
     ssc.market_key,
     ssc.asset_pair,
     ssc.filter_config,
+    ssc.connection_config_override,
     ssc.auth_secret_ref,
     ssc.auth_config,
     ssc.payload_ts_path,
@@ -864,6 +911,20 @@ CREATE TABLE IF NOT EXISTS tenant_policies (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS simulation_row_map (
+    map_id              BIGSERIAL PRIMARY KEY,
+    simulation_run_id   TEXT NOT NULL,
+    table_name          TEXT NOT NULL,
+    row_pk              TEXT NOT NULL,
+    scenario_id         TEXT,
+    source_pk           TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (table_name, row_pk)
+);
+
+CREATE INDEX IF NOT EXISTS idx_simulation_row_map_run_table
+    ON simulation_row_map (simulation_run_id, table_name, created_at DESC);
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 4) Detection and Alert Pipeline
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -880,6 +941,8 @@ CREATE TABLE IF NOT EXISTS detections (
     severity     TEXT NOT NULL,
     risk_score   DOUBLE PRECISION NOT NULL,
     payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id  TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -893,6 +956,9 @@ CREATE INDEX IF NOT EXISTS idx_detections_tenant_created
     ON detections (tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_detections_tenant_pattern_created
     ON detections (tenant_id, pattern_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_detections_simulation_run
+    ON detections (simulation_run_id, created_at DESC)
+    WHERE is_simulated;
 
 CREATE TABLE IF NOT EXISTS alerts (
     id              TEXT PRIMARY KEY,
@@ -910,6 +976,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     severity        TEXT NOT NULL,
     risk_score      DOUBLE PRECISION NOT NULL,
     payload         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id  TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -928,6 +996,9 @@ CREATE INDEX IF NOT EXISTS idx_alerts_tenant_lifecycle
     ON alerts (tenant_id, lifecycle_state, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_tenant_severity
     ON alerts (tenant_id, severity, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_simulation_run
+    ON alerts (simulation_run_id, created_at DESC)
+    WHERE is_simulated;
 
 CREATE TABLE IF NOT EXISTS alert_lifecycle_events (
     id              BIGSERIAL PRIMARY KEY,
@@ -1049,6 +1120,8 @@ CREATE TABLE IF NOT EXISTS processed_events (
     event_key     TEXT,
     processed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     reverted      BOOLEAN NOT NULL DEFAULT FALSE,
+    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id  TEXT,
     UNIQUE (tx_hash, block_number, chain)
 );
 
@@ -1056,6 +1129,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_events_event_key
     ON processed_events (event_key);
 CREATE INDEX IF NOT EXISTS idx_processed_events_chain_block
     ON processed_events (chain, block_number);
+CREATE INDEX IF NOT EXISTS idx_processed_events_simulation_run
+    ON processed_events (simulation_run_id, processed_at DESC)
+    WHERE is_simulated;
 
 CREATE TABLE IF NOT EXISTS normalized_events (
     event_key              TEXT PRIMARY KEY,
@@ -1078,6 +1154,8 @@ CREATE TABLE IF NOT EXISTS normalized_events (
     observed_at            TIMESTAMPTZ NOT NULL,
     reverted               BOOLEAN NOT NULL DEFAULT FALSE,
     payload                JSONB NOT NULL,
+    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id  TEXT,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -1090,6 +1168,9 @@ CREATE INDEX IF NOT EXISTS idx_normalized_events_observed_at
     ON normalized_events (observed_at);
 CREATE INDEX IF NOT EXISTS idx_normalized_events_reverted
     ON normalized_events (reverted);
+CREATE INDEX IF NOT EXISTS idx_normalized_events_simulation_run
+    ON normalized_events (simulation_run_id, observed_at DESC)
+    WHERE is_simulated;
 
 CREATE TABLE IF NOT EXISTS dead_letter_queue (
     id               TEXT PRIMARY KEY,
@@ -1192,6 +1273,8 @@ CREATE TABLE IF NOT EXISTS history.case_events (
     source_table   TEXT NOT NULL,
     source_pk      TEXT NOT NULL,
     payload_json   JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_simulated   BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id TEXT,
     ingested_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (source_table, source_pk)
 );
@@ -1200,6 +1283,9 @@ CREATE INDEX IF NOT EXISTS idx_history_case_events_case_ts
     ON history.case_events (case_id, event_ts);
 CREATE INDEX IF NOT EXISTS idx_history_case_events_tenant_ts
     ON history.case_events (tenant_id, event_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_history_case_events_simulation_run
+    ON history.case_events (simulation_run_id, event_ts DESC)
+    WHERE is_simulated;
 
 CREATE TABLE IF NOT EXISTS history.case_alert_links (
     id              BIGSERIAL PRIMARY KEY,
@@ -1210,6 +1296,8 @@ CREATE TABLE IF NOT EXISTS history.case_alert_links (
     pattern_id      TEXT,
     severity        TEXT,
     delivery_status TEXT,
+    is_simulated    BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (case_id, alert_id)
 );
@@ -1218,6 +1306,9 @@ CREATE INDEX IF NOT EXISTS idx_history_case_alert_links_case_created
     ON history.case_alert_links (case_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_history_case_alert_links_tenant_pattern_created
     ON history.case_alert_links (tenant_id, pattern_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_case_alert_links_simulation_run
+    ON history.case_alert_links (simulation_run_id, created_at DESC)
+    WHERE is_simulated;
 
 CREATE TABLE IF NOT EXISTS history.replay_catalog (
     scenario_id                  TEXT PRIMARY KEY,

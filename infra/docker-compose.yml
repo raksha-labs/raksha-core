@@ -15,6 +15,7 @@ services:
       - ./sql/bootstrap/history_schema.sql:/docker-entrypoint-initdb.d/02-history-schema.sql:ro
       - ./sql/bootstrap/seed_sources.sql:/docker-entrypoint-initdb.d/03-seed-sources.sql:ro
       - ./sql/bootstrap/seed_patterns.sql:/docker-entrypoint-initdb.d/04-seed-patterns.sql:ro
+      - ./sql/bootstrap/seed_history_replay.sql:/docker-entrypoint-initdb.d/05-seed-history-replay.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s

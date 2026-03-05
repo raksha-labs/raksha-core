@@ -220,12 +220,14 @@ mod tests {
             protocol_category: event_schema::ProtocolCategory::Lending,
         };
 
-        let mut log = Log::default();
-        log.address = Address::zero();
-        log.block_number = Some(U64::from(100));
-        log.transaction_hash = Some(H256::zero());
-        log.log_index = Some(U256::from(7_u64));
-        log.topics = vec![H256::zero(), H256::zero(), H256::zero()];
+        let log = Log {
+            address: Address::zero(),
+            block_number: Some(U64::from(100)),
+            transaction_hash: Some(H256::zero()),
+            log_index: Some(U256::from(7_u64)),
+            topics: vec![H256::zero(), H256::zero(), H256::zero()],
+            ..Default::default()
+        };
 
         let event =
             normalize_answer_updated_event("ethereum", 1, 3, &binding, &log, 100.0, "test", 0, 2);

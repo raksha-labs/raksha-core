@@ -17,6 +17,7 @@ infra/
 │   │   ├── history_schema.sql
 │   │   ├── seed_sources.sql
 │   │   ├── seed_patterns.sql
+│   │   ├── seed_history_replay.sql
 │   │   └── raw_schema.sql
 │   └── README.md
 └── terraform/
@@ -38,7 +39,7 @@ docker compose up --build indexer detector orchestrator finality
 
 The compose stack initializes:
 
-- `raksha` DB from `sql/bootstrap/core_schema.sql`, `history_schema.sql`, `seed_sources.sql`, `seed_patterns.sql`
+- `raksha` DB from `sql/bootstrap/core_schema.sql`, `history_schema.sql`, `seed_sources.sql`, `seed_patterns.sql`, `seed_history_replay.sql`
 - `raksha_raw` DB from `sql/bootstrap/raw_schema.sql`
 
 ## AWS/Terraform

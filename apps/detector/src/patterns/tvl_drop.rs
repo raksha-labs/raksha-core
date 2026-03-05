@@ -183,6 +183,29 @@ struct TvlEvaluation {
     breached_branches: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct DetectionSubject<'a> {
+    subject_type: &'a str,
+    subject_key: &'a str,
+}
+
+#[derive(Debug, Clone)]
+struct TvlDetectionContext<'a> {
+    subject: DetectionSubject<'a>,
+    severity: Severity,
+    transition: IncidentTransition,
+    classification: ContextClassification,
+    now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct PauseDetectionContext<'a> {
+    subject: DetectionSubject<'a>,
+    severity: Severity,
+    classification: ContextClassification,
+    now: DateTime<Utc>,
+}
+
 #[derive(Default)]
 pub struct TvlDropPattern {
     // tenant_id -> rules
@@ -302,14 +325,9 @@ impl TvlDropPattern {
     fn build_tvl_detection(
         event: &UnifiedEvent,
         rule: &TvlDropRule,
-        subject_type: &str,
-        subject_key: &str,
-        severity: Severity,
-        transition: IncidentTransition,
-        classification: ContextClassification,
+        context: &TvlDetectionContext<'_>,
         evaluation: &TvlEvaluation,
         sample: &TvlStateEvent,
-        now: DateTime<Utc>,
     ) -> DetectionResult {
         let confidence_breakdown = HashMap::from([
             ("fast_drop_pct".to_string(), evaluation.fast_drop_pct),
@@ -330,10 +348,10 @@ impl TvlDropPattern {
         );
         oracle_context.insert(
             "transition".to_string(),
-            json!(incident_transition_str(&transition)),
+            json!(incident_transition_str(&context.transition)),
         );
 
-        let risk_score = match severity {
+        let risk_score = match context.severity {
             Severity::Critical => 95.0,
             Severity::High => 80.0,
             Severity::Medium => 60.0,
@@ -346,10 +364,10 @@ impl TvlDropPattern {
             pattern_id: PATTERN_ID.to_string(),
             event_key: Some(format!(
                 "tvl_drop:{}:{}:{}",
-                event.tenant_id, rule.rule_id, subject_key
+                event.tenant_id, rule.rule_id, context.subject.subject_key
             )),
-            subject_type: Some(subject_type.to_string()),
-            subject_key: Some(subject_key.to_string()),
+            subject_type: Some(context.subject.subject_type.to_string()),
+            subject_key: Some(context.subject.subject_key.to_string()),
             tenant_id: Some(event.tenant_id.clone()),
             chain: chain_from_slug(&sample.chain_slug),
             chain_slug: sample.chain_slug.clone(),
@@ -357,7 +375,7 @@ impl TvlDropPattern {
             lifecycle_state: LifecycleState::Confirmed,
             requires_confirmation: false,
             attack_family: AttackFamily::LiquidationCascade,
-            severity: severity.clone(),
+            severity: context.severity.clone(),
             description: Some(format!(
                 "TVL drop rule '{}' triggered (fast={:.2}%, slow={:.2}%, velocity={:.2}%, current_tvl=${:.2}).",
                 rule.rule_id,
@@ -403,29 +421,25 @@ impl TvlDropPattern {
                     ),
                     format!(
                         "classification={}",
-                        context_classification_str(&classification)
+                        context_classification_str(&context.classification)
                     ),
                 ],
                 attribution: Vec::new(),
             },
-            incident_transition: Some(transition),
-            context_classification: Some(classification),
+            incident_transition: Some(context.transition.clone()),
+            context_classification: Some(context.classification.clone()),
             confidence_breakdown,
             oracle_context,
-            actions_recommended: recommended_actions_for_severity(&severity),
-            created_at: now,
+            actions_recommended: recommended_actions_for_severity(&context.severity),
+            created_at: context.now,
         }
     }
 
     fn build_pause_detection(
         event: &UnifiedEvent,
         rule: &TvlDropRule,
-        subject_type: &str,
-        subject_key: &str,
-        severity: Severity,
-        classification: ContextClassification,
+        context: &PauseDetectionContext<'_>,
         pause: &TvlPauseEvent,
-        now: DateTime<Utc>,
     ) -> DetectionResult {
         let state_label = if pause.paused { "paused" } else { "unpaused" };
         let mut oracle_context = HashMap::new();
@@ -439,10 +453,10 @@ impl TvlDropPattern {
             pattern_id: PATTERN_ID.to_string(),
             event_key: Some(format!(
                 "tvl_drop:{}:{}:{}:pause",
-                event.tenant_id, rule.rule_id, subject_key
+                event.tenant_id, rule.rule_id, context.subject.subject_key
             )),
-            subject_type: Some(subject_type.to_string()),
-            subject_key: Some(subject_key.to_string()),
+            subject_type: Some(context.subject.subject_type.to_string()),
+            subject_key: Some(context.subject.subject_key.to_string()),
             tenant_id: Some(event.tenant_id.clone()),
             chain: chain_from_slug(&pause.chain_slug),
             chain_slug: pause.chain_slug.clone(),
@@ -450,7 +464,7 @@ impl TvlDropPattern {
             lifecycle_state: LifecycleState::Confirmed,
             requires_confirmation: false,
             attack_family: AttackFamily::LiquidationCascade,
-            severity,
+            severity: context.severity.clone(),
             description: Some(format!(
                 "Protocol {} is {} while a TVL-drop incident remains active.",
                 pause.protocol_id, state_label
@@ -481,14 +495,14 @@ impl TvlDropPattern {
                 attribution: Vec::new(),
             },
             incident_transition: Some(IncidentTransition::Update),
-            context_classification: Some(classification),
+            context_classification: Some(context.classification.clone()),
             confidence_breakdown: HashMap::new(),
             oracle_context,
             actions_recommended: vec![
                 "Confirm protocol control-plane status with protocol operators.".to_string(),
                 "Keep incident open until manual resolution criteria are met.".to_string(),
             ],
-            created_at: now,
+            created_at: context.now,
         }
     }
 }
@@ -663,17 +677,22 @@ impl DetectionPattern for TvlDropPattern {
                 self.state_cache.insert(cache_key.clone(), state);
 
                 if let Some(transition) = transition {
-                    let detection = Self::build_tvl_detection(
-                        event,
-                        rule,
-                        &subject_type,
-                        &subject_key,
+                    let detection_context = TvlDetectionContext {
+                        subject: DetectionSubject {
+                            subject_type: &subject_type,
+                            subject_key: &subject_key,
+                        },
                         severity,
                         transition,
                         classification,
+                        now,
+                    };
+                    let detection = Self::build_tvl_detection(
+                        event,
+                        rule,
+                        &detection_context,
                         &evaluation,
                         &sample,
-                        now,
                     );
                     emitted = pick_higher_severity(emitted, detection);
                 }
@@ -750,16 +769,17 @@ impl DetectionPattern for TvlDropPattern {
                     .await;
                 self.state_cache.insert(cache_key, state);
 
-                let detection = Self::build_pause_detection(
-                    event,
-                    rule,
-                    &subject_type,
-                    &subject_key,
-                    previous_severity,
+                let detection_context = PauseDetectionContext {
+                    subject: DetectionSubject {
+                        subject_type: &subject_type,
+                        subject_key: &subject_key,
+                    },
+                    severity: previous_severity,
                     classification,
-                    &pause,
                     now,
-                );
+                };
+                let detection =
+                    Self::build_pause_detection(event, rule, &detection_context, &pause);
                 emitted = pick_higher_severity(emitted, detection);
             }
         }
