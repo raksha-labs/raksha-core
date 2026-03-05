@@ -94,6 +94,7 @@ docker exec -i raksha-postgres psql -U postgres -d raksha < infra/sql/bootstrap/
 docker exec -i raksha-postgres psql -U postgres -d raksha < infra/sql/bootstrap/history_schema.sql
 docker exec -i raksha-postgres psql -U postgres -d raksha < infra/sql/bootstrap/seed_sources.sql
 docker exec -i raksha-postgres psql -U postgres -d raksha < infra/sql/bootstrap/seed_patterns.sql
+docker exec -i raksha-postgres psql -U postgres -d raksha < infra/sql/bootstrap/seed_history_replay.sql
 
 docker exec -i raksha-postgres-raw psql -U postgres -d raksha_raw < infra/sql/bootstrap/raw_schema.sql
 ```

@@ -394,7 +394,7 @@ impl PostgresRepository {
                     ssc.source_id,
                     ds.source_type,
                     ds.source_name,
-                    ds.connection_config,
+                    COALESCE(ssc.connection_config_override, ds.connection_config) AS connection_config,
                     ssc.connector_mode,
                     ssc.stream_name,
                     ssc.subscription_key,

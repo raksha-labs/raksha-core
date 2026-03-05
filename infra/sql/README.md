@@ -8,6 +8,7 @@ This directory contains create-only bootstrap SQL for the ingestion/history rewr
 - `bootstrap/history_schema.sql` - history/replay schema
 - `bootstrap/seed_sources.sql` - source + stream seed data
 - `bootstrap/seed_patterns.sql` - pattern + policy seed data
+- `bootstrap/seed_history_replay.sql` - baseline history replay templates for Simlab
 - `bootstrap/raw_schema.sql` - raw ingestion schema (for `raksha_raw`)
 
 ## Fresh Install
@@ -18,6 +19,7 @@ psql -U postgres -d raksha -f bootstrap/core_schema.sql
 psql -U postgres -d raksha -f bootstrap/history_schema.sql
 psql -U postgres -d raksha -f bootstrap/seed_sources.sql
 psql -U postgres -d raksha -f bootstrap/seed_patterns.sql
+psql -U postgres -d raksha -f bootstrap/seed_history_replay.sql
 
 psql -U postgres -c "CREATE DATABASE raksha_raw;"
 psql -U postgres -d raksha_raw -f bootstrap/raw_schema.sql

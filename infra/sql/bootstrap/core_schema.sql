@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS source_stream_configs (
     stream_config_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     source_id        TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
     connector_mode   TEXT NOT NULL CHECK (connector_mode IN ('websocket', 'rpc_logs', 'rpc_state', 'http_poll')),
+    operating_mode_profile TEXT NOT NULL DEFAULT 'live'
+        CHECK (operating_mode_profile IN ('live', 'test', 'both')),
     stream_name      TEXT NOT NULL,
     subscription_key TEXT,
     event_type       TEXT NOT NULL,
@@ -68,6 +70,7 @@ CREATE TABLE IF NOT EXISTS source_stream_configs (
     market_key       TEXT,
     asset_pair       TEXT,
     filter_config    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    connection_config_override JSONB,
     auth_secret_ref  TEXT,
     auth_config      JSONB NOT NULL DEFAULT '{}'::jsonb,
     payload_ts_path  TEXT,
@@ -86,6 +89,8 @@ CREATE INDEX IF NOT EXISTS idx_source_stream_configs_source_enabled
     ON source_stream_configs (source_id, enabled);
 CREATE INDEX IF NOT EXISTS idx_source_stream_configs_event_type
     ON source_stream_configs (event_type);
+CREATE INDEX IF NOT EXISTS idx_source_stream_configs_operating_mode
+    ON source_stream_configs (operating_mode_profile, enabled);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_source_stream_configs_natural
     ON source_stream_configs (source_id, stream_name, COALESCE(asset_pair, ''), COALESCE(subscription_key, ''));
 
@@ -101,8 +106,16 @@ BEGIN
         ALTER TABLE source_stream_configs
             ADD CONSTRAINT source_stream_configs_connector_mode_check
             CHECK (connector_mode IN ('websocket', 'rpc_logs', 'rpc_state', 'http_poll'));
+        ALTER TABLE source_stream_configs
+            DROP CONSTRAINT IF EXISTS source_stream_configs_operating_mode_profile_check;
+        ALTER TABLE source_stream_configs
+            ADD CONSTRAINT source_stream_configs_operating_mode_profile_check
+            CHECK (operating_mode_profile IN ('live', 'test', 'both'));
     END IF;
 END $$;
+
+ALTER TABLE source_stream_configs
+    ADD COLUMN IF NOT EXISTS connection_config_override JSONB;
 
 CREATE TABLE IF NOT EXISTS source_stream_tenant_targets (
     stream_config_id UUID NOT NULL REFERENCES source_stream_configs(stream_config_id) ON DELETE CASCADE,
@@ -117,6 +130,29 @@ CREATE TABLE IF NOT EXISTS source_stream_tenant_targets (
 
 CREATE INDEX IF NOT EXISTS idx_source_stream_tenant_targets_tenant_enabled
     ON source_stream_tenant_targets (tenant_id, enabled);
+
+CREATE TABLE IF NOT EXISTS tenant_operating_mode (
+    tenant_id          TEXT PRIMARY KEY,
+    mode               TEXT NOT NULL CHECK (mode IN ('live', 'test')),
+    mode_note          TEXT,
+    requested_by       TEXT,
+    requested_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_operating_mode_mode
+    ON tenant_operating_mode (mode, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS tenant_mode_stream_snapshot (
+    tenant_id          TEXT NOT NULL,
+    stream_config_id   UUID NOT NULL REFERENCES source_stream_configs(stream_config_id) ON DELETE CASCADE,
+    enabled_before     BOOLEAN NOT NULL,
+    captured_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, stream_config_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_mode_stream_snapshot_tenant
+    ON tenant_mode_stream_snapshot (tenant_id, captured_at DESC);
 
 CREATE TABLE IF NOT EXISTS source_requests (
     request_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -689,6 +725,7 @@ SELECT
     ssc.stream_config_id AS stream_id,
     ssc.source_id,
     ssc.connector_mode,
+    ssc.operating_mode_profile,
     ssc.stream_name,
     ssc.subscription_key,
     ssc.event_type,
@@ -696,6 +733,7 @@ SELECT
     ssc.market_key,
     ssc.asset_pair,
     ssc.filter_config,
+    ssc.connection_config_override,
     ssc.auth_secret_ref,
     ssc.auth_config,
     ssc.payload_ts_path,

@@ -52,7 +52,7 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
     let tvl_usd = payload
         .get("tvl_usd")
         .and_then(value_to_f64)
-        .or_else(|| match (tvl_native, price_usd) {
+        .or(match (tvl_native, price_usd) {
             (Some(native), Some(price)) => Some(native * price),
             _ => None,
         })
