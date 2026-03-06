@@ -30,6 +30,7 @@ permissions:
 jobs:
   plan:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     concurrency:
       group: terraform-${{ github.repository }}-${{ inputs.environment }}
       cancel-in-progress: false

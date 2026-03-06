@@ -28,6 +28,10 @@ trim_whitespace() {
   printf '%s' "${1:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
+install_cancel_trap() {
+  trap 'log "cancellation signal received; aborting"; exit 130' INT TERM
+}
+
 normalize_csv_filter() {
   echo "${1:-}" | tr -d '[:space:]'
 }

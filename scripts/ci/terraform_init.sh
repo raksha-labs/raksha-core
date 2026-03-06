@@ -6,6 +6,7 @@ SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/common.sh"
 
 require_cmd terraform
+install_cancel_trap
 
 ENVIRONMENT="${1:-${ENVIRONMENT:-}}"
 [[ -n "${ENVIRONMENT}" ]] || fail "usage: $0 <environment>"

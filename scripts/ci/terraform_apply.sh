@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/common.sh"
 require_cmd terraform
 require_cmd aws
 require_cmd python3
+install_cancel_trap
 
 ENVIRONMENT="${1:-${ENVIRONMENT:-}}"
 IMAGE_TAG_INPUT="${2:-${IMAGE_TAG:-latest}}"

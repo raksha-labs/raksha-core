@@ -34,9 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [test, stage, prod]
-
-    if: github.event_name != 'workflow_dispatch' || matrix.environment == github.event.inputs.target_environment
+        environment: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('["{0}"]', github.event.inputs.target_environment) || '["test","stage","prod"]') }}
 
     uses: ./.github/workflows/reusable-terraform-plan.yml
     with:
