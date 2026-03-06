@@ -21,16 +21,19 @@ output "repository_urls" {
 output "database_url_secret_arn" {
   value       = var.enable_managed_data ? module.data_prod[0].database_url_secret_arn : null
   description = "DATABASE_URL secret ARN"
+  sensitive   = true
 }
 
 output "redis_url_secret_arn" {
   value       = var.enable_managed_data ? module.data_prod[0].redis_url_secret_arn : null
   description = "REDIS_URL secret ARN"
+  sensitive   = true
 }
 
 output "raw_database_url_secret_arn" {
   value       = var.enable_managed_data ? module.data_prod[0].raw_database_url_secret_arn : null
   description = "RAW_DATABASE_URL secret ARN"
+  sensitive   = true
 }
 
 output "waf_arn" {
