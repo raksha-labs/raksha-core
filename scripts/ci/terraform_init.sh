@@ -23,8 +23,13 @@ fi
 require_env TF_BACKEND_BUCKET
 require_env TF_BACKEND_DYNAMODB_TABLE
 
+TF_BACKEND_BUCKET=$(trim_whitespace "${TF_BACKEND_BUCKET:-}")
+TF_BACKEND_DYNAMODB_TABLE=$(trim_whitespace "${TF_BACKEND_DYNAMODB_TABLE:-}")
+TF_BACKEND_REGION=$(trim_whitespace "${TF_BACKEND_REGION:-${AWS_REGION:-eu-west-1}}")
+TF_BACKEND_KMS_KEY_ID=$(trim_whitespace "${TF_BACKEND_KMS_KEY_ID:-}")
+TF_BACKEND_ROLE_ARN=$(trim_whitespace "${TF_BACKEND_ROLE_ARN:-}")
+
 REPO_NAME=$(basename "${REPO_ROOT}")
-TF_BACKEND_REGION="${TF_BACKEND_REGION:-${AWS_REGION:-eu-west-1}}"
 TF_STATE_KEY="${TF_STATE_KEY:-${TF_BACKEND_KEY_PREFIX:-raksha}/${REPO_NAME}/${ENVIRONMENT}/terraform.tfstate}"
 
 init_args=(

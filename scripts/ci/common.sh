@@ -24,6 +24,10 @@ require_env() {
   fi
 }
 
+trim_whitespace() {
+  printf '%s' "${1:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
 normalize_csv_filter() {
   echo "${1:-}" | tr -d '[:space:]'
 }

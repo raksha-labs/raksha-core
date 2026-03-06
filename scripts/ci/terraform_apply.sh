@@ -27,8 +27,9 @@ state_key_for_env() {
 }
 
 state_lock_details_for_env() {
-  local dynamo_table="${TF_BACKEND_DYNAMODB_TABLE:-}"
-  local bucket="${TF_BACKEND_BUCKET:-}"
+  local dynamo_table bucket
+  dynamo_table=$(trim_whitespace "${TF_BACKEND_DYNAMODB_TABLE:-}")
+  bucket=$(trim_whitespace "${TF_BACKEND_BUCKET:-}")
   [[ -n "${dynamo_table}" && -n "${bucket}" ]] || return 0
 
   local expected_state_key
@@ -402,8 +403,9 @@ import_log_groups_if_needed() {
 }
 
 force_unlock_stale_if_needed() {
-  local dynamo_table="${TF_BACKEND_DYNAMODB_TABLE:-}"
-  local bucket="${TF_BACKEND_BUCKET:-}"
+  local dynamo_table bucket
+  dynamo_table=$(trim_whitespace "${TF_BACKEND_DYNAMODB_TABLE:-}")
+  bucket=$(trim_whitespace "${TF_BACKEND_BUCKET:-}")
   [[ -n "${dynamo_table}" && -n "${bucket}" ]] || return 0
 
   local stale_threshold_minutes="${TF_STALE_LOCK_MINUTES:-15}"
