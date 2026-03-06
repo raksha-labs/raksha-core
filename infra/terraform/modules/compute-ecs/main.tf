@@ -37,6 +37,29 @@ locals {
     }
   }
 
+  # Fargate accepts only specific CPU/memory pairs. When lower-cost EC2-sized
+  # overrides are reused in Fargate mode, round them up to the nearest
+  # supported pair instead of failing task registration.
+  fargate_cpu_options = [256, 512, 1024, 2048, 4096]
+  fargate_memory_options_by_cpu = {
+    "256"  = [512, 1024, 2048]
+    "512"  = [1024, 2048, 3072, 4096]
+    "1024" = [2048, 3072, 4096, 5120, 6144, 7168, 8192]
+    "2048" = [4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384]
+    "4096" = [8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384, 17408, 18432, 19456, 20480, 21504, 22528, 23552, 24576, 25600, 26624, 27648, 28672, 29696, 30720]
+  }
+  effective_cpu_memory = var.compute_mode == "ec2" ? local.cpu_memory : {
+    for name, cfg in local.cpu_memory :
+    name => {
+      cpu = try([for option in local.fargate_cpu_options : option if option >= cfg.cpu][0], local.fargate_cpu_options[length(local.fargate_cpu_options) - 1])
+      memory = try([
+        for option in local.fargate_memory_options_by_cpu[tostring(try([for cpu_option in local.fargate_cpu_options : cpu_option if cpu_option >= cfg.cpu][0], local.fargate_cpu_options[length(local.fargate_cpu_options) - 1]))] :
+        option
+        if option >= cfg.memory
+      ][0], local.fargate_memory_options_by_cpu[tostring(try([for cpu_option in local.fargate_cpu_options : cpu_option if cpu_option >= cfg.cpu][0], local.fargate_cpu_options[length(local.fargate_cpu_options) - 1]))][length(local.fargate_memory_options_by_cpu[tostring(try([for cpu_option in local.fargate_cpu_options : cpu_option if cpu_option >= cfg.cpu][0], local.fargate_cpu_options[length(local.fargate_cpu_options) - 1]))]) - 1])
+    }
+  }
+
   spot_eligible = {
     for name, cfg in local.services :
     name => contains(var.fargate_spot_scaling_classes, try(cfg.scaling_class, ""))
@@ -432,8 +455,8 @@ resource "aws_ecs_task_definition" "service" {
   family                   = "raksha-${var.environment}-${each.key}"
   requires_compatibilities = var.compute_mode == "ec2" ? ["EC2"] : ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = tostring(local.cpu_memory[each.key].cpu)
-  memory                   = tostring(local.cpu_memory[each.key].memory)
+  cpu                      = tostring(local.effective_cpu_memory[each.key].cpu)
+  memory                   = tostring(local.effective_cpu_memory[each.key].memory)
   execution_role_arn       = aws_iam_role.ecs_task_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
@@ -483,8 +506,7 @@ resource "aws_ecs_service" "service" {
   deployment_minimum_healthy_percent = 50
   deployment_maximum_percent         = 200
 
-  launch_type      = var.compute_mode == "ec2" ? "EC2" : null
-  platform_version = var.compute_mode == "fargate_mix" ? "LATEST" : null
+  launch_type = var.compute_mode == "ec2" ? "EC2" : null
 
   dynamic "capacity_provider_strategy" {
     for_each = var.compute_mode == "fargate_mix" && local.spot_eligible[each.key] ? [
@@ -602,8 +624,7 @@ resource "aws_ecs_service" "test_data" {
     rollback = true
   }
 
-  launch_type      = var.compute_mode == "ec2" ? "EC2" : null
-  platform_version = var.compute_mode == "fargate_mix" ? "LATEST" : null
+  launch_type = var.compute_mode == "ec2" ? "EC2" : null
 
   dynamic "network_configuration" {
     for_each = var.compute_mode == "ec2" ? [1] : []
