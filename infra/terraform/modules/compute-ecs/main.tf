@@ -488,6 +488,10 @@ resource "aws_ecs_task_definition" "service" {
   tags = var.tags
 }
 
+resource "terraform_data" "ecs_service_launch_mode" {
+  triggers_replace = var.compute_mode
+}
+
 resource "aws_ecs_service" "service" {
   for_each = local.services
 
@@ -574,6 +578,13 @@ resource "aws_ecs_service" "service" {
     aws_lb_listener.public_http,
     aws_lb_listener.admin_http
   ]
+
+  lifecycle {
+    # ECS cannot update an existing EC2 service in place to a Fargate-style
+    # network configuration (or the reverse). Force replacement when the module
+    # launch mode changes so Terraform recreates the service cleanly.
+    replace_triggered_by = [terraform_data.ecs_service_launch_mode]
+  }
 }
 
 resource "aws_ecs_task_definition" "test_data" {
@@ -650,6 +661,10 @@ resource "aws_ecs_service" "test_data" {
   tags = merge(var.tags, {
     Service = each.key
   })
+
+  lifecycle {
+    replace_triggered_by = [terraform_data.ecs_service_launch_mode]
+  }
 }
 
 data "aws_ssm_parameter" "ecs_optimized_ami" {
