@@ -17,6 +17,9 @@ locals {
     svc.service_name => svc
   }
   secret_prefix = "raksha/${var.environment}"
+  # Fargate tasks need outbound access for image pull/secrets. If NAT is off in test,
+  # place tasks in public subnets and assign public IP.
+  use_public_network_for_fargate = var.compute_mode != "ec2" && !var.create_nat_gateway
 }
 
 resource "random_password" "test_db" {
@@ -161,7 +164,7 @@ module "compute" {
   service_cpu_memory           = var.service_cpu_memory
   compute_mode                 = var.compute_mode
   vpc_id                       = module.network.vpc_id
-  task_subnet_ids              = var.compute_mode == "ec2" ? module.network.public_subnet_ids : module.network.private_subnet_ids
+  task_subnet_ids              = local.use_public_network_for_fargate ? module.network.public_subnet_ids : (var.compute_mode == "ec2" ? module.network.public_subnet_ids : module.network.private_subnet_ids)
   ec2_subnet_ids               = module.network.public_subnet_ids
   public_alb_subnet_ids        = module.network.public_subnet_ids
   admin_alb_subnet_ids         = module.network.private_subnet_ids
@@ -171,7 +174,7 @@ module "compute" {
   alb_admin_internal_sg_id     = module.security.alb_admin_internal_sg_id
   secret_prefix                = local.secret_prefix
   image_tag                    = var.image_tag
-  assign_public_ip             = var.compute_mode == "ec2"
+  assign_public_ip             = var.compute_mode == "ec2" || local.use_public_network_for_fargate
   public_default_service       = var.public_default_service
   admin_default_service        = var.admin_default_service
   admin_access_mode            = var.admin_access_mode

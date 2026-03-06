@@ -4,6 +4,11 @@ compute_mode          = "ec2"
 ec2_instance_type     = "t4g.medium"  # 4 GB ARM — fits all services at reduced test sizes
 enable_managed_data   = false
 budget_limit_usd      = 100
+# To run ECS services, including the built-in postgres/redis test services, on
+# Fargate instead of EC2, set:
+# compute_mode        = "fargate_mix"
+# With NAT disabled in test, the stack will place Fargate tasks in public
+# subnets and assign public IPs so they can pull images and reach AWS APIs.
 # Optional cost controls:
 # anomaly_total_impact_absolute_usd   = 20
 # enable_billing_estimated_charges_alarm = true
