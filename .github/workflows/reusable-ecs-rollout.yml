@@ -52,6 +52,8 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    env:
+      INFRA_AWS_ROLE_ARN: ${{ secrets.infra_aws_role_arn }}
     outputs:
       cluster_name: ${{ steps.resolve.outputs.cluster_name }}
       core_contract_version: ${{ steps.resolve.outputs.core_contract_version }}
@@ -66,14 +68,14 @@ jobs:
           terraform_version: 1.6.6
 
       - name: Configure AWS credentials for Terraform apply
-        if: ${{ inputs.apply_infra && secrets.infra_aws_role_arn != '' }}
+        if: ${{ inputs.apply_infra && env.INFRA_AWS_ROLE_ARN != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.infra_aws_role_arn }}
+          role-to-assume: ${{ env.INFRA_AWS_ROLE_ARN }}
           aws-region: ${{ inputs.aws_region }}
 
       - name: Configure AWS credentials
-        if: ${{ !(inputs.apply_infra && secrets.infra_aws_role_arn != '') }}
+        if: ${{ !(inputs.apply_infra && env.INFRA_AWS_ROLE_ARN != '') }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.aws_role_arn }}
@@ -106,10 +108,10 @@ jobs:
           scripts/ci/deploy_ecs_services.sh "${{ inputs.environment }}"
 
       - name: Configure AWS credentials for output resolution
-        if: ${{ secrets.infra_aws_role_arn != '' }}
+        if: ${{ env.INFRA_AWS_ROLE_ARN != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.infra_aws_role_arn }}
+          role-to-assume: ${{ env.INFRA_AWS_ROLE_ARN }}
           aws-region: ${{ inputs.aws_region }}
 
       - name: Resolve rollout outputs
