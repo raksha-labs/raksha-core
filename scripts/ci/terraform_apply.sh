@@ -153,12 +153,11 @@ run_tf_with_lock_retry() {
 
 force_unlock_from_output_if_needed() {
   local output="$1"
-  local lock_id lock_operation
+  local lock_id
 
-  lock_id=$(printf '%s\n' "${output}" | awk -F': *' '/^[[:space:]]*ID:/{print $2; exit}')
-  lock_operation=$(printf '%s\n' "${output}" | awk -F': *' '/^[[:space:]]*Operation:/{print $2; exit}')
+  lock_id=$(printf '%s\n' "${output}" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -n 1 || true)
 
-  if [[ "${lock_operation}" == "OperationTypeInvalid" && -n "${lock_id}" ]]; then
+  if grep -q "OperationTypeInvalid" <<<"${output}" && [[ -n "${lock_id}" ]]; then
     log "WARNING: invalid Terraform state lock detected from command output — force-unlocking immediately: ${lock_id}"
     terraform -chdir="${TF_DIR}" force-unlock -force "${lock_id}" || true
     return 0
