@@ -36,9 +36,16 @@ while IFS= read -r service; do
   fi
 
   remote_image="${REGISTRY}/${repo}:${IMAGE_TAG}"
-  log "pushing ${remote_image}"
-  docker tag "${BUNDLE_IMAGE}" "${remote_image}"
-  docker push "${remote_image}"
+  if aws ecr describe-images \
+    --repository-name "${repo}" \
+    --image-ids "imageTag=${IMAGE_TAG}" \
+    --region "${AWS_REGION}" >/dev/null 2>&1; then
+    log "skipping ${remote_image}: immutable tag already exists"
+  else
+    log "pushing ${remote_image}"
+    docker tag "${BUNDLE_IMAGE}" "${remote_image}"
+    docker push "${remote_image}"
+  fi
 
   if [[ "${PUSH_LATEST}" == "true" ]]; then
     latest_image="${REGISTRY}/${repo}:latest"
