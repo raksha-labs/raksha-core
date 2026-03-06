@@ -31,6 +31,8 @@ on:
     secrets:
       aws_role_arn:
         required: true
+      infra_aws_role_arn:
+        required: false
       tf_backend_bucket:
         required: true
       tf_backend_dynamodb_table:
@@ -63,7 +65,15 @@ jobs:
         with:
           terraform_version: 1.6.6
 
+      - name: Configure AWS credentials for Terraform apply
+        if: ${{ inputs.apply_infra && secrets.infra_aws_role_arn != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.infra_aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
       - name: Configure AWS credentials
+        if: ${{ !(inputs.apply_infra && secrets.infra_aws_role_arn != '') }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.aws_role_arn }}
@@ -80,6 +90,12 @@ jobs:
           scripts/ci/terraform_apply.sh "${{ inputs.environment }}" "${{ inputs.image_tag }}"
 
       - name: Roll out ECS services
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Run ECS rollout
         env:
           AWS_REGION: ${{ inputs.aws_region }}
           SERVICE_FILTER: ${{ inputs.service_filter }}
@@ -88,6 +104,13 @@ jobs:
           TF_BACKEND_KMS_KEY_ID: ${{ secrets.tf_backend_kms_key_id }}
         run: |
           scripts/ci/deploy_ecs_services.sh "${{ inputs.environment }}"
+
+      - name: Configure AWS credentials for output resolution
+        if: ${{ secrets.infra_aws_role_arn != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.infra_aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
 
       - name: Resolve rollout outputs
         id: resolve

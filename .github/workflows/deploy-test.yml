@@ -104,6 +104,7 @@ jobs:
       aws_region: eu-west-1
     secrets:
       aws_role_arn: ${{ secrets.AWS_TEST_DEPLOY_ROLE_ARN }}
+      infra_aws_role_arn: ${{ secrets.AWS_INFRA_ROLE_ARN }}
       tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET }}
       tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
       tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
