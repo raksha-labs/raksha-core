@@ -119,16 +119,18 @@ run_tf_with_lock_retry() {
   local max_attempts="${TF_LOCK_RETRY_MAX_ATTEMPTS:-6}"
   local sleep_seconds="${TF_LOCK_RETRY_SLEEP_SECONDS:-20}"
   local attempt=1
-  local output rc
+  local output rc output_file
 
   while (( attempt <= max_attempts )); do
+    output_file=$(mktemp)
     set +e
-    output=$("$@" 2>&1)
-    rc=$?
+    "$@" 2>&1 | tee "${output_file}"
+    rc=${PIPESTATUS[0]}
     set -e
+    output=$(<"${output_file}")
+    rm -f "${output_file}"
 
     if [[ "${rc}" -eq 0 ]]; then
-      [[ -n "${output}" ]] && printf '%s\n' "${output}"
       return 0
     fi
 
