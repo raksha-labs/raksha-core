@@ -50,16 +50,18 @@ jobs:
     needs: deploy
     runs-on: ubuntu-latest
     if: ${{ needs.deploy.result == 'success' }}
+    env:
+      PLATFORM_REPO_DISPATCH_TOKEN: ${{ secrets.PLATFORM_REPO_DISPATCH_TOKEN }}
 
     steps:
       - name: Skip platform dispatch when token is not configured
-        if: ${{ secrets.PLATFORM_REPO_DISPATCH_TOKEN == '' }}
+        if: ${{ env.PLATFORM_REPO_DISPATCH_TOKEN == '' }}
         run: echo "::warning title=Platform dispatch skipped::Secret PLATFORM_REPO_DISPATCH_TOKEN is not configured; core deploy completed without triggering raksha-platform."
 
       - name: Trigger platform deployment dispatch
-        if: ${{ secrets.PLATFORM_REPO_DISPATCH_TOKEN != '' }}
+        if: ${{ env.PLATFORM_REPO_DISPATCH_TOKEN != '' }}
         env:
-          GH_TOKEN: ${{ secrets.PLATFORM_REPO_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ env.PLATFORM_REPO_DISPATCH_TOKEN }}
           TARGET_REPO: raksha-labs/raksha-platform
           TARGET_ENV: ${{ inputs.target_environment }}
           CORE_IMAGE_TAG: ${{ inputs.image_tag }}
