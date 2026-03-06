@@ -308,21 +308,57 @@ import_ecr_repositories_if_needed() {
   ' "${REPO_ROOT}/infra/service-catalog.yaml")
 }
 
+ensure_secret_active_for_import() {
+  local secret_id="$1"
+  local deleted_date
+
+  if ! deleted_date=$(aws secretsmanager describe-secret \
+    --secret-id "${secret_id}" \
+    --region "${AWS_REGION_EFFECTIVE}" \
+    --query 'DeletedDate' \
+    --output text 2>/dev/null); then
+    return 1
+  fi
+
+  if [[ "${deleted_date}" != "None" && -n "${deleted_date}" ]]; then
+    log "Secrets Manager secret is scheduled for deletion; restoring before import: ${secret_id}"
+    aws secretsmanager restore-secret \
+      --secret-id "${secret_id}" \
+      --region "${AWS_REGION_EFFECTIVE}" >/dev/null
+  fi
+
+  return 0
+}
+
 import_shared_secrets_if_needed() {
   local db_secret="raksha/${ENVIRONMENT}/shared/DATABASE_URL"
+  local raw_db_secret="raksha/${ENVIRONMENT}/shared/RAW_DATABASE_URL"
   local redis_secret="raksha/${ENVIRONMENT}/shared/REDIS_URL"
 
   if ! resource_in_state "module.data_test[0].aws_secretsmanager_secret.database"; then
-    if aws secretsmanager describe-secret --secret-id "${db_secret}" --region "${AWS_REGION_EFFECTIVE}" >/dev/null 2>&1; then
+    if ensure_secret_active_for_import "${db_secret}"; then
       log "import existing Secrets Manager secret into state: ${db_secret}"
       tf_import "module.data_test[0].aws_secretsmanager_secret.database" "${db_secret}"
+    else
+      log "Secrets Manager secret not found; skipping import so Terraform can create it: ${db_secret}"
+    fi
+  fi
+
+  if ! resource_in_state "module.data_test[0].aws_secretsmanager_secret.raw_database"; then
+    if ensure_secret_active_for_import "${raw_db_secret}"; then
+      log "import existing Secrets Manager secret into state: ${raw_db_secret}"
+      tf_import "module.data_test[0].aws_secretsmanager_secret.raw_database" "${raw_db_secret}"
+    else
+      log "Secrets Manager secret not found; skipping import so Terraform can create it: ${raw_db_secret}"
     fi
   fi
 
   if ! resource_in_state "module.data_test[0].aws_secretsmanager_secret.redis"; then
-    if aws secretsmanager describe-secret --secret-id "${redis_secret}" --region "${AWS_REGION_EFFECTIVE}" >/dev/null 2>&1; then
+    if ensure_secret_active_for_import "${redis_secret}"; then
       log "import existing Secrets Manager secret into state: ${redis_secret}"
       tf_import "module.data_test[0].aws_secretsmanager_secret.redis" "${redis_secret}"
+    else
+      log "Secrets Manager secret not found; skipping import so Terraform can create it: ${redis_secret}"
     fi
   fi
 }
