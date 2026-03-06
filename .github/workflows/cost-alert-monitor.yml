@@ -142,7 +142,7 @@ jobs:
           
           if [ -n "$MONITORS" ]; then
             ANOMALIES=$(aws ce get-anomalies \
-              --date-interval Start=${START_DATE},End=${END_DATE} \
+              --date-interval StartDate=${START_DATE},EndDate=${END_DATE} \
               --query 'Anomalies[?Impact.MaxImpact > `10`]' \
               --output json)
             
