@@ -14,6 +14,7 @@ IMAGE_TAG_INPUT="${2:-${IMAGE_TAG:-latest}}"
 [[ -n "${ENVIRONMENT}" ]] || fail "usage: $0 <environment> [image_tag]"
 
 "${SCRIPT_DIR}/terraform_init.sh" "${ENVIRONMENT}"
+log "terraform phase: init complete; starting apply preparation (${ENVIRONMENT})"
 
 TF_DIR=$(terraform_dir_for_env "${ENVIRONMENT}")
 AWS_REGION_EFFECTIVE="${AWS_REGION:-eu-west-1}"
@@ -444,9 +445,11 @@ import_ecr_repositories_if_needed
 import_shared_secrets_if_needed
 import_log_groups_if_needed
 import_ecs_services_if_needed
+log "terraform phase: apply preparation complete; starting terraform apply (${ENVIRONMENT})"
 run_tf_with_lock_retry terraform -chdir="${TF_DIR}" apply \
   -input=false \
   -auto-approve \
   -lock=true \
   -lock-timeout="${TF_LOCK_TIMEOUT}" \
   -var="image_tag=${IMAGE_TAG_INPUT}"
+log "terraform phase: apply complete (${ENVIRONMENT})"

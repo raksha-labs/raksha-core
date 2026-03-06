@@ -16,6 +16,7 @@ TF_DIR=$(terraform_dir_for_env "${ENVIRONMENT}")
 if [[ "${TERRAFORM_INIT_BACKEND_FALSE:-false}" == "true" ]]; then
   log "terraform init with backend disabled (${ENVIRONMENT})"
   terraform -chdir="${TF_DIR}" init -input=false -backend=false
+  log "terraform init complete (${ENVIRONMENT}) backend=disabled"
   exit 0
 fi
 
@@ -48,3 +49,4 @@ fi
 
 log "terraform init (${ENVIRONMENT}) using remote backend key ${TF_STATE_KEY}"
 terraform "${init_args[@]}"
+log "terraform init complete (${ENVIRONMENT}) backend_key=${TF_STATE_KEY}"

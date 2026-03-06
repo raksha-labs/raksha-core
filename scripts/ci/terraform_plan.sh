@@ -12,6 +12,7 @@ IMAGE_TAG_INPUT="${2:-${IMAGE_TAG:-latest}}"
 [[ -n "${ENVIRONMENT}" ]] || fail "usage: $0 <environment> [image_tag]"
 
 "${SCRIPT_DIR}/terraform_init.sh" "${ENVIRONMENT}"
+log "terraform phase: init complete; starting plan (${ENVIRONMENT})"
 
 TF_DIR=$(terraform_dir_for_env "${ENVIRONMENT}")
 PLAN_FILE="${TF_DIR}/tfplan"
@@ -26,3 +27,4 @@ terraform -chdir="${TF_DIR}" plan \
   -no-color \
   -var="image_tag=${IMAGE_TAG_INPUT}" \
   -out="${PLAN_FILE}" | tee "${PLAN_TXT}"
+log "terraform phase: plan complete (${ENVIRONMENT}) plan_file=${PLAN_FILE}"
