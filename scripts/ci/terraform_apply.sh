@@ -181,6 +181,57 @@ resource_in_state() {
   terraform -chdir="${TF_DIR}" state show "${address}" >/dev/null 2>&1
 }
 
+terraform_string_var() {
+  local var_name="$1"
+  printf 'try(var.%s, "")\n' "${var_name}" | terraform -chdir="${TF_DIR}" console -no-color 2>/dev/null | tr -d '"'
+}
+
+desired_ecs_launch_mode() {
+  local compute_mode
+  compute_mode=$(trim_whitespace "$(terraform_string_var compute_mode)")
+  if [[ "${compute_mode}" == "ec2" ]]; then
+    printf 'EC2\n'
+  else
+    printf 'FARGATE\n'
+  fi
+}
+
+existing_ecs_launch_mode() {
+  local cluster_name="$1"
+  local service_name="$2"
+  local launch_type capacity_provider
+
+  launch_type=$(aws ecs describe-services \
+    --cluster "${cluster_name}" \
+    --services "${service_name}" \
+    --region "${AWS_REGION_EFFECTIVE}" \
+    --query 'services[0].launchType' \
+    --output text 2>/dev/null || true)
+  launch_type=$(trim_whitespace "${launch_type}")
+
+  if [[ -n "${launch_type}" && "${launch_type}" != "None" ]]; then
+    printf '%s\n' "${launch_type}"
+    return 0
+  fi
+
+  capacity_provider=$(aws ecs describe-services \
+    --cluster "${cluster_name}" \
+    --services "${service_name}" \
+    --region "${AWS_REGION_EFFECTIVE}" \
+    --query 'services[0].capacityProviderStrategy[0].capacityProvider' \
+    --output text 2>/dev/null || true)
+  capacity_provider=$(trim_whitespace "${capacity_provider}")
+
+  case "${capacity_provider}" in
+    FARGATE|FARGATE_SPOT)
+      printf 'FARGATE\n'
+      ;;
+    *)
+      printf 'UNKNOWN\n'
+      ;;
+  esac
+}
+
 import_cicd_roles_if_needed() {
   local images_role="raksha-${ENVIRONMENT}-github-images-role"
   local infra_role="raksha-${ENVIRONMENT}-github-infra-role"
@@ -366,6 +417,8 @@ import_shared_secrets_if_needed() {
 
 import_ecs_services_if_needed() {
   local cluster_name="raksha-${ENVIRONMENT}"
+  local desired_mode
+  desired_mode=$(desired_ecs_launch_mode)
   local services=()
   local svc
   while IFS= read -r svc; do
@@ -380,6 +433,7 @@ import_ecs_services_if_needed() {
   local service_name
   local address
   local existing_count
+  local existing_mode
   for svc in "${services[@]}"; do
     if [[ "${svc}" == "postgres" || "${svc}" == "redis" ]]; then
       address="module.compute.aws_ecs_service.test_data[\"${svc}\"]"
@@ -400,6 +454,16 @@ import_ecs_services_if_needed() {
       --output text 2>/dev/null || true)
 
     if [[ "${existing_count}" == "1" ]]; then
+      existing_mode=$(existing_ecs_launch_mode "${cluster_name}" "${service_name}")
+      if [[ "${existing_mode}" != "UNKNOWN" && "${existing_mode}" != "${desired_mode}" ]]; then
+        log "existing ECS service launch mode (${existing_mode}) does not match desired mode (${desired_mode}); deleting so Terraform can recreate: ${service_name}"
+        aws ecs delete-service \
+          --cluster "${cluster_name}" \
+          --service "${service_name}" \
+          --force \
+          --region "${AWS_REGION_EFFECTIVE}" >/dev/null
+        continue
+      fi
       log "import existing ECS service into state: ${service_name}"
       tf_import "${address}" "${cluster_name}/${service_name}"
     fi

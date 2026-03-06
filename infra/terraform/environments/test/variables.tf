@@ -19,7 +19,7 @@ variable "vpc_cidr" {
 variable "compute_mode" {
   description = "Compute mode for test"
   type        = string
-  default     = "ec2"
+  default     = "fargate_mix"
 }
 
 variable "enable_managed_data" {
