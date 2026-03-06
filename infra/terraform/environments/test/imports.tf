@@ -63,12 +63,12 @@ import {
 }
 
 import {
-  to = module.compute.aws_iam_role.ecs_instance[0]
+  to = module.compute.aws_iam_role.ecs_instance
   id = "raksha-test-ecs-instance-role"
 }
 
 import {
-  to = module.compute.aws_iam_instance_profile.ecs_instance[0]
+  to = module.compute.aws_iam_instance_profile.ecs_instance
   id = "raksha-test-ecs-instance-profile"
 }
 
