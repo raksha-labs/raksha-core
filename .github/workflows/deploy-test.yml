@@ -98,7 +98,7 @@ jobs:
     uses: ./.github/workflows/reusable-ecs-rollout.yml
     with:
       environment: test
-      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || format('sha-{0}', github.sha) }}
+      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || needs.build-images.result == 'success' && format('sha-{0}', github.sha) || 'latest' }}
       apply_infra: ${{ github.event_name == 'push' || github.event.inputs.apply_infra == 'true' }}
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
       aws_region: eu-west-1
