@@ -186,7 +186,8 @@ resource "aws_iam_role_policy" "deploy" {
           "iam:PassRole",
           "elasticloadbalancing:DescribeTargetGroups",
           "elasticloadbalancing:DescribeListenerAttributes",
-          "elasticloadbalancing:ModifyListenerAttributes"
+          "elasticloadbalancing:ModifyListenerAttributes",
+          "secretsmanager:RestoreSecret"
         ]
         Resource = "*"
       }
