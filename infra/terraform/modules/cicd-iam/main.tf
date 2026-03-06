@@ -1,9 +1,22 @@
 locals {
-  branch_subjects = [for branch in var.github_allowed_branches : "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/${branch}"]
-  tag_subjects    = var.allow_tag_refs ? ["repo:${var.github_org}/${var.github_repo}:ref:refs/tags/*"] : []
-  pr_subjects     = var.allow_pull_request ? ["repo:${var.github_org}/${var.github_repo}:pull_request"] : []
-  env_subjects    = [for environment in var.github_allowed_environments : "repo:${var.github_org}/${var.github_repo}:environment:${environment}"]
-  subjects        = concat(local.branch_subjects, local.tag_subjects, local.pr_subjects, local.env_subjects)
+  trusted_repositories = distinct(concat([var.github_repo], var.github_additional_repositories))
+  branch_subjects = flatten([
+    for repo in local.trusted_repositories : [
+      for branch in var.github_allowed_branches : "repo:${var.github_org}/${repo}:ref:refs/heads/${branch}"
+    ]
+  ])
+  tag_subjects = var.allow_tag_refs ? [
+    for repo in local.trusted_repositories : "repo:${var.github_org}/${repo}:ref:refs/tags/*"
+  ] : []
+  pr_subjects = var.allow_pull_request ? [
+    for repo in local.trusted_repositories : "repo:${var.github_org}/${repo}:pull_request"
+  ] : []
+  env_subjects = flatten([
+    for repo in local.trusted_repositories : [
+      for environment in var.github_allowed_environments : "repo:${var.github_org}/${repo}:environment:${environment}"
+    ]
+  ])
+  subjects = concat(local.branch_subjects, local.tag_subjects, local.pr_subjects, local.env_subjects)
 
   # Fallback to the account's standard GitHub OIDC provider ARN when not explicitly provided.
   effective_oidc_provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : coalesce(var.oidc_provider_arn, "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com")

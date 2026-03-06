@@ -13,6 +13,12 @@ variable "github_repo" {
   type        = string
 }
 
+variable "github_additional_repositories" {
+  description = "Additional GitHub repositories in the same org allowed to assume the shared OIDC roles"
+  type        = list(string)
+  default     = []
+}
+
 variable "github_allowed_branches" {
   description = "Allowed branch names for OIDC role assumption"
   type        = list(string)
