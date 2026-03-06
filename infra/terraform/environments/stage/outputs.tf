@@ -1,6 +1,7 @@
 output "cluster_name" {
   value       = module.compute.cluster_name
   description = "ECS cluster name"
+  sensitive   = true
 }
 
 output "public_alb_dns_name" {
@@ -49,16 +50,19 @@ output "budget_alert_topic_arn" {
 output "github_images_role_arn" {
   value       = module.cicd_iam.images_role_arn
   description = "GitHub Actions images role ARN"
+  sensitive   = true
 }
 
 output "github_infra_role_arn" {
   value       = module.cicd_iam.infra_role_arn
   description = "GitHub Actions infra role ARN"
+  sensitive   = true
 }
 
 output "github_deploy_role_arn" {
   value       = module.cicd_iam.deploy_role_arn
   description = "GitHub Actions deploy role ARN"
+  sensitive   = true
 }
 
 output "core_contract_ssm_prefix" {
