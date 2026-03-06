@@ -30,6 +30,9 @@ permissions:
 jobs:
   plan:
     runs-on: ubuntu-latest
+    concurrency:
+      group: terraform-${{ github.repository }}-${{ inputs.environment }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout code

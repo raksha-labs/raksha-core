@@ -407,12 +407,13 @@ module "observability" {
 module "cicd_iam" {
   source = "../../modules/cicd-iam"
 
-  environment                 = var.environment
-  github_org                  = var.github_org
-  github_repo                 = var.github_repo
-  github_allowed_branches     = var.github_allowed_branches
-  github_allowed_environments = var.github_allowed_environments
-  create_oidc_provider        = var.create_oidc_provider
-  oidc_provider_arn           = var.oidc_provider_arn
-  tags                        = var.tags
+  environment                    = var.environment
+  github_org                     = var.github_org
+  github_repo                    = var.github_repo
+  github_additional_repositories = var.github_additional_repositories
+  github_allowed_branches        = var.github_allowed_branches
+  github_allowed_environments    = var.github_allowed_environments
+  create_oidc_provider           = var.create_oidc_provider
+  oidc_provider_arn              = var.oidc_provider_arn
+  tags                           = var.tags
 }
