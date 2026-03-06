@@ -132,7 +132,9 @@ run_tf_with_lock_retry() {
     if grep -q "Error acquiring the state lock" <<<"${output}" \
       || grep -q "ConditionalCheckFailedException" <<<"${output}"; then
       printf '%s\n' "${output}" >&2
-      force_unlock_stale_if_needed || true
+      if ! force_unlock_from_output_if_needed "${output}"; then
+        force_unlock_stale_if_needed || true
+      fi
 
       if (( attempt < max_attempts )); then
         log "terraform state lock busy (attempt ${attempt}/${max_attempts}) — retrying in ${sleep_seconds}s"
@@ -145,6 +147,22 @@ run_tf_with_lock_retry() {
     printf '%s\n' "${output}" >&2
     return "${rc}"
   done
+
+  return 1
+}
+
+force_unlock_from_output_if_needed() {
+  local output="$1"
+  local lock_id lock_operation
+
+  lock_id=$(printf '%s\n' "${output}" | awk -F': *' '/^[[:space:]]*ID:/{print $2; exit}')
+  lock_operation=$(printf '%s\n' "${output}" | awk -F': *' '/^[[:space:]]*Operation:/{print $2; exit}')
+
+  if [[ "${lock_operation}" == "OperationTypeInvalid" && -n "${lock_id}" ]]; then
+    log "WARNING: invalid Terraform state lock detected from command output — force-unlocking immediately: ${lock_id}"
+    terraform -chdir="${TF_DIR}" force-unlock -force "${lock_id}" || true
+    return 0
+  fi
 
   return 1
 }
