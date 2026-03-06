@@ -1,0 +1,33 @@
+{
+  "name": "raksha-core",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    },
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "stable"
+    }
+  },
+  "forwardPorts": [3000, 3001, 3003, 3010, 3015, 8010, 18081, 18082, 18083, 18084],
+  "portsAttributes": {
+    "3000": { "label": "raksha-web", "onAutoForward": "notify" },
+    "3003": { "label": "raksha-admin", "onAutoForward": "notify" },
+    "3010": { "label": "simlab-web", "onAutoForward": "notify" },
+    "8010": { "label": "simlab-api", "onAutoForward": "notify" }
+  },
+  "postCreateCommand": "bash scripts/codespace-bootstrap.sh || true",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-docker",
+        "rust-lang.rust-analyzer",
+        "ms-python.python",
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  }
+}

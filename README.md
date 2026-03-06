@@ -85,6 +85,26 @@ docker compose logs -f indexer detector
 
 This starts Postgres, Redis, indexer, and detector.
 
+## Codespaces sandbox
+
+For the full shared BA sandbox from any repo in Codespaces:
+
+```bash
+./scripts/codespace-up.sh
+```
+
+This clones missing sibling repos (`raksha-platform`, `raksha-simlab`) into the same workspace if needed and starts:
+- platform web/admin/services
+- core workers + Redis
+- simlab web + API
+
+Stop/reset:
+
+```bash
+./scripts/codespace-down.sh
+./scripts/codespace-down.sh -v
+```
+
 ## SQL migrations
 
 Apply bootstrap SQL in order:
