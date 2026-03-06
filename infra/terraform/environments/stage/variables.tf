@@ -206,6 +206,12 @@ variable "github_repo" {
   default     = "raksha-core"
 }
 
+variable "github_additional_repositories" {
+  description = "Additional GitHub repositories allowed to assume shared OIDC roles"
+  type        = list(string)
+  default     = ["raksha-platform", "raksha-simlab"]
+}
+
 variable "github_allowed_branches" {
   description = "Branches allowed to assume OIDC roles"
   type        = list(string)

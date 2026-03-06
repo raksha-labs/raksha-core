@@ -81,11 +81,24 @@ module "data_prod" {
 }
 
 locals {
-  database_url_secret_arn     = var.enable_managed_data ? module.data_prod[0].database_url_secret_arn : module.data_test[0].database_url_secret_arn
-  raw_database_url_secret_arn = var.enable_managed_data ? module.data_prod[0].raw_database_url_secret_arn : module.data_test[0].raw_database_url_secret_arn
-  redis_url_secret_arn        = var.enable_managed_data ? module.data_prod[0].redis_url_secret_arn : module.data_test[0].redis_url_secret_arn
+  database_url_secret_arn            = var.enable_managed_data ? module.data_prod[0].database_url_secret_arn : module.data_test[0].database_url_secret_arn
+  raw_database_url_secret_arn        = var.enable_managed_data ? module.data_prod[0].raw_database_url_secret_arn : module.data_test[0].raw_database_url_secret_arn
+  redis_url_secret_arn               = var.enable_managed_data ? module.data_prod[0].redis_url_secret_arn : module.data_test[0].redis_url_secret_arn
+  database_url_secret_version_id     = var.enable_managed_data ? module.data_prod[0].database_url_secret_version_id : module.data_test[0].database_url_secret_version_id
+  raw_database_url_secret_version_id = var.enable_managed_data ? module.data_prod[0].raw_database_url_secret_version_id : module.data_test[0].raw_database_url_secret_version_id
+  redis_url_secret_version_id        = var.enable_managed_data ? module.data_prod[0].redis_url_secret_version_id : module.data_test[0].redis_url_secret_version_id
+  runtime_contract_version = sha256(join("|", [
+    var.environment,
+    var.image_tag,
+    local.database_url_secret_arn,
+    local.raw_database_url_secret_arn,
+    local.redis_url_secret_arn,
+    local.database_url_secret_version_id,
+    local.raw_database_url_secret_version_id,
+    local.redis_url_secret_version_id,
+  ]))
 
-  service_static_env = {
+  service_static_env_overrides = {
     orchestrator = {
       ALERT_FALLBACK_TENANT_ID = "glider"
       NOTIFIER_GATEWAY_URL     = "http://notifier-gateway:3002"
@@ -99,6 +112,16 @@ locals {
       HISTORY_PREFIX               = "history"
       HEALTH_CHECK_PORT            = "8080"
     }
+  }
+
+  service_static_env = {
+    for service_name in keys(local.service_catalog_map) :
+    service_name => merge(
+      {
+        RAKSHA_RUNTIME_CONTRACT_VERSION = local.runtime_contract_version
+      },
+      lookup(local.service_static_env_overrides, service_name, {})
+    )
   }
 
   service_secret_env = {
@@ -166,14 +189,7 @@ module "compute" {
 }
 
 locals {
-  core_contract_version = sha256(join("|", [
-    var.environment,
-    var.image_tag,
-    local.database_url_secret_arn,
-    local.raw_database_url_secret_arn,
-    local.redis_url_secret_arn,
-    module.compute.service_discovery_namespace_name
-  ]))
+  core_contract_version = local.runtime_contract_version
 }
 
 resource "aws_ssm_parameter" "core_database_url_secret_arn" {
