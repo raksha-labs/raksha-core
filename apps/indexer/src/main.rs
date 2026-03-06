@@ -37,6 +37,8 @@ const DEFAULT_INGESTION_POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_INGESTION_BLOCK_BATCH_SIZE: u64 = 8;
 const DEFAULT_INGESTION_MAX_RETRIES: usize = 5;
 const DEFAULT_INGESTION_RETRY_BACKOFF_MS: u64 = 500;
+const REDIS_STARTUP_RETRY_ATTEMPTS: usize = 30;
+const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 const INGESTION_CHAIN_LOCK_NAMESPACE: i32 = 42_017;
 const ZERO_BLOCK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -997,12 +999,26 @@ async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
         }
     };
 
-    if let Err(err) = publisher.healthcheck().await {
-        warn!(error = ?err, "redis healthcheck failed; redis publishing disabled");
-        None
-    } else {
-        Some(publisher)
+    for attempt in 1..=REDIS_STARTUP_RETRY_ATTEMPTS {
+        match publisher.healthcheck().await {
+            Ok(()) => return Some(publisher),
+            Err(err) if attempt < REDIS_STARTUP_RETRY_ATTEMPTS => {
+                warn!(
+                    error = ?err,
+                    attempt,
+                    max_attempts = REDIS_STARTUP_RETRY_ATTEMPTS,
+                    "redis healthcheck failed during startup; retrying"
+                );
+                tokio::time::sleep(Duration::from_millis(REDIS_STARTUP_RETRY_DELAY_MS)).await;
+            }
+            Err(err) => {
+                warn!(error = ?err, "redis healthcheck failed; redis publishing disabled");
+                return None;
+            }
+        }
     }
+
+    None
 }
 
 async fn build_adapters() -> Result<Vec<RuntimeChainAdapter>> {

@@ -406,7 +406,10 @@ print(int(dt.timestamp()))
   now_epoch=$(date +%s)
   age_minutes=$(( (now_epoch - lock_created_epoch) / 60 ))
 
-  if [[ "${lock_created_epoch}" -gt 0 && "${age_minutes}" -ge "${stale_threshold_minutes}" ]]; then
+  if [[ "${lock_operation}" == "OperationTypeInvalid" ]]; then
+    log "WARNING: invalid Terraform state lock detected — force-unlocking immediately: ${lock_id}"
+    terraform -chdir="${TF_DIR}" force-unlock -force "${lock_id}" || true
+  elif [[ "${lock_created_epoch}" -gt 0 && "${age_minutes}" -ge "${stale_threshold_minutes}" ]]; then
     log "WARNING: stale state lock detected (${age_minutes}m old, threshold ${stale_threshold_minutes}m) — force-unlocking: ${lock_id}"
     terraform -chdir="${TF_DIR}" force-unlock -force "${lock_id}" || true
   else

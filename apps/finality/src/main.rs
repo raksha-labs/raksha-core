@@ -11,6 +11,8 @@ use tracing::{info, warn};
 const DEFAULT_BATCH_SIZE: usize = 100;
 const DEFAULT_BLOCK_MS: usize = 1000;
 const PERSISTENCE_INTERVAL: usize = 100; // Save state every N events
+const REDIS_STARTUP_RETRY_ATTEMPTS: usize = 30;
+const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -260,12 +262,26 @@ async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
         }
     };
 
-    if let Err(err) = publisher.healthcheck().await {
-        warn!(error = ?err, "redis healthcheck failed");
-        None
-    } else {
-        Some(publisher)
+    for attempt in 1..=REDIS_STARTUP_RETRY_ATTEMPTS {
+        match publisher.healthcheck().await {
+            Ok(()) => return Some(publisher),
+            Err(err) if attempt < REDIS_STARTUP_RETRY_ATTEMPTS => {
+                warn!(
+                    error = ?err,
+                    attempt,
+                    max_attempts = REDIS_STARTUP_RETRY_ATTEMPTS,
+                    "redis healthcheck failed during startup; retrying"
+                );
+                tokio::time::sleep(Duration::from_millis(REDIS_STARTUP_RETRY_DELAY_MS)).await;
+            }
+            Err(err) => {
+                warn!(error = ?err, "redis healthcheck failed");
+                return None;
+            }
+        }
     }
+
+    None
 }
 
 fn default_confirmation_depth_for_chain(chain: &Chain) -> u64 {
