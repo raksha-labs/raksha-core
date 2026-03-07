@@ -1,0 +1,122 @@
+name: Destroy Shared Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to destroy"
+        required: true
+        type: choice
+        options:
+          - test
+          - stage
+          - prod
+        default: test
+      confirmation:
+        description: "Type exactly: DESTROY-<environment> (example: DESTROY-test)"
+        required: true
+        type: string
+      confirm_dependents_destroyed:
+        description: "Confirm raksha-platform and raksha-simlab are already destroyed, or are not deployed in this environment"
+        required: true
+        type: boolean
+        default: false
+      purge_ecr_images:
+        description: "Delete all core ECR images before destroy (recommended)"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy-environment:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate destroy confirmations
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          DEPENDENTS_CONFIRMED: ${{ inputs.confirm_dependents_destroyed }}
+        run: |
+          set -euo pipefail
+          expected="DESTROY-${ENVIRONMENT}"
+
+          if [ "${CONFIRMATION}" != "${expected}" ]; then
+            echo "Invalid confirmation. Expected: ${expected}" >&2
+            exit 1
+          fi
+
+          if [ "${DEPENDENTS_CONFIRMED}" != "true" ]; then
+            echo "raksha-core owns shared infrastructure. Destroy raksha-platform and raksha-simlab first, then rerun with dependents confirmed." >&2
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.environment == 'test' && secrets.AWS_INFRA_ROLE_ARN || inputs.environment == 'stage' && secrets.AWS_STAGE_DEPLOY_ROLE_ARN || secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Purge ECR images (optional)
+        if: ${{ inputs.purge_ecr_images == true }}
+        run: |
+          set -euo pipefail
+          echo "Purging core ECR images to allow repository deletion..."
+
+          while IFS= read -r repo; do
+            [ -n "${repo}" ] || continue
+
+            if ! aws ecr describe-repositories --repository-names "${repo}" --region "eu-west-1" >/dev/null 2>&1; then
+              echo "Skipping missing repository: ${repo}"
+              continue
+            fi
+
+            images_json="$(aws ecr list-images --repository-name "${repo}" --region "eu-west-1" --query 'imageIds[*]' --output json)"
+            if [ "${images_json}" = "[]" ]; then
+              echo "No images to purge in ${repo}"
+              continue
+            fi
+
+            aws ecr batch-delete-image --repository-name "${repo}" --region "eu-west-1" --image-ids "${images_json}" >/dev/null
+            echo "Purged images from ${repo}"
+          done < <(awk -F': ' '/image_repo:/{gsub(/"/,"",$2); print $2}' infra/service-catalog.yaml | sort -u)
+
+      - name: Terraform destroy
+        env:
+          AWS_REGION: eu-west-1
+          TF_BACKEND_BUCKET: ${{ secrets.TF_BACKEND_BUCKET }}
+          TF_BACKEND_DYNAMODB_TABLE: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
+          TF_BACKEND_KMS_KEY_ID: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
+        run: |
+          scripts/ci/terraform_destroy.sh "${{ inputs.environment }}" "destroy-${{ github.run_id }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          # Core Shared Environment Destroy
+
+          - Environment: ${{ inputs.environment }}
+          - Dependent repos confirmed destroyed: ${{ inputs.confirm_dependents_destroyed }}
+          - ECR purge requested: ${{ inputs.purge_ecr_images }}
+          - Triggered by: ${{ github.actor }}
+          - Workflow run: ${{ github.run_id }}
+
+          This workflow destroys only raksha-core resources. Shared environments must still be recreated in order:
+          1. raksha-core
+          2. raksha-platform
+          3. raksha-simlab
+          EOF
