@@ -1,10 +1,10 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use common::DataSourceConfig;
+use common::{connect_postgres_client, DataSourceConfig};
 use event_schema::{AlertEvent, DetectionResult, UnifiedEvent};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio_postgres::{error::SqlState, Client, NoTls};
+use tokio_postgres::{error::SqlState, Client};
 use tracing::{info, warn};
 
 const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "glider";
@@ -148,13 +148,8 @@ pub struct IncidentKey<'a> {
 
 impl PostgresRepository {
     pub async fn from_database_url(database_url: &str) -> Result<Self> {
-        let (client, connection) = tokio_postgres::connect(database_url, NoTls).await?;
-
-        tokio::spawn(async move {
-            if let Err(err) = connection.await {
-                tracing::error!(error = ?err, "postgres background connection error");
-            }
-        });
+        let client =
+            connect_postgres_client(database_url, "postgres background connection error").await?;
 
         let repo = Self {
             client: Arc::new(client),

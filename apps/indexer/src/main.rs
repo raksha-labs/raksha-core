@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use common::{start_health_check_server, ChainAdapter};
+use common::{connect_postgres_client, start_health_check_server, ChainAdapter};
 use dotenvy::dotenv;
 use event_schema::{NormalizedEvent, ReorgNotice};
 use ingestion::{
@@ -18,7 +18,7 @@ use ingestion::{
 };
 use serde::de::DeserializeOwned;
 use state_manager::{PostgresRepository, RedisStreamPublisher};
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::Client;
 use tracing::{info, warn};
 
 mod stream_connector;
@@ -134,13 +134,9 @@ impl IndexerStateStore {
     }
 
     async fn from_database_url(database_url: &str) -> Result<Self> {
-        let (client, connection) = tokio_postgres::connect(database_url, NoTls).await?;
-
-        tokio::spawn(async move {
-            if let Err(err) = connection.await {
-                tracing::error!(error = ?err, "indexer postgres background connection error");
-            }
-        });
+        let client =
+            connect_postgres_client(database_url, "indexer postgres background connection error")
+                .await?;
 
         let store = Self { client };
         store.init_schema().await?;

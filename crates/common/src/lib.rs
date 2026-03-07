@@ -23,6 +23,9 @@ pub use health_check::{start_health_check_server, HealthCheckServer, HealthStatu
 pub mod data_source;
 pub use data_source::DataSourceConfig;
 
+pub mod postgres;
+pub use postgres::{connect_postgres_client, make_postgres_tls_connector};
+
 pub mod errors {
     use thiserror::Error;
 

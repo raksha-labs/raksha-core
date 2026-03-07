@@ -1,9 +1,10 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use common::connect_postgres_client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::Client;
 use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,12 +67,9 @@ pub struct PostgresRawRepository {
 
 impl PostgresRawRepository {
     pub async fn from_database_url(database_url: &str) -> Result<Self> {
-        let (client, connection) = tokio_postgres::connect(database_url, NoTls).await?;
-        tokio::spawn(async move {
-            if let Err(err) = connection.await {
-                tracing::error!(error = ?err, "raw postgres background connection error");
-            }
-        });
+        let client =
+            connect_postgres_client(database_url, "raw postgres background connection error")
+                .await?;
 
         Ok(Self {
             client: Arc::new(client),

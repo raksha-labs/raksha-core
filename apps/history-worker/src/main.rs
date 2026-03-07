@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use common::{start_health_check_server, ShutdownSignal};
+use common::{connect_postgres_client, start_health_check_server, ShutdownSignal};
 use dotenvy::dotenv;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio_postgres::{Client, NoTls, Row};
+use tokio_postgres::{Client, Row};
 use tracing::{info, warn};
 
 const DEFAULT_INTERVAL_SECS: u64 = 30;
@@ -75,24 +75,23 @@ async fn main() -> Result<()> {
         .ok()
         .or_else(|| Some(PathBuf::from(DEFAULT_HISTORY_ARCHIVE_DIR)));
 
-    let (client, connection) = tokio_postgres::connect(&database_url, NoTls).await?;
-    tokio::spawn(async move {
-        if let Err(err) = connection.await {
-            tracing::error!(error = ?err, "history-worker postgres background connection error");
-        }
-    });
+    let client = connect_postgres_client(
+        &database_url,
+        "history-worker postgres background connection error",
+    )
+    .await?;
 
     validate_schema(&client).await?;
 
     // Optional raw database connectivity check for ingestion provenance workflows.
     if let Ok(raw_database_url) = std::env::var("RAW_DATABASE_URL") {
-        match tokio_postgres::connect(&raw_database_url, NoTls).await {
-            Ok((_raw_client, raw_connection)) => {
-                tokio::spawn(async move {
-                    if let Err(err) = raw_connection.await {
-                        tracing::warn!(error = ?err, "history-worker raw postgres background connection error");
-                    }
-                });
+        match connect_postgres_client(
+            &raw_database_url,
+            "history-worker raw postgres background connection error",
+        )
+        .await
+        {
+            Ok(_raw_client) => {
                 info!("history-worker raw database connectivity check passed");
             }
             Err(err) => warn!(

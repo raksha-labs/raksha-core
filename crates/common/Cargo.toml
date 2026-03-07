@@ -17,3 +17,6 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true
+tokio-postgres.workspace = true
+native-tls.workspace = true
+postgres-native-tls.workspace = true

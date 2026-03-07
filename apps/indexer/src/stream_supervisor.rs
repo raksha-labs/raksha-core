@@ -1,6 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::Result;
+use common::make_postgres_tls_connector;
 use futures_util::future::poll_fn;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -12,7 +13,7 @@ use tokio::{
     task::JoinHandle,
     time::interval,
 };
-use tokio_postgres::{AsyncMessage, NoTls};
+use tokio_postgres::AsyncMessage;
 use tracing::{info, warn};
 
 use crate::stream_worker::{run_stream_worker, RuntimeStreamConfig};
@@ -228,15 +229,24 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
     let (tx, rx) = mpsc::channel(32);
     tokio::spawn(async move {
         loop {
-            let (client, mut connection) = match tokio_postgres::connect(&database_url, NoTls).await
-            {
-                Ok(value) => value,
+            let connector = match make_postgres_tls_connector() {
+                Ok(connector) => connector,
                 Err(error) => {
-                    warn!(error = ?error, "failed to connect for stream config LISTEN");
+                    warn!(error = ?error, "failed to build postgres TLS connector for stream config LISTEN");
                     tokio::time::sleep(Duration::from_secs(3)).await;
                     continue;
                 }
             };
+
+            let (client, mut connection) =
+                match tokio_postgres::connect(&database_url, connector).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        warn!(error = ?error, "failed to connect for stream config LISTEN");
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        continue;
+                    }
+                };
 
             if let Err(error) = client
                 .batch_execute("LISTEN source_stream_config_changed")
