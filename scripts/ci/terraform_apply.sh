@@ -423,7 +423,9 @@ import_ecs_services_if_needed() {
   log "apply prep: scanning ECS services for import candidates"
   local cluster_name="raksha-${ENVIRONMENT}"
   local desired_mode
+  log "apply prep: resolving desired ECS launch mode"
   desired_mode=$(desired_ecs_launch_mode)
+  log "apply prep: desired ECS launch mode is ${desired_mode}"
   local services=()
   local svc
   while IFS= read -r svc; do
@@ -440,6 +442,7 @@ import_ecs_services_if_needed() {
   local existing_count
   local existing_mode
   for svc in "${services[@]}"; do
+    log "apply prep: checking ECS service candidate ${svc}"
     if [[ "${svc}" == "postgres" || "${svc}" == "redis" ]]; then
       address="module.compute.aws_ecs_service.test_data[\"${svc}\"]"
     else
@@ -447,18 +450,22 @@ import_ecs_services_if_needed() {
     fi
 
     if resource_in_state "${address}"; then
+      log "apply prep: ECS service state already present for ${svc}; skipping import"
       continue
     fi
 
     service_name="raksha-${ENVIRONMENT}-${svc}"
+    log "apply prep: describing ECS service ${service_name}"
     existing_count=$(aws ecs describe-services \
       --cluster "${cluster_name}" \
       --services "${service_name}" \
       --region "${AWS_REGION_EFFECTIVE}" \
       --query "length(services[?status!='INACTIVE'])" \
       --output text 2>/dev/null || true)
+    log "apply prep: ECS service ${service_name} active count query result=${existing_count:-<empty>}"
 
     if [[ "${existing_count}" == "1" ]]; then
+      log "apply prep: resolving launch mode for existing ECS service ${service_name}"
       existing_mode=$(existing_ecs_launch_mode "${cluster_name}" "${service_name}")
       if [[ "${existing_mode}" != "UNKNOWN" && "${existing_mode}" != "${desired_mode}" ]]; then
         log "existing ECS service launch mode (${existing_mode}) does not match desired mode (${desired_mode}); deleting so Terraform can recreate: ${service_name}"
