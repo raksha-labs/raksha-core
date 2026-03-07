@@ -16,6 +16,7 @@ TF_DIR=$(terraform_dir_for_env "${ENVIRONMENT}")
 CLUSTER_NAME="${CLUSTER_NAME:-}"
 
 if [[ -z "${CLUSTER_NAME}" ]]; then
+  log "resolving ECS cluster name from Terraform outputs (${ENVIRONMENT})"
   "${SCRIPT_DIR}/terraform_init.sh" "${ENVIRONMENT}"
   CLUSTER_NAME=$(terraform -chdir="${TF_DIR}" output -raw cluster_name)
 fi
@@ -32,7 +33,7 @@ test_data_services_enabled() {
   [[ "$(terraform_bool_var enable_managed_data)" == "false" ]]
 }
 
-log "rolling ECS services in cluster ${CLUSTER_NAME}"
+log "rolling ECS services in cluster ${CLUSTER_NAME} (region=${AWS_REGION}, service_filter=${SERVICE_FILTER:-<all>})"
 services_to_roll() {
   catalog_services
   if test_data_services_enabled; then
@@ -40,10 +41,15 @@ services_to_roll() {
   fi
 }
 
+rolled_count=0
+skipped_count=0
+
 while IFS= read -r service; do
   [[ -n "${service}" ]] || continue
 
   if ! is_selected_service "${service}"; then
+    log "skipping ECS service ${service}; not selected by service_filter"
+    ((skipped_count+=1))
     continue
   fi
 
@@ -54,4 +60,8 @@ while IFS= read -r service; do
     --service "${ecs_service}" \
     --force-new-deployment \
     --region "${AWS_REGION}" >/dev/null
+  log "deployment request submitted for ${ecs_service}"
+  ((rolled_count+=1))
 done < <(services_to_roll)
+
+log "ECS rollout requests complete (submitted=${rolled_count}, skipped=${skipped_count})"

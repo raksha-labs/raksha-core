@@ -637,6 +637,18 @@ resource "aws_ecs_service" "test_data" {
 
   launch_type = var.compute_mode == "ec2" ? "EC2" : null
 
+  dynamic "capacity_provider_strategy" {
+    for_each = var.compute_mode == "fargate_mix" ? [
+      { cp = "FARGATE", base = 1, weight = 1 }
+    ] : []
+
+    content {
+      capacity_provider = capacity_provider_strategy.value.cp
+      base              = capacity_provider_strategy.value.base
+      weight            = capacity_provider_strategy.value.weight
+    }
+  }
+
   dynamic "network_configuration" {
     for_each = var.compute_mode == "ec2" ? [1] : []
     content {
