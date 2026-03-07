@@ -40,6 +40,12 @@ variable "service_secret_env" {
   default     = {}
 }
 
+variable "secret_kms_key_arns" {
+  description = "KMS key ARNs used by Secrets Manager secrets consumed by ECS task execution"
+  type        = list(string)
+  default     = []
+}
+
 variable "compute_mode" {
   description = "Compute mode: ec2 or fargate_mix"
   type        = string

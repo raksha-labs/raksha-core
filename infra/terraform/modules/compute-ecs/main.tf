@@ -203,27 +203,39 @@ resource "aws_iam_role_policy" "ecs_task_execution_custom" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue",
-          "kms:Decrypt"
-        ]
-        Resource = [
-          "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.secret_prefix}/*"
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ]
-        Resource = "arn:aws:logs:${var.aws_region}:*:log-group:/ecs/raksha/*"
-      }
-    ]
+    Statement = concat(
+      [
+        {
+          Effect = "Allow"
+          Action = [
+            "secretsmanager:GetSecretValue"
+          ]
+          Resource = [
+            "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.secret_prefix}/*"
+          ]
+        }
+      ],
+      length(var.secret_kms_key_arns) > 0 ? [
+        {
+          Effect = "Allow"
+          Action = [
+            "kms:Decrypt"
+          ]
+          Resource = var.secret_kms_key_arns
+        }
+      ] : [],
+      [
+        {
+          Effect = "Allow"
+          Action = [
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents"
+          ]
+          Resource = "arn:aws:logs:${var.aws_region}:*:log-group:/ecs/raksha/*"
+        }
+      ]
+    )
   })
 }
 
