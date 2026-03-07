@@ -79,10 +79,13 @@ module "data_prod" {
   database_sg_id           = module.security.database_sg_id
   redis_sg_id              = module.security.redis_sg_id
   db_instance_class        = var.db_instance_class
+  db_allocated_storage     = var.db_allocated_storage
+  db_max_allocated_storage = var.db_max_allocated_storage
   db_name                  = var.db_name
   db_username              = var.db_username
   db_backup_retention_days = var.db_backup_retention_days
   db_deletion_protection   = var.db_deletion_protection
+  db_multi_az              = var.db_multi_az
   cache_node_type          = var.cache_node_type
   cache_num_nodes          = var.cache_num_nodes
   tags                     = var.tags

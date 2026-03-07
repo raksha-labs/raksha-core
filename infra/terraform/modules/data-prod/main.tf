@@ -46,7 +46,7 @@ resource "aws_db_instance" "main" {
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [var.database_sg_id]
 
-  multi_az                        = true
+  multi_az                        = var.db_multi_az
   publicly_accessible             = false
   backup_retention_period         = var.db_backup_retention_days
   enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]

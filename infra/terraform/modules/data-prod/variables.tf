@@ -41,6 +41,12 @@ variable "db_max_allocated_storage" {
   default     = 500
 }
 
+variable "db_multi_az" {
+  description = "Whether the RDS instance runs as Multi-AZ"
+  type        = bool
+  default     = true
+}
+
 variable "db_name" {
   description = "Database name"
   type        = string

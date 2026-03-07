@@ -4,8 +4,14 @@ compute_mode          = "fargate_mix"
 ec2_instance_type     = "t4g.medium"  # 4 GB ARM — fits all services at reduced test sizes
 az_count              = 2
 enable_managed_data   = false
+db_instance_class     = "db.t3.micro"
+db_allocated_storage  = 20
+db_max_allocated_storage = 20
 db_backup_retention_days = 0
 db_deletion_protection   = false
+db_multi_az              = false
+cache_node_type          = "cache.t3.micro"
+cache_num_nodes          = 1
 budget_limit_usd      = 100
 # To switch back to EC2-backed ECS capacity for test, set:
 # compute_mode        = "ec2"

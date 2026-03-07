@@ -177,7 +177,19 @@ variable "ec2_max_capacity" {
 variable "db_instance_class" {
   description = "RDS instance class when managed data is enabled"
   type        = string
-  default     = "db.t4g.small"
+  default     = "db.t3.micro"
+}
+
+variable "db_allocated_storage" {
+  description = "Initial RDS storage in GB for test"
+  type        = number
+  default     = 20
+}
+
+variable "db_max_allocated_storage" {
+  description = "Maximum RDS autoscaling storage in GB for test"
+  type        = number
+  default     = 20
 }
 
 variable "db_name" {
@@ -204,16 +216,22 @@ variable "db_deletion_protection" {
   default     = false
 }
 
+variable "db_multi_az" {
+  description = "Whether test managed RDS should run Multi-AZ"
+  type        = bool
+  default     = false
+}
+
 variable "cache_node_type" {
   description = "Redis node type when managed data is enabled"
   type        = string
-  default     = "cache.t4g.small"
+  default     = "cache.t3.micro"
 }
 
 variable "cache_num_nodes" {
   description = "Redis node count when managed data is enabled"
   type        = number
-  default     = 2
+  default     = 1
 }
 
 variable "alb_ingress_cidrs" {
