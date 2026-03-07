@@ -331,6 +331,7 @@ import_compute_ec2_resources_if_needed() {
 }
 
 import_ecr_repositories_if_needed() {
+  log "apply prep: scanning ECR repositories for import candidates"
   local svc
   local repo
   while IFS=$'\t' read -r svc repo; do
@@ -384,6 +385,7 @@ ensure_secret_active_for_import() {
 }
 
 import_shared_secrets_if_needed() {
+  log "apply prep: checking shared Secrets Manager secrets"
   local db_secret="raksha/${ENVIRONMENT}/shared/DATABASE_URL"
   local raw_db_secret="raksha/${ENVIRONMENT}/shared/RAW_DATABASE_URL"
   local redis_secret="raksha/${ENVIRONMENT}/shared/REDIS_URL"
@@ -418,6 +420,7 @@ import_shared_secrets_if_needed() {
 
 
 import_ecs_services_if_needed() {
+  log "apply prep: scanning ECS services for import candidates"
   local cluster_name="raksha-${ENVIRONMENT}"
   local desired_mode
   desired_mode=$(desired_ecs_launch_mode)
@@ -473,6 +476,7 @@ import_ecs_services_if_needed() {
 }
 
 import_log_groups_if_needed() {
+  log "apply prep: scanning CloudWatch log groups for import candidates"
   local services=()
   local svc
   while IFS= read -r svc; do
@@ -543,13 +547,35 @@ print(int(dt.timestamp()))
 log "terraform apply (${ENVIRONMENT}) image_tag=${IMAGE_TAG_INPUT}"
 print_state_lock_guard
 force_unlock_stale_if_needed
+
+log "apply prep: starting CI/CD IAM import pass"
 import_cicd_roles_if_needed
+log "apply prep: finished CI/CD IAM import pass"
+
+log "apply prep: starting compute IAM import pass"
 import_compute_iam_if_needed
+log "apply prep: finished compute IAM import pass"
+
+log "apply prep: starting compute EC2 import pass"
 import_compute_ec2_resources_if_needed
+log "apply prep: finished compute EC2 import pass"
+
+log "apply prep: starting ECR repository import pass"
 import_ecr_repositories_if_needed
+log "apply prep: finished ECR repository import pass"
+
+log "apply prep: starting shared secret import pass"
 import_shared_secrets_if_needed
+log "apply prep: finished shared secret import pass"
+
+log "apply prep: starting log group import pass"
 import_log_groups_if_needed
+log "apply prep: finished log group import pass"
+
+log "apply prep: starting ECS service import pass"
 import_ecs_services_if_needed
+log "apply prep: finished ECS service import pass"
+
 log "terraform phase: apply preparation complete; starting terraform apply (${ENVIRONMENT})"
 run_tf_with_lock_retry terraform -chdir="${TF_DIR}" apply \
   -input=false \
