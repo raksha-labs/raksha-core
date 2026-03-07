@@ -428,6 +428,31 @@ ensure_secret_active_for_import() {
   return 0
 }
 
+base_secret_id_from_value_ref() {
+  local secret_ref="$1"
+  python3 - "$secret_ref" <<'PY'
+import sys
+
+ref = sys.argv[1].strip().strip('"').strip("'")
+if not ref:
+    raise SystemExit(1)
+
+if ref.startswith("arn:aws:secretsmanager:"):
+    parts = ref.split(":")
+    try:
+        secret_idx = parts.index("secret")
+    except ValueError:
+        print(ref)
+        raise SystemExit(0)
+
+    # ECS valueFrom format appends optional json-key / version-stage / version-id
+    # after the secret name. The base secret ARN ends immediately after the name.
+    print(":".join(parts[:secret_idx + 2]))
+else:
+    print(ref)
+PY
+}
+
 import_shared_secrets_if_needed() {
   log "apply prep: checking shared Secrets Manager secrets"
   local db_secret="raksha/${ENVIRONMENT}/shared/DATABASE_URL"
@@ -473,6 +498,28 @@ import_shared_secrets_if_needed() {
       log "Secrets Manager secret not found; skipping import so Terraform can create it: ${redis_secret}"
     fi
   fi
+}
+
+restore_referenced_service_secrets_if_needed() {
+  local tfvars_path="${TF_DIR}/terraform.tfvars"
+  [[ -f "${tfvars_path}" ]] || return 0
+
+  log "apply prep: checking referenced Secrets Manager ARNs in terraform.tfvars"
+
+  local secret_ref secret_id
+  while IFS= read -r secret_ref; do
+    [[ -n "${secret_ref}" ]] || continue
+    secret_id=$(base_secret_id_from_value_ref "${secret_ref}" 2>/dev/null || true)
+    [[ -n "${secret_id}" ]] || continue
+
+    if ensure_secret_active_for_import "${secret_id}"; then
+      log "referenced Secrets Manager secret is active: ${secret_id}"
+    else
+      log "referenced Secrets Manager secret not found; skipping: ${secret_id}"
+    fi
+  done < <(
+    grep -oE 'arn:aws:secretsmanager:[^"[:space:]]+' "${tfvars_path}" | sort -u
+  )
 }
 
 import_managed_data_resources_if_needed() {
@@ -666,6 +713,10 @@ log "apply prep: finished ECR repository import pass"
 log "apply prep: starting shared secret import pass"
 import_shared_secrets_if_needed
 log "apply prep: finished shared secret import pass"
+
+log "apply prep: starting referenced secret restore pass"
+restore_referenced_service_secrets_if_needed
+log "apply prep: finished referenced secret restore pass"
 
 log "apply prep: starting managed data resource import pass"
 import_managed_data_resources_if_needed
