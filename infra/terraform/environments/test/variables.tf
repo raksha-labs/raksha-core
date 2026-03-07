@@ -25,13 +25,13 @@ variable "compute_mode" {
 variable "enable_managed_data" {
   description = "Whether to use managed RDS/ElastiCache in test"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "create_nat_gateway" {
   description = "Whether to create NAT in test"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "service_desired_counts" {

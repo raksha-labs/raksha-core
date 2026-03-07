@@ -23,14 +23,56 @@ fi
 
 [[ -n "${CLUSTER_NAME}" ]] || fail "unable to resolve ECS cluster name"
 
-terraform_bool_var() {
+config_bool_var() {
   local var_name="$1"
-  printf 'try(var.%s, false)\n' "${var_name}" | terraform -chdir="${TF_DIR}" console -no-color 2>/dev/null | tr -d '"[:space:]'
+  local tfvars_path="${TF_DIR}/terraform.tfvars"
+  local variables_path="${TF_DIR}/variables.tf"
+  local value=""
+
+  if [[ -f "${tfvars_path}" ]]; then
+    value=$(awk -v var_name="${var_name}" '
+      $0 ~ "^[[:space:]]*" var_name "[[:space:]]*=" {
+        line=$0
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        sub(/[[:space:]]*(#.*)?$/, "", line)
+        gsub(/"/, "", line)
+        print tolower(line)
+        exit
+      }
+    ' "${tfvars_path}")
+  fi
+
+  if [[ -n "${value}" ]]; then
+    printf '%s\n' "${value}"
+    return 0
+  fi
+
+  if [[ -f "${variables_path}" ]]; then
+    value=$(awk -v var_name="${var_name}" '
+      $0 ~ "^[[:space:]]*variable[[:space:]]+\"" var_name "\"" {
+        in_var=1
+        next
+      }
+      in_var && $0 ~ /^[[:space:]]*default[[:space:]]*=/ {
+        line=$0
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        sub(/[[:space:]]*(#.*)?$/, "", line)
+        gsub(/"/, "", line)
+        print tolower(line)
+        exit
+      }
+      in_var && $0 ~ /^[[:space:]]*}/ {
+        exit
+      }
+    ' "${variables_path}")
+  fi
+
+  printf '%s\n' "${value:-false}"
 }
 
 test_data_services_enabled() {
   [[ "${ENVIRONMENT}" == "test" ]] || return 1
-  [[ "$(terraform_bool_var enable_managed_data)" == "false" ]]
+  [[ "$(config_bool_var enable_managed_data)" == "false" ]]
 }
 
 log "rolling ECS services in cluster ${CLUSTER_NAME} (region=${AWS_REGION}, service_filter=${SERVICE_FILTER:-<all>})"

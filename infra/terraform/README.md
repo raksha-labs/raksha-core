@@ -2,7 +2,7 @@
 
 This directory is the new IaC baseline for phased AWS deployment:
 
-1. `test`: minimum-cost environment for rapid validation.
+1. `test`: demo-ready environment with managed data and reduced scale.
 2. `stage` and `prod`: hardened environments with managed data, security controls, and controlled deployment posture.
 
 ## Layout
@@ -15,7 +15,7 @@ This directory is the new IaC baseline for phased AWS deployment:
 - `modules/observability`: CloudWatch log groups, alarms, dashboard.
 - `modules/cost-controls`: AWS Budgets + Cost Anomaly Detection + Billing EstimatedCharges alarm + SNS notifications.
 - `modules/cicd-iam`: GitHub Actions OIDC roles for image, infra, and deploy workflows.
-- `environments/test`: single-account, lowest-cost baseline.
+- `environments/test`: single-account demo baseline with managed data.
 - `environments/stage`: pre-production hardened baseline.
 - `environments/prod`: production baseline.
 
@@ -46,7 +46,7 @@ Repeat for `stage` and `prod` directories.
 
 ## Notes
 
-- `test` defaults to `compute_mode = "ec2"` and `enable_managed_data = false` for cost minimization.
+- `test` defaults to `compute_mode = "fargate_mix"`, `enable_managed_data = true`, and `create_nat_gateway = true` for a client-demo posture.
 - `stage` and `prod` default to `compute_mode = "fargate_mix"` and managed data.
 - `prod` requires `public_certificate_arn`.
 - OIDC provider creation should happen once per account; set `create_oidc_provider = true` only in one environment per account.
