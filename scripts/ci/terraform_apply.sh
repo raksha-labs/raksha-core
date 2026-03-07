@@ -183,14 +183,58 @@ resource_in_state() {
   terraform -chdir="${TF_DIR}" state show "${address}" >/dev/null 2>&1
 }
 
-terraform_string_var() {
+config_string_var() {
   local var_name="$1"
-  printf 'try(var.%s, "")\n' "${var_name}" | terraform -chdir="${TF_DIR}" console -no-color 2>/dev/null | tr -d '"'
+  local tfvars_path="${TF_DIR}/terraform.tfvars"
+  local variables_path="${TF_DIR}/variables.tf"
+  local value=""
+
+  if [[ -f "${tfvars_path}" ]]; then
+    value=$(awk -v var_name="${var_name}" '
+      $0 ~ "^[[:space:]]*" var_name "[[:space:]]*=" {
+        line=$0
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        sub(/[[:space:]]*(#.*)?$/, "", line)
+        gsub(/^"/, "", line)
+        gsub(/"$/, "", line)
+        print line
+        exit
+      }
+    ' "${tfvars_path}")
+  fi
+
+  if [[ -n "${value}" ]]; then
+    printf '%s\n' "${value}"
+    return 0
+  fi
+
+  if [[ -f "${variables_path}" ]]; then
+    value=$(awk -v var_name="${var_name}" '
+      $0 ~ "^[[:space:]]*variable[[:space:]]+\"" var_name "\"" {
+        in_var=1
+        next
+      }
+      in_var && $0 ~ /^[[:space:]]*default[[:space:]]*=/ {
+        line=$0
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        sub(/[[:space:]]*(#.*)?$/, "", line)
+        gsub(/^"/, "", line)
+        gsub(/"$/, "", line)
+        print line
+        exit
+      }
+      in_var && $0 ~ /^[[:space:]]*}/ {
+        exit
+      }
+    ' "${variables_path}")
+  fi
+
+  printf '%s\n' "${value}"
 }
 
 desired_ecs_launch_mode() {
   local compute_mode
-  compute_mode=$(trim_whitespace "$(terraform_string_var compute_mode)")
+  compute_mode=$(trim_whitespace "$(config_string_var compute_mode)")
   if [[ "${compute_mode}" == "ec2" ]]; then
     printf 'EC2\n'
   else
