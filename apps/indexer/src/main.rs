@@ -17,7 +17,7 @@ use ingestion::{
     DEFAULT_FILTER_CHUNK_SIZE, DEFAULT_LOOKBACK_BLOCKS, DEFAULT_ORACLE_DECIMALS,
 };
 use serde::de::DeserializeOwned;
-use state_manager::{PostgresRepository, RedisStreamPublisher};
+use state_manager::{describe_redis_url, PostgresRepository, RedisStreamPublisher};
 use tokio_postgres::Client;
 use tracing::{info, warn};
 
@@ -979,7 +979,10 @@ where
 }
 
 async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
-    let publisher_result = RedisStreamPublisher::from_env()?;
+    let redis_url = std::env::var("REDIS_URL").ok()?;
+    info!(redis_url = %describe_redis_url(&redis_url), "attempting redis connection");
+
+    let publisher_result = RedisStreamPublisher::from_url(&redis_url);
 
     let publisher = match publisher_result {
         Ok(publisher) => publisher,

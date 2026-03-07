@@ -5,7 +5,9 @@ use common::{init_logging, start_health_check_server, FinalityEngine, ShutdownSi
 use dotenvy::dotenv;
 use event_schema::Chain;
 use state_manager::RedisStreamPublisher;
-use state_manager::{ChainFinalityTracker, InMemoryFinalityEngine, PostgresRepository};
+use state_manager::{
+    describe_redis_url, ChainFinalityTracker, InMemoryFinalityEngine, PostgresRepository,
+};
 use tracing::{info, warn};
 
 const DEFAULT_BATCH_SIZE: usize = 100;
@@ -246,7 +248,10 @@ fn default_consumer_name(prefix: &str) -> String {
 }
 
 async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
-    let publisher_result = RedisStreamPublisher::from_env()?;
+    let redis_url = std::env::var("REDIS_URL").ok()?;
+    info!(redis_url = %describe_redis_url(&redis_url), "attempting redis connection");
+
+    let publisher_result = RedisStreamPublisher::from_url(&redis_url);
 
     let publisher = match publisher_result {
         Ok(publisher) => publisher,

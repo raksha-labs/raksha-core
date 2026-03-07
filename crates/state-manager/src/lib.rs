@@ -8,6 +8,7 @@ use redis::{streams::StreamReadReply, FromRedisValue};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracing::info;
+use url::Url;
 
 mod correlation;
 mod dead_letter_queue;
@@ -28,6 +29,23 @@ pub const STREAM_DETECTIONS: &str = "raksha:detections";
 pub const STREAM_ALERTS: &str = "raksha:alerts";
 pub const STREAM_ALERT_LIFECYCLE: &str = "raksha:alerts:lifecycle";
 pub const STREAM_UNIFIED_EVENTS: &str = "raksha:unified-events";
+
+pub fn describe_redis_url(redis_url: &str) -> String {
+    match Url::parse(redis_url) {
+        Ok(mut url) => {
+            if url.password().is_some() {
+                let _ = url.set_password(Some("***"));
+            }
+
+            if !url.username().is_empty() {
+                let _ = url.set_username("***");
+            }
+
+            url.to_string()
+        }
+        Err(_) => "<invalid redis url>".to_string(),
+    }
+}
 
 #[derive(Clone)]
 pub struct RedisStreamPublisher {

@@ -10,7 +10,8 @@ use event_schema::{
 };
 use notifier::NotifierGatewayClient;
 use state_manager::{
-    EntityExposureRecord, IncidentKey, IncidentRecord, PostgresRepository, RedisStreamPublisher,
+    describe_redis_url, EntityExposureRecord, IncidentKey, IncidentRecord, PostgresRepository,
+    RedisStreamPublisher,
 };
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -805,7 +806,10 @@ fn extract_asset_symbol(subject_key: Option<&str>) -> Option<String> {
 }
 
 async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
-    let publisher_result = RedisStreamPublisher::from_env()?;
+    let redis_url = std::env::var("REDIS_URL").ok()?;
+    info!(redis_url = %describe_redis_url(&redis_url), "attempting redis connection");
+
+    let publisher_result = RedisStreamPublisher::from_url(&redis_url);
 
     let publisher = match publisher_result {
         Ok(publisher) => publisher,

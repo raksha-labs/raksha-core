@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use common::{init_logging, start_health_check_server};
 use dotenvy::dotenv;
-use state_manager::{PostgresRepository, RedisStreamPublisher};
+use state_manager::{describe_redis_url, PostgresRepository, RedisStreamPublisher};
 use tokio::{signal, time::interval};
 use tracing::{error, info, warn};
 
@@ -32,6 +32,8 @@ async fn main() -> Result<()> {
 
     let redis_url = std::env::var("REDIS_URL").context("REDIS_URL not set")?;
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL not set")?;
+
+    info!(redis_url = %describe_redis_url(&redis_url), "attempting redis connection");
 
     let stream =
         RedisStreamPublisher::from_url(&redis_url).context("failed to connect to Redis")?;

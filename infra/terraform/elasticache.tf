@@ -50,7 +50,7 @@ resource "aws_secretsmanager_secret" "redis_url" {
 resource "aws_secretsmanager_secret_version" "redis_url" {
   secret_id = aws_secretsmanager_secret.redis_url.id
   secret_string = jsonencode({
-    REDIS_URL             = "redis://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379"
+    REDIS_URL             = "rediss://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379"
     REDIS_HOST            = aws_elasticache_replication_group.main.primary_endpoint_address
     REDIS_PORT            = 6379
     REDIS_READER_ENDPOINT = aws_elasticache_replication_group.main.reader_endpoint_address
