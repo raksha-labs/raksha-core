@@ -433,31 +433,79 @@ import_shared_secrets_if_needed() {
   local db_secret="raksha/${ENVIRONMENT}/shared/DATABASE_URL"
   local raw_db_secret="raksha/${ENVIRONMENT}/shared/RAW_DATABASE_URL"
   local redis_secret="raksha/${ENVIRONMENT}/shared/REDIS_URL"
+  local enable_managed_data secret_module_prefix
 
-  if ! resource_in_state "module.data_test[0].aws_secretsmanager_secret.database"; then
+  enable_managed_data=$(trim_whitespace "$(config_string_var enable_managed_data)")
+  case "${enable_managed_data}" in
+    true|TRUE|True|1)
+      secret_module_prefix="module.data_prod[0].aws_secretsmanager_secret"
+      ;;
+    *)
+      secret_module_prefix="module.data_test[0].aws_secretsmanager_secret"
+      ;;
+  esac
+
+  log "apply prep: importing shared secrets into ${secret_module_prefix}"
+
+  if ! resource_in_state "${secret_module_prefix}.database"; then
     if ensure_secret_active_for_import "${db_secret}"; then
       log "import existing Secrets Manager secret into state: ${db_secret}"
-      tf_import "module.data_test[0].aws_secretsmanager_secret.database" "${db_secret}"
+      tf_import "${secret_module_prefix}.database" "${db_secret}"
     else
       log "Secrets Manager secret not found; skipping import so Terraform can create it: ${db_secret}"
     fi
   fi
 
-  if ! resource_in_state "module.data_test[0].aws_secretsmanager_secret.raw_database"; then
+  if ! resource_in_state "${secret_module_prefix}.raw_database"; then
     if ensure_secret_active_for_import "${raw_db_secret}"; then
       log "import existing Secrets Manager secret into state: ${raw_db_secret}"
-      tf_import "module.data_test[0].aws_secretsmanager_secret.raw_database" "${raw_db_secret}"
+      tf_import "${secret_module_prefix}.raw_database" "${raw_db_secret}"
     else
       log "Secrets Manager secret not found; skipping import so Terraform can create it: ${raw_db_secret}"
     fi
   fi
 
-  if ! resource_in_state "module.data_test[0].aws_secretsmanager_secret.redis"; then
+  if ! resource_in_state "${secret_module_prefix}.redis"; then
     if ensure_secret_active_for_import "${redis_secret}"; then
       log "import existing Secrets Manager secret into state: ${redis_secret}"
-      tf_import "module.data_test[0].aws_secretsmanager_secret.redis" "${redis_secret}"
+      tf_import "${secret_module_prefix}.redis" "${redis_secret}"
     else
       log "Secrets Manager secret not found; skipping import so Terraform can create it: ${redis_secret}"
+    fi
+  fi
+}
+
+import_managed_data_resources_if_needed() {
+  local enable_managed_data
+  enable_managed_data=$(trim_whitespace "$(config_string_var enable_managed_data)")
+  case "${enable_managed_data}" in
+    true|TRUE|True|1)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  log "apply prep: checking managed data subnet groups"
+
+  local db_subnet_group="raksha-${ENVIRONMENT}-db-subnet-group"
+  local cache_subnet_group="raksha-${ENVIRONMENT}-cache-subnet-group"
+
+  if ! resource_in_state "module.data_prod[0].aws_db_subnet_group.main"; then
+    if aws rds describe-db-subnet-groups \
+      --db-subnet-group-name "${db_subnet_group}" \
+      --region "${AWS_REGION_EFFECTIVE}" >/dev/null 2>&1; then
+      log "import existing RDS subnet group into state: ${db_subnet_group}"
+      tf_import "module.data_prod[0].aws_db_subnet_group.main" "${db_subnet_group}"
+    fi
+  fi
+
+  if ! resource_in_state "module.data_prod[0].aws_elasticache_subnet_group.main"; then
+    if aws elasticache describe-cache-subnet-groups \
+      --cache-subnet-group-name "${cache_subnet_group}" \
+      --region "${AWS_REGION_EFFECTIVE}" >/dev/null 2>&1; then
+      log "import existing ElastiCache subnet group into state: ${cache_subnet_group}"
+      tf_import "module.data_prod[0].aws_elasticache_subnet_group.main" "${cache_subnet_group}"
     fi
   fi
 }
@@ -618,6 +666,10 @@ log "apply prep: finished ECR repository import pass"
 log "apply prep: starting shared secret import pass"
 import_shared_secrets_if_needed
 log "apply prep: finished shared secret import pass"
+
+log "apply prep: starting managed data resource import pass"
+import_managed_data_resources_if_needed
+log "apply prep: finished managed data resource import pass"
 
 log "apply prep: starting log group import pass"
 import_log_groups_if_needed

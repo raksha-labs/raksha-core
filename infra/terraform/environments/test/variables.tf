@@ -192,6 +192,18 @@ variable "db_username" {
   default     = "defi_admin"
 }
 
+variable "db_backup_retention_days" {
+  description = "RDS backup retention in test; defaults to 0 for restricted/free-tier style accounts"
+  type        = number
+  default     = 0
+}
+
+variable "db_deletion_protection" {
+  description = "Whether RDS deletion protection is enabled in test"
+  type        = bool
+  default     = false
+}
+
 variable "cache_node_type" {
   description = "Redis node type when managed data is enabled"
   type        = string

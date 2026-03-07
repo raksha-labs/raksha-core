@@ -18,6 +18,7 @@ Not owned by this repo:
 ## Documents
 
 - `ARCHITECTURE.md`: core runtime architecture, data flow, streams, and deployment model.
+- `AWS_ARCHITECTURE.md`: AWS network, NAT, Route 53 private DNS, ECS, and managed data topology.
 - `LOCAL_TESTING.md`: local setup, migrations, worker startup, smoke checks, and debug commands.
 - `SCENARIO_DOLLAR_DEPEG_ALERT.md`: DPEG alert flow from market quote ingestion to detection emission.
 - `SCENARIO_FLASH_LOAN_ATTACK.md`: flash-loan attack detection flow from chain events to alert lifecycle.

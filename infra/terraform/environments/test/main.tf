@@ -73,17 +73,19 @@ module "data_prod" {
   count  = var.enable_managed_data ? 1 : 0
   source = "../../modules/data-prod"
 
-  environment        = var.environment
-  secret_prefix      = local.secret_prefix
-  private_subnet_ids = module.network.private_subnet_ids
-  database_sg_id     = module.security.database_sg_id
-  redis_sg_id        = module.security.redis_sg_id
-  db_instance_class  = var.db_instance_class
-  db_name            = var.db_name
-  db_username        = var.db_username
-  cache_node_type    = var.cache_node_type
-  cache_num_nodes    = var.cache_num_nodes
-  tags               = var.tags
+  environment              = var.environment
+  secret_prefix            = local.secret_prefix
+  private_subnet_ids       = module.network.private_subnet_ids
+  database_sg_id           = module.security.database_sg_id
+  redis_sg_id              = module.security.redis_sg_id
+  db_instance_class        = var.db_instance_class
+  db_name                  = var.db_name
+  db_username              = var.db_username
+  db_backup_retention_days = var.db_backup_retention_days
+  db_deletion_protection   = var.db_deletion_protection
+  cache_node_type          = var.cache_node_type
+  cache_num_nodes          = var.cache_num_nodes
+  tags                     = var.tags
 }
 
 locals {
