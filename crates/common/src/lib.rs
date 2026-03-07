@@ -5,6 +5,7 @@ use event_schema::{
     ReorgNotice, RiskScore, RuleSimulationReport,
 };
 use serde_json::Value;
+use tracing::error;
 
 pub mod config;
 pub use config::*;
@@ -41,10 +42,46 @@ pub mod errors {
 pub fn init_logging(default_filter: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
+    install_single_line_panic_hook();
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .compact()
+        .with_ansi(false)
         .init();
+}
+
+fn install_single_line_panic_hook() {
+    std::panic::set_hook(Box::new(|panic_info| {
+        let location = panic_info
+            .location()
+            .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let payload = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|value| (*value).to_string())
+            .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panic".to_string());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let backtrace_text = flatten_multiline(&format!("{backtrace:?}"));
+
+        error!(
+            target: "panic",
+            location = %location,
+            payload = %flatten_multiline(&payload),
+            backtrace = %backtrace_text,
+            "application panic"
+        );
+    }));
+}
+
+fn flatten_multiline(value: &str) -> String {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 pub fn event_id(input: &str) -> String {

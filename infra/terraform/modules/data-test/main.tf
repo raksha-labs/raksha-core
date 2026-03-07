@@ -1,7 +1,7 @@
 locals {
-  database_url     = "postgresql://${var.db_username}:${var.db_password}@${var.postgres_host}:${var.postgres_port}/${var.db_name}"
+  database_url     = "postgresql://${var.db_username}:${var.db_password}@${var.postgres_host}:${var.postgres_port}/${var.db_name}?sslmode=require"
   raw_database_url = local.database_url
-  redis_url        = "redis://${var.redis_host}:${var.redis_port}"
+  redis_url        = "rediss://${var.redis_host}:${var.redis_port}"
 }
 
 resource "aws_s3_bucket" "test_backup" {

@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use common::start_health_check_server;
+use common::{init_logging, start_health_check_server};
 use dotenvy::dotenv;
 use state_manager::{PostgresRepository, RedisStreamPublisher};
 use tokio::{signal, time::interval};
@@ -27,12 +27,7 @@ const CONFIG_RELOAD_INTERVAL_SECS: u64 = 30;
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    init_logging("info");
     let health_status = start_health_check_server("detector");
 
     let redis_url = std::env::var("REDIS_URL").context("REDIS_URL not set")?;

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::Result;
-use common::{start_health_check_server, FinalityEngine, ShutdownSignal};
+use common::{init_logging, start_health_check_server, FinalityEngine, ShutdownSignal};
 use dotenvy::dotenv;
 use event_schema::Chain;
 use state_manager::RedisStreamPublisher;
@@ -17,13 +17,7 @@ const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .compact()
-        .init();
+    init_logging("info");
     let health_status = start_health_check_server("finality");
 
     let Some(stream) = init_stream_publisher().await else {

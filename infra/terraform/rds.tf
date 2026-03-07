@@ -75,7 +75,7 @@ resource "aws_secretsmanager_secret" "database_url" {
 resource "aws_secretsmanager_secret_version" "database_url" {
   secret_id = aws_secretsmanager_secret.database_url.id
   secret_string = jsonencode({
-    DATABASE_URL = "postgres://${var.db_username}:${random_password.db_password.result}@${aws_db_instance.main.endpoint}/${var.db_name}"
+    DATABASE_URL = "postgres://${var.db_username}:${random_password.db_password.result}@${aws_db_instance.main.endpoint}/${var.db_name}?sslmode=require"
     DB_HOST      = aws_db_instance.main.address
     DB_PORT      = aws_db_instance.main.port
     DB_NAME      = var.db_name
@@ -95,7 +95,7 @@ resource "aws_secretsmanager_secret" "raw_database_url" {
 resource "aws_secretsmanager_secret_version" "raw_database_url" {
   secret_id = aws_secretsmanager_secret.raw_database_url.id
   secret_string = jsonencode({
-    RAW_DATABASE_URL = "postgres://${var.db_username}:${random_password.db_password.result}@${aws_db_instance.main.endpoint}/${var.db_name}"
+    RAW_DATABASE_URL = "postgres://${var.db_username}:${random_password.db_password.result}@${aws_db_instance.main.endpoint}/${var.db_name}?sslmode=require"
     DB_HOST          = aws_db_instance.main.address
     DB_PORT          = aws_db_instance.main.port
     DB_NAME          = var.db_name

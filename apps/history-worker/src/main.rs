@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use common::{connect_postgres_client, start_health_check_server, ShutdownSignal};
+use common::{connect_postgres_client, init_logging, start_health_check_server, ShutdownSignal};
 use dotenvy::dotenv;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -25,13 +25,7 @@ struct Offset {
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .compact()
-        .init();
+    init_logging("info");
 
     let health_status = start_health_check_server("history-worker");
     let shutdown = ShutdownSignal::install();

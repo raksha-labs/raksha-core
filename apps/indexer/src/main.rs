@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use common::{connect_postgres_client, start_health_check_server, ChainAdapter};
+use common::{connect_postgres_client, init_logging, start_health_check_server, ChainAdapter};
 use dotenvy::dotenv;
 use event_schema::{NormalizedEvent, ReorgNotice};
 use ingestion::{
@@ -501,13 +501,7 @@ impl IndexerStateStore {
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .compact()
-        .init();
+    init_logging("info");
     let health_status = start_health_check_server("indexer");
 
     let mut adapters = build_adapters().await?;
