@@ -381,10 +381,11 @@ impl DetectionPattern for DpegPattern {
             let entries: Vec<DpegPolicy> = match serde_json::from_value(config.clone()) {
                 Ok(v) => v,
                 Err(err) => {
-                    tracing::warn!(
-                        tenant_id = %tenant_id,
-                        error = ?err,
-                        "failed to parse dpeg config — skipping tenant"
+                    common::log_error!(
+                        warn,
+                        err,
+                        "failed to parse dpeg config — skipping tenant",
+                        tenant_id = %tenant_id
                     );
                     continue;
                 }
@@ -392,11 +393,12 @@ impl DetectionPattern for DpegPattern {
             for mut policy in entries {
                 policy.tenant_id = tenant_id.clone();
                 if let Err(err) = policy.validate() {
-                    tracing::warn!(
+                    common::log_error!(
+                        warn,
+                        err,
+                        "invalid dpeg policy — skipping market",
                         tenant_id = %tenant_id,
-                        market_key = %policy.market_key,
-                        error = ?err,
-                        "invalid dpeg policy — skipping market"
+                        market_key = %policy.market_key
                     );
                     continue;
                 }

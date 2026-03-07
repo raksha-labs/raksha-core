@@ -11,7 +11,7 @@ use common::{init_logging, start_health_check_server};
 use dotenvy::dotenv;
 use state_manager::{describe_redis_url, PostgresRepository, RedisStreamPublisher};
 use tokio::{signal, time::interval};
-use tracing::{error, info, warn};
+use tracing::info;
 
 mod patterns;
 
@@ -73,12 +73,12 @@ async fn main() -> Result<()> {
     match repo.load_tenant_pattern_configs().await {
         Ok(cfg) => {
             if let Err(err) = registry.reload_all(&cfg).await {
-                warn!(error = ?err, "initial pattern config reload failed");
+                common::log_error!(warn, err, "initial pattern config reload failed");
             } else {
                 info!("initial pattern configs loaded");
             }
         }
-        Err(err) => warn!(error = ?err, "failed to load initial pattern configs"),
+        Err(err) => common::log_error!(warn, err, "failed to load initial pattern configs"),
     }
 
     let mut reload_ticker = interval(Duration::from_secs(CONFIG_RELOAD_INTERVAL_SECS));
@@ -96,12 +96,12 @@ async fn main() -> Result<()> {
                 match repo.load_tenant_pattern_configs().await {
                     Ok(cfg) => {
                         if let Err(err) = registry.reload_all(&cfg).await {
-                            warn!(error = ?err, "pattern config reload failed");
+                            common::log_error!(warn, err, "pattern config reload failed");
                         } else {
                             info!("pattern configs reloaded");
                         }
                     }
-                    Err(err) => warn!(error = ?err, "failed to reload pattern configs"),
+                    Err(err) => common::log_error!(warn, err, "failed to reload pattern configs"),
                 }
             }
 
@@ -115,7 +115,7 @@ async fn main() -> Result<()> {
                 let entries = match entries {
                     Ok(v) => v,
                     Err(err) => {
-                        error!(error = ?err, "failed to read from unified-events stream");
+                        common::log_error!(error, err, "failed to read from unified-events stream");
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         continue;
                     }
@@ -123,16 +123,22 @@ async fn main() -> Result<()> {
 
                 for (entry_id, event) in entries {
                     if let Err(err) = registry.process_event(&event, &repo, &stream).await {
-                        warn!(
+                        common::log_error!(
+                            warn,
+                            err,
+                            "error processing event",
                             entry_id = %entry_id,
-                            event_id = %event.event_id,
-                            error = ?err,
-                            "error processing event"
+                            event_id = %event.event_id
                         );
                     }
                     // Acknowledge regardless to avoid indefinite replays on errors.
                     if let Err(err) = stream.ack_unified_event(CONSUMER_GROUP, &entry_id).await {
-                        warn!(entry_id = %entry_id, error = ?err, "failed to ack event");
+                        common::log_error!(
+                            warn,
+                            err,
+                            "failed to ack event",
+                            entry_id = %entry_id
+                        );
                     }
                 }
             }

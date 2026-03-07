@@ -533,12 +533,13 @@ impl DetectionPattern for GenericRulePattern {
                 )
                 .await
             {
-                tracing::warn!(
+                common::log_error!(
+                    warn,
+                    error,
+                    "failed to persist runtime state",
                     tenant_id = %event.tenant_id,
                     pattern_id = %pattern_id,
-                    rule_id = %rule.rule_id,
-                    error = ?error,
-                    "failed to persist runtime state"
+                    rule_id = %rule.rule_id
                 );
             }
 
@@ -578,12 +579,13 @@ impl DetectionPattern for GenericRulePattern {
                 )
                 .await
             {
-                tracing::warn!(
+                common::log_error!(
+                    warn,
+                    error,
+                    "failed to persist runtime snapshot",
                     tenant_id = %event.tenant_id,
                     pattern_id = %pattern_id,
-                    rule_id = %rule.rule_id,
-                    error = ?error,
-                    "failed to persist runtime snapshot"
+                    rule_id = %rule.rule_id
                 );
             }
 

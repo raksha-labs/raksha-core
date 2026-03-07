@@ -530,13 +530,14 @@ impl EvmChainAdapter {
                 provider.status.consecutive_failures.saturating_add(1);
             provider.status.last_error = Some(err.to_string());
             provider.status.last_failure_at = Some(Utc::now());
-            warn!(
+            common::log_error!(
+                warn,
+                err,
+                "rpc provider request failed",
                 chain = %self.chain_slug,
                 operation,
                 provider_endpoint = %provider.endpoint,
-                consecutive_failures = provider.status.consecutive_failures,
-                error = ?err,
-                "rpc provider request failed"
+                consecutive_failures = provider.status.consecutive_failures
             );
         }
     }

@@ -956,11 +956,12 @@ fn parse_tvl_drop_rules(config: &Value, tenant_id: &str) -> Vec<TvlDropRule> {
         }
 
         if let Err(error) = rule.validate() {
-            tracing::warn!(
+            common::log_error!(
+                warn,
+                error,
+                "invalid tvl_drop rule; skipping",
                 tenant_id = %tenant_id,
-                rule_id = %rule.rule_id,
-                error = ?error,
-                "invalid tvl_drop rule; skipping"
+                rule_id = %rule.rule_id
             );
             continue;
         }

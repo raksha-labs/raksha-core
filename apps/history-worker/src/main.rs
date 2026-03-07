@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio_postgres::{Client, Row};
-use tracing::{info, warn};
+use tracing::info;
 
 const DEFAULT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_BATCH_SIZE: i64 = 500;
@@ -88,8 +88,9 @@ async fn main() -> Result<()> {
             Ok(_raw_client) => {
                 info!("history-worker raw database connectivity check passed");
             }
-            Err(err) => warn!(
-                error = ?err,
+            Err(err) => common::log_error!(
+                warn,
+                err,
                 "history-worker RAW_DATABASE_URL configured but connection failed"
             ),
         }
@@ -311,7 +312,12 @@ fn discover_files_recursive(base_dir: &Path, extensions: &[&str]) -> Result<Vec<
         let entries = match fs::read_dir(&current) {
             Ok(entries) => entries,
             Err(err) => {
-                warn!(path = %current.display(), error = ?err, "failed to read directory during discovery");
+                common::log_error!(
+                    warn,
+                    err,
+                    "failed to read directory during discovery",
+                    path = %current.display()
+                );
                 continue;
             }
         };
@@ -320,7 +326,11 @@ fn discover_files_recursive(base_dir: &Path, extensions: &[&str]) -> Result<Vec<
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    warn!(error = ?err, "failed to read directory entry during discovery");
+                    common::log_error!(
+                        warn,
+                        err,
+                        "failed to read directory entry during discovery"
+                    );
                     continue;
                 }
             };
@@ -407,14 +417,24 @@ fn load_curated_records(curated_dir: Option<&Path>) -> Result<Vec<Value>> {
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,
             Err(err) => {
-                warn!(path = %path.display(), error = ?err, "failed to read curated dataset file");
+                common::log_error!(
+                    warn,
+                    err,
+                    "failed to read curated dataset file",
+                    path = %path.display()
+                );
                 continue;
             }
         };
         let parsed: Value = match serde_json::from_str(&content) {
             Ok(parsed) => parsed,
             Err(err) => {
-                warn!(path = %path.display(), error = ?err, "failed to parse curated dataset file");
+                common::log_error!(
+                    warn,
+                    err,
+                    "failed to parse curated dataset file",
+                    path = %path.display()
+                );
                 continue;
             }
         };
@@ -643,7 +663,12 @@ async fn sync_simlab_catalog(
         let scenario_value = match load_scenario_file(&file) {
             Ok(value) => value,
             Err(err) => {
-                warn!(path = %file.display(), error = ?err, "skipping invalid simlab scenario");
+                common::log_error!(
+                    warn,
+                    err,
+                    "skipping invalid simlab scenario",
+                    path = %file.display()
+                );
                 continue;
             }
         };

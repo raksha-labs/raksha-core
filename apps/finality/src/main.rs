@@ -129,7 +129,12 @@ async fn main() -> Result<()> {
                             info!(chain = ?event.chain, "no existing finality state found");
                         }
                         Err(e) => {
-                            warn!(chain = ?event.chain, error = ?e, "failed to load finality state");
+                            common::log_error!(
+                                warn,
+                                e,
+                                "failed to load finality state",
+                                chain = ?event.chain
+                            );
                         }
                     }
                 }
@@ -206,7 +211,12 @@ async fn main() -> Result<()> {
             if let Some(repo) = &repository {
                 for (chain, tracker) in &trackers {
                     if let Err(e) = persist_tracker(repo, chain, tracker).await {
-                        warn!(chain = ?chain, error = ?e, "failed to persist finality state");
+                        common::log_error!(
+                            warn,
+                            e,
+                            "failed to persist finality state",
+                            chain = ?chain
+                        );
                     }
                 }
                 event_count = 0;
@@ -220,7 +230,12 @@ async fn main() -> Result<()> {
             if let Some(repo) = &repository {
                 for (chain, tracker) in &trackers {
                     if let Err(e) = persist_tracker(repo, chain, tracker).await {
-                        warn!(chain = ?chain, error = ?e, "failed to persist finality state on shutdown");
+                        common::log_error!(
+                            warn,
+                            e,
+                            "failed to persist finality state on shutdown",
+                            chain = ?chain
+                        );
                     } else {
                         info!(chain = ?chain, "finality state persisted on shutdown");
                     }
@@ -256,7 +271,7 @@ async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
     let publisher = match publisher_result {
         Ok(publisher) => publisher,
         Err(err) => {
-            warn!(error = ?err, "invalid REDIS_URL; redis streams disabled");
+            common::log_error!(warn, err, "invalid REDIS_URL; redis streams disabled");
             return None;
         }
     };
@@ -265,16 +280,17 @@ async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
         match publisher.healthcheck().await {
             Ok(()) => return Some(publisher),
             Err(err) if attempt < REDIS_STARTUP_RETRY_ATTEMPTS => {
-                warn!(
-                    error = ?err,
+                common::log_error!(
+                    warn,
+                    err,
+                    "redis healthcheck failed during startup; retrying",
                     attempt,
-                    max_attempts = REDIS_STARTUP_RETRY_ATTEMPTS,
-                    "redis healthcheck failed during startup; retrying"
+                    max_attempts = REDIS_STARTUP_RETRY_ATTEMPTS
                 );
                 tokio::time::sleep(Duration::from_millis(REDIS_STARTUP_RETRY_DELAY_MS)).await;
             }
             Err(err) => {
-                warn!(error = ?err, "redis healthcheck failed");
+                common::log_error!(warn, err, "redis healthcheck failed");
                 return None;
             }
         }
@@ -313,7 +329,7 @@ async fn init_repository() -> Option<PostgresRepository> {
     match PostgresRepository::from_database_url(&database_url).await {
         Ok(repo) => Some(repo),
         Err(err) => {
-            warn!(error = ?err, "failed to connect to postgres");
+            common::log_error!(warn, err, "failed to connect to postgres");
             None
         }
     }

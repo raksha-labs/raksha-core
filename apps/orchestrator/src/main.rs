@@ -161,10 +161,11 @@ async fn main() -> Result<()> {
                 if let Some(repo) = repository.as_ref() {
                     match repo.find_latest_alert_by_event_key(&update.event_key).await {
                         Ok(found) => existing = found,
-                        Err(err) => warn!(
-                            event_key = %update.event_key,
-                            error = ?err,
-                            "failed to load alert context from postgres for finality update"
+                        Err(err) => common::log_error!(
+                            warn,
+                            err,
+                            "failed to load alert context from postgres for finality update",
+                            event_key = %update.event_key
                         ),
                     }
                 }
@@ -215,10 +216,11 @@ async fn main() -> Result<()> {
                         )
                         .await
                     {
-                        warn!(
-                            error = ?error,
-                            incident_id = incident_id,
-                            "failed to update incident state from finality update"
+                        common::log_error!(
+                            warn,
+                            error,
+                            "failed to update incident state from finality update",
+                            incident_id = incident_id
                         );
                     }
                     if let Err(error) = repo
@@ -237,10 +239,11 @@ async fn main() -> Result<()> {
                         )
                         .await
                     {
-                        warn!(
-                            error = ?error,
-                            incident_id = incident_id,
-                            "failed to append incident event from finality update"
+                        common::log_error!(
+                            warn,
+                            error,
+                            "failed to append incident event from finality update",
+                            incident_id = incident_id
                         );
                     }
                 }
@@ -367,21 +370,23 @@ async fn attach_incident_context(
                 current_severity: format!("{:?}", detection.severity).to_lowercase(),
             };
             if let Err(error) = repo.create_incident(&created, now).await {
-                warn!(
-                    error = ?error,
+                common::log_error!(
+                    warn,
+                    error,
+                    "failed to create incident",
                     tenant_id = %tenant_id,
-                    pattern_id = %detection.pattern_id,
-                    "failed to create incident"
+                    pattern_id = %detection.pattern_id
                 );
             }
             created
         }
         Err(error) => {
-            warn!(
-                error = ?error,
+            common::log_error!(
+                warn,
+                error,
+                "failed to find active incident",
                 tenant_id = %tenant_id,
-                pattern_id = %detection.pattern_id,
-                "failed to find active incident"
+                pattern_id = %detection.pattern_id
             );
             return alert;
         }
@@ -449,10 +454,11 @@ async fn attach_incident_context(
                     .save_incident_entity_exposures(&incident.incident_id, &tenant_id, &exposures)
                     .await
                 {
-                    warn!(
-                        error = ?err,
-                        incident_id = %incident.incident_id,
-                        "failed to save blast radius exposures"
+                    common::log_error!(
+                        warn,
+                        err,
+                        "failed to save blast radius exposures",
+                        incident_id = %incident.incident_id
                     );
                 }
 
@@ -485,7 +491,11 @@ async fn attach_incident_context(
                 // No monitored entities for this asset — blast_radius stays empty.
             }
             Err(err) => {
-                warn!(error = ?err, "failed to query monitored entities for blast radius");
+                common::log_error!(
+                    warn,
+                    err,
+                    "failed to query monitored entities for blast radius"
+                );
             }
         }
     }
@@ -502,10 +512,11 @@ async fn attach_incident_context(
         )
         .await
     {
-        warn!(
-            error = ?error,
-            incident_id = %incident.incident_id,
-            "failed to update incident state"
+        common::log_error!(
+            warn,
+            error,
+            "failed to update incident state",
+            incident_id = %incident.incident_id
         );
     }
 
@@ -528,10 +539,11 @@ async fn attach_incident_context(
         )
         .await
     {
-        warn!(
-            error = ?error,
-            incident_id = %incident.incident_id,
-            "failed to append incident event"
+        common::log_error!(
+            warn,
+            error,
+            "failed to append incident event",
+            incident_id = %incident.incident_id
         );
     }
 
@@ -557,10 +569,11 @@ async fn attach_incident_context(
         )
         .await
     {
-        warn!(
-            error = ?error,
-            incident_id = %incident.incident_id,
-            "failed to append incident context snapshot"
+        common::log_error!(
+            warn,
+            error,
+            "failed to append incident context snapshot",
+            incident_id = %incident.incident_id
         );
     }
 
@@ -626,10 +639,11 @@ async fn dispatch_alert(
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    warn!(
-                        error = ?err,
-                        tenant_id = %tenant_id,
-                        "failed to evaluate monthly alert quota"
+                    common::log_error!(
+                        warn,
+                        err,
+                        "failed to evaluate monthly alert quota",
+                        tenant_id = %tenant_id
                     );
                 }
             }
@@ -651,10 +665,11 @@ async fn dispatch_alert(
                         )
                         .await
                     {
-                        warn!(
-                            error = ?err,
-                            channel = %result.channel,
-                            "failed to persist alert delivery attempt"
+                        common::log_error!(
+                            warn,
+                            err,
+                            "failed to persist alert delivery attempt",
+                            channel = %result.channel
                         );
                     }
                 }
@@ -668,7 +683,7 @@ async fn dispatch_alert(
             }
         }
         Err(err) => {
-            warn!(error = ?err, "failed to dispatch alert to notifier-gateway");
+            common::log_error!(warn, err, "failed to dispatch alert to notifier-gateway");
         }
     }
 
@@ -688,18 +703,18 @@ async fn persist_and_publish_alert(
 ) {
     if let Some(repo) = repository {
         if let Err(err) = repo.save_alert(alert).await {
-            warn!(error = ?err, "failed to persist alert");
+            common::log_error!(warn, err, "failed to persist alert");
         }
         if let Err(err) = repo.save_alert_lifecycle(alert).await {
-            warn!(error = ?err, "failed to persist alert lifecycle event");
+            common::log_error!(warn, err, "failed to persist alert lifecycle event");
         }
     }
 
     if let Err(err) = stream.publish_alert(alert).await {
-        warn!(error = ?err, "failed to publish alert stream event");
+        common::log_error!(warn, err, "failed to publish alert stream event");
     }
     if let Err(err) = stream.publish_alert_lifecycle(alert).await {
-        warn!(error = ?err, "failed to publish alert lifecycle stream event");
+        common::log_error!(warn, err, "failed to publish alert lifecycle stream event");
     }
 }
 
@@ -742,11 +757,12 @@ async fn record_usage_event(
         )
         .await
     {
-        warn!(
-            error = ?err,
+        common::log_error!(
+            warn,
+            err,
+            "failed to persist usage event",
             event_type = event_type,
-            tenant_id = tenant_id,
-            "failed to persist usage event"
+            tenant_id = tenant_id
         );
     }
 }
@@ -814,7 +830,7 @@ async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
     let publisher = match publisher_result {
         Ok(publisher) => publisher,
         Err(err) => {
-            warn!(error = ?err, "invalid REDIS_URL; redis streams disabled");
+            common::log_error!(warn, err, "invalid REDIS_URL; redis streams disabled");
             return None;
         }
     };
@@ -823,16 +839,17 @@ async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
         match publisher.healthcheck().await {
             Ok(()) => return Some(publisher),
             Err(err) if attempt < REDIS_STARTUP_RETRY_ATTEMPTS => {
-                warn!(
-                    error = ?err,
+                common::log_error!(
+                    warn,
+                    err,
+                    "redis healthcheck failed during startup; retrying",
                     attempt,
-                    max_attempts = REDIS_STARTUP_RETRY_ATTEMPTS,
-                    "redis healthcheck failed during startup; retrying"
+                    max_attempts = REDIS_STARTUP_RETRY_ATTEMPTS
                 );
                 tokio::time::sleep(Duration::from_millis(REDIS_STARTUP_RETRY_DELAY_MS)).await;
             }
             Err(err) => {
-                warn!(error = ?err, "redis healthcheck failed");
+                common::log_error!(warn, err, "redis healthcheck failed");
                 return None;
             }
         }
@@ -850,7 +867,11 @@ async fn init_repository() -> Option<PostgresRepository> {
     match PostgresRepository::from_database_url(&database_url).await {
         Ok(repo) => Some(repo),
         Err(err) => {
-            warn!(error = ?err, "failed to initialize postgres state_manager; disabled");
+            common::log_error!(
+                warn,
+                err,
+                "failed to initialize postgres state_manager; disabled"
+            );
             None
         }
     }

@@ -17,7 +17,7 @@ pub async fn connect_postgres_client(
 
     tokio::spawn(async move {
         if let Err(err) = connection.await {
-            tracing::error!(error = ?err, "{background_error_message}");
+            crate::log_error!(error, err, background_error_message);
         }
     });
 

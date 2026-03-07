@@ -4,7 +4,7 @@
 /// graceful shutdowns during deployments and scaling operations.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Shared shutdown flag that can be checked in worker loops
 #[derive(Clone)]
@@ -57,7 +57,7 @@ impl ShutdownSignal {
 
         tokio::spawn(async move {
             if let Err(e) = wait_for_shutdown_signal().await {
-                warn!(error = ?e, "failed to install signal handler");
+                crate::log_error!(warn, e, "failed to install signal handler");
             } else {
                 info!("shutdown signal received");
                 signal_clone.trigger();

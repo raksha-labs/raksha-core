@@ -37,7 +37,7 @@ const DEFAULT_INGESTION_POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_INGESTION_BLOCK_BATCH_SIZE: u64 = 8;
 const DEFAULT_INGESTION_MAX_RETRIES: usize = 5;
 const DEFAULT_INGESTION_RETRY_BACKOFF_MS: u64 = 500;
-const REDIS_STARTUP_RETRY_ATTEMPTS: usize = 30;
+const REDIS_STARTUP_RETRY_ATTEMPTS: usize = 3;
 const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 const INGESTION_CHAIN_LOCK_NAMESPACE: i32 = 42_017;
 const ZERO_BLOCK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -127,7 +127,11 @@ impl IndexerStateStore {
         match Self::from_database_url(&database_url).await {
             Ok(store) => Some(store),
             Err(err) => {
-                warn!(error = ?err, "failed to initialize durable indexer store; falling back to legacy polling mode");
+                common::log_error!(
+                    warn,
+                    err,
+                    "failed to initialize durable indexer store; falling back to legacy polling mode"
+                );
                 None
             }
         }
@@ -515,10 +519,7 @@ async fn main() -> Result<()> {
         runtime.adapter.subscribe_logs().await?;
     }
 
-    let Some(stream) = init_stream_publisher().await else {
-        warn!("REDIS_URL not set or unavailable; ingestion requires Redis Streams");
-        return Ok(());
-    };
+    let stream = init_stream_publisher().await?;
 
     let stream_supervisor_enabled = std::env::var("STREAM_SUPERVISOR_ENABLED")
         .ok()
@@ -542,14 +543,15 @@ async fn main() -> Result<()> {
                         )
                         .await
                         {
-                            warn!(error = ?err, "stream supervisor task terminated");
+                            common::log_error!(warn, err, "stream supervisor task terminated");
                         }
                     });
                     info!(stream_purge_enabled, "db-driven stream supervisor started",);
                 }
-                Err(err) => warn!(
-                    error = ?err,
-                    "failed to initialize stream supervisor repository; supervisor disabled",
+                Err(err) => common::log_error!(
+                    warn,
+                    err,
+                    "failed to initialize stream supervisor repository; supervisor disabled"
                 ),
             },
             Err(_) => warn!("DATABASE_URL not set; stream supervisor disabled"),
@@ -633,10 +635,11 @@ async fn main() -> Result<()> {
                 let has_lock = match store.try_acquire_chain_lock(&runtime.chain_slug).await {
                     Ok(acquired) => acquired,
                     Err(err) => {
-                        warn!(
-                            chain_slug = %runtime.chain_slug,
-                            error = ?err,
-                            "failed to evaluate chain advisory lock; skipping this iteration"
+                        common::log_error!(
+                            warn,
+                            err,
+                            "failed to evaluate chain advisory lock; skipping this iteration",
+                            chain_slug = %runtime.chain_slug
                         );
                         continue;
                     }
@@ -675,10 +678,11 @@ async fn main() -> Result<()> {
             .await
             {
                 Ok(count) => emitted_count += count,
-                Err(err) => warn!(
-                    chain_slug = %runtime.chain_slug,
-                    error = ?err,
-                    "failed to sync chain adapter"
+                Err(err) => common::log_error!(
+                    warn,
+                    err,
+                    "failed to sync chain adapter",
+                    chain_slug = %runtime.chain_slug
                 ),
             }
         }
@@ -799,13 +803,14 @@ async fn sync_runtime_chain(
                         to_block = from_block + reduced_window - 1;
                         runtime.current_batch_size =
                             runtime.current_batch_size.min(reduced_window).max(1);
-                        warn!(
+                        common::log_error!(
+                            warn,
+                            err,
+                            "backfill range failed; reducing range and retrying",
                             chain_slug = %runtime.chain_slug,
                             from_block,
                             to_block,
-                            reduced_window,
-                            error = ?err,
-                            "backfill range failed; reducing range and retrying",
+                            reduced_window
                         );
                         continue;
                     }
@@ -821,13 +826,14 @@ async fn sync_runtime_chain(
                     }
 
                     let backoff_ms = retry_backoff_ms.saturating_mul(single_block_attempt as u64);
-                    warn!(
+                    common::log_error!(
+                        warn,
+                        err,
+                        "single-block backfill failed; retrying",
                         chain_slug = %runtime.chain_slug,
                         block = from_block,
                         attempt = single_block_attempt,
-                        backoff_ms,
-                        error = ?err,
-                        "single-block backfill failed; retrying",
+                        backoff_ms
                     );
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 }
@@ -848,10 +854,11 @@ async fn legacy_poll_events(
     let events = match adapter.next_events().await {
         Ok(events) => events,
         Err(err) => {
-            warn!(
-                chain_slug = %chain_slug_hint,
-                error = ?err,
-                "failed to fetch events from adapter"
+            common::log_error!(
+                warn,
+                err,
+                "failed to fetch events from adapter",
+                chain_slug = %chain_slug_hint
             );
             return Ok(0);
         }
@@ -978,40 +985,38 @@ where
         .ok_or_else(|| anyhow!("{field} did not serialize to string"))
 }
 
-async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
-    let redis_url = std::env::var("REDIS_URL").ok()?;
+async fn init_stream_publisher() -> Result<RedisStreamPublisher> {
+    let redis_url = std::env::var("REDIS_URL")
+        .context("REDIS_URL not set; ingestion requires Redis Streams")?;
     info!(redis_url = %describe_redis_url(&redis_url), "attempting redis connection");
 
-    let publisher_result = RedisStreamPublisher::from_url(&redis_url);
-
-    let publisher = match publisher_result {
-        Ok(publisher) => publisher,
-        Err(err) => {
-            warn!(error = ?err, "invalid REDIS_URL; redis publishing disabled");
-            return None;
-        }
-    };
+    let publisher = RedisStreamPublisher::from_url(&redis_url)
+        .context("invalid REDIS_URL; redis publishing is required for indexer startup")?;
 
     for attempt in 1..=REDIS_STARTUP_RETRY_ATTEMPTS {
         match publisher.healthcheck().await {
-            Ok(()) => return Some(publisher),
+            Ok(()) => return Ok(publisher),
             Err(err) if attempt < REDIS_STARTUP_RETRY_ATTEMPTS => {
-                warn!(
-                    error = ?err,
+                common::log_error!(
+                    warn,
+                    err,
+                    "redis healthcheck failed during startup; retrying",
                     attempt,
-                    max_attempts = REDIS_STARTUP_RETRY_ATTEMPTS,
-                    "redis healthcheck failed during startup; retrying"
+                    max_attempts = REDIS_STARTUP_RETRY_ATTEMPTS
                 );
                 tokio::time::sleep(Duration::from_millis(REDIS_STARTUP_RETRY_DELAY_MS)).await;
             }
             Err(err) => {
-                warn!(error = ?err, "redis healthcheck failed; redis publishing disabled");
-                return None;
+                return Err(err).context(
+                    "redis healthcheck failed; redis publishing is required for indexer startup",
+                );
             }
         }
     }
 
-    None
+    Err(anyhow!(
+        "redis startup retry loop exited unexpectedly without initializing the stream publisher"
+    ))
 }
 
 async fn build_adapters() -> Result<Vec<RuntimeChainAdapter>> {
@@ -1037,7 +1042,9 @@ async fn build_adapters() -> Result<Vec<RuntimeChainAdapter>> {
             {
                 Ok(Some(adapter)) => adapters.push(adapter),
                 Ok(None) => {}
-                Err(err) => warn!(error = ?err, "failed to build chain adapter from rules config"),
+                Err(err) => {
+                    common::log_error!(warn, err, "failed to build chain adapter from rules config")
+                }
             }
         }
 
@@ -1195,10 +1202,11 @@ async fn build_chain_adapter_from_rules(
             }))
         }
         Err(err) => {
-            warn!(
-                chain_slug = %chain_slug,
-                error = ?err,
+            common::log_error!(
+                warn,
+                err,
                 "failed to init EVM live adapter; falling back to mock",
+                chain_slug = %chain_slug
             );
             Ok(Some(RuntimeChainAdapter {
                 chain_slug: chain_slug.clone(),
@@ -1260,7 +1268,11 @@ async fn build_legacy_env_fallback_adapters(
                     .with_confirmation_depth(eth_confirmation_depth),
             ),
             Err(err) => {
-                warn!(error = ?err, "failed to init ETH live adapter; falling back to mock");
+                common::log_error!(
+                    warn,
+                    err,
+                    "failed to init ETH live adapter; falling back to mock"
+                );
                 Box::new(
                     EvmMockAdapter::single_protocol(
                         "ethereum",
@@ -1347,7 +1359,11 @@ async fn build_legacy_env_fallback_adapters(
                         .with_confirmation_depth(base_confirmation_depth),
                 ),
                 Err(err) => {
-                    warn!(error = ?err, "failed to init Base live adapter; falling back to mock");
+                    common::log_error!(
+                        warn,
+                        err,
+                        "failed to init Base live adapter; falling back to mock"
+                    );
                     Box::new(
                         EvmMockAdapter::single_protocol(
                             "base",

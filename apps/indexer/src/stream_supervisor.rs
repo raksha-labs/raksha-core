@@ -37,7 +37,11 @@ pub async fn run_stream_supervisor(
     let raw_repo = match PostgresRawRepository::from_env().await {
         Some(Ok(repo)) => Some(repo),
         Some(Err(error)) => {
-            warn!(error = ?error, "RAW_DATABASE_URL configured but raw repository init failed; continuing without raw writer");
+            common::log_error!(
+                warn,
+                error,
+                "RAW_DATABASE_URL configured but raw repository init failed; continuing without raw writer"
+            );
             None
         }
         None => {
@@ -59,7 +63,7 @@ pub async fn run_stream_supervisor(
         tokio::select! {
             _ = reconcile_tick.tick() => {
                 if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
-                    warn!(error = ?error, "stream supervisor periodic reconcile failed");
+                    common::log_error!(warn, error, "stream supervisor periodic reconcile failed");
                 }
             }
             signal = notify_rx.recv() => {
@@ -67,7 +71,7 @@ pub async fn run_stream_supervisor(
                     warn!("stream config notify listener stopped; continuing with periodic reconcile only");
                 }
                 if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
-                    warn!(error = ?error, "stream supervisor notify-driven reconcile failed");
+                    common::log_error!(warn, error, "stream supervisor notify-driven reconcile failed");
                 }
             }
             _ = purge_tick.tick(), if purge_enabled => {
@@ -77,7 +81,7 @@ pub async fn run_stream_supervisor(
                             info!(deleted, retention_seconds = DEFAULT_RETENTION_SECONDS, "purged old quote/trade source feed rows");
                         }
                     }
-                    Err(error) => warn!(error = ?error, "failed purging old quote/trade source feed rows"),
+                    Err(error) => common::log_error!(warn, error, "failed purging old quote/trade source feed rows"),
                 }
             }
         }
@@ -165,7 +169,7 @@ async fn reconcile(
 async fn stop_worker(handle: WorkerHandle) {
     let _ = handle.stop_tx.send(true);
     if let Err(error) = handle.join_handle.await {
-        warn!(error = ?error, "stream worker join failed");
+        common::log_error!(warn, error, "stream worker join failed");
     }
 }
 
@@ -232,27 +236,36 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
             let connector = match make_postgres_tls_connector() {
                 Ok(connector) => connector,
                 Err(error) => {
-                    warn!(error = ?error, "failed to build postgres TLS connector for stream config LISTEN");
+                    common::log_error!(
+                        warn,
+                        error,
+                        "failed to build postgres TLS connector for stream config LISTEN"
+                    );
                     tokio::time::sleep(Duration::from_secs(3)).await;
                     continue;
                 }
             };
 
-            let (client, mut connection) =
-                match tokio_postgres::connect(&database_url, connector).await {
-                    Ok(value) => value,
-                    Err(error) => {
-                        warn!(error = ?error, "failed to connect for stream config LISTEN");
-                        tokio::time::sleep(Duration::from_secs(3)).await;
-                        continue;
-                    }
-                };
+            let (client, mut connection) = match tokio_postgres::connect(&database_url, connector)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    common::log_error!(warn, error, "failed to connect for stream config LISTEN");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    continue;
+                }
+            };
 
             if let Err(error) = client
                 .batch_execute("LISTEN source_stream_config_changed")
                 .await
             {
-                warn!(error = ?error, "failed to execute LISTEN source_stream_config_changed");
+                common::log_error!(
+                    warn,
+                    error,
+                    "failed to execute LISTEN source_stream_config_changed"
+                );
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
             }
@@ -271,7 +284,11 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
                     }
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
-                        warn!(error = ?error, "stream config listener connection error; reconnecting");
+                        common::log_error!(
+                            warn,
+                            error,
+                            "stream config listener connection error; reconnecting"
+                        );
                         break;
                     }
                     None => {

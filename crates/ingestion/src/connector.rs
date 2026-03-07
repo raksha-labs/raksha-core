@@ -32,7 +32,6 @@ pub trait DataSourceConnector: Send {
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
-use tracing::{debug, warn};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type QuoteParser = fn(&Value) -> Result<ParsedQuote>;
@@ -173,7 +172,12 @@ impl DataSourceConnector for CexWebsocketConnector {
                     let raw: Value = match serde_json::from_str(&text) {
                         Ok(v) => v,
                         Err(err) => {
-                            warn!(source_id = %self.source_id, error = ?err, "invalid json");
+                            common::log_error!(
+                                warn,
+                                err,
+                                "invalid json",
+                                source_id = %self.source_id
+                            );
                             continue;
                         }
                     };
@@ -196,10 +200,11 @@ impl DataSourceConnector for CexWebsocketConnector {
                             });
                         }
                         Err(err) => {
-                            debug!(
-                                source_id = %self.source_id,
-                                error = ?err,
-                                "payload ignored by parser"
+                            common::log_error!(
+                                debug,
+                                err,
+                                "payload ignored by parser",
+                                source_id = %self.source_id
                             );
                         }
                     }

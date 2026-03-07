@@ -1490,11 +1490,12 @@ impl PostgresRepository {
                     );
                     return Ok(());
                 }
-                warn!(
-                    error = ?error,
+                common::log_error!(
+                    warn,
+                    error,
+                    "failed to save incident entity exposure",
                     incident_id = %incident_id,
-                    entity_id = %exposure.entity_id,
-                    "failed to save incident entity exposure"
+                    entity_id = %exposure.entity_id
                 );
             }
         }

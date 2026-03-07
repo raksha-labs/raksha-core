@@ -69,10 +69,11 @@ impl PatternRegistry {
     ) -> Result<()> {
         for pattern in &mut self.patterns {
             if let Err(err) = pattern.reload_config(config_map).await {
-                tracing::warn!(
-                    pattern_id = pattern.pattern_id(),
-                    error = ?err,
-                    "failed to reload pattern config"
+                common::log_error!(
+                    warn,
+                    err,
+                    "failed to reload pattern config",
+                    pattern_id = pattern.pattern_id()
                 );
             }
         }
@@ -94,11 +95,12 @@ impl PatternRegistry {
             .unwrap_or(false);
         if !raw_persisted {
             if let Err(err) = repo.insert_raw_event(event).await {
-                tracing::warn!(
+                common::log_error!(
+                    warn,
+                    err,
+                    "failed to persist source feed event",
                     event_id = %event.event_id,
-                    source_id = %event.source_id,
-                    error = ?err,
-                    "failed to persist source feed event"
+                    source_id = %event.source_id
                 );
             }
         }
@@ -108,27 +110,30 @@ impl PatternRegistry {
             match pattern.process_event(event, now, repo).await {
                 Ok(Some(detection)) => {
                     if let Err(err) = repo.save_detection(&detection).await {
-                        tracing::warn!(
-                            pattern_id = pattern.pattern_id(),
-                            error = ?err,
-                            "failed to persist detection"
+                        common::log_error!(
+                            warn,
+                            err,
+                            "failed to persist detection",
+                            pattern_id = pattern.pattern_id()
                         );
                     }
                     if let Err(err) = stream.publish_detection(&detection).await {
-                        tracing::warn!(
-                            pattern_id = pattern.pattern_id(),
-                            error = ?err,
-                            "failed to publish detection"
+                        common::log_error!(
+                            warn,
+                            err,
+                            "failed to publish detection",
+                            pattern_id = pattern.pattern_id()
                         );
                     }
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    tracing::warn!(
+                    common::log_error!(
+                        warn,
+                        err,
+                        "pattern evaluation error — skipping event",
                         pattern_id = pattern.pattern_id(),
-                        event_id = %event.event_id,
-                        error = ?err,
-                        "pattern evaluation error — skipping event"
+                        event_id = %event.event_id
                     );
                 }
             }

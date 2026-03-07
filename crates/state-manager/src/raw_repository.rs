@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio_postgres::Client;
-use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceEnvelopeV1 {
@@ -265,7 +264,7 @@ impl PostgresRawRepository {
             })),
             Ok(None) => Ok(None),
             Err(error) => {
-                warn!(error = ?error, "raw chain_events insert failed");
+                common::log_error!(warn, error, "raw chain_events insert failed");
                 Ok(None)
             }
         }
@@ -325,7 +324,7 @@ impl PostgresRawRepository {
             })),
             Ok(None) => Ok(None),
             Err(error) => {
-                warn!(error = ?error, "raw dex_events insert failed");
+                common::log_error!(warn, error, "raw dex_events insert failed");
                 Ok(None)
             }
         }
@@ -383,7 +382,7 @@ impl PostgresRawRepository {
             })),
             Ok(None) => Ok(None),
             Err(error) => {
-                warn!(error = ?error, "raw cex_ticks insert failed");
+                common::log_error!(warn, error, "raw cex_ticks insert failed");
                 Ok(None)
             }
         }

@@ -10,7 +10,7 @@ use state_manager::{
     RawRecordPointer, RedisStreamPublisher, SourceEnvelopeV1,
 };
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::stream_connector::{
@@ -188,12 +188,13 @@ pub async fn run_stream_worker(
         }
 
         if let Err(error) = result {
-            warn!(
+            common::log_error!(
+                warn,
+                error,
+                "stream worker loop failed; reconnecting",
                 stream_config_id = %config.stream_config_id,
                 source_id = %config.source_id,
-                error = ?error,
-                retry_after_sec = backoff.as_secs(),
-                "stream worker loop failed; reconnecting",
+                retry_after_sec = backoff.as_secs()
             );
         }
 
@@ -308,11 +309,12 @@ async fn run_http_poll_loop(
                 match raw {
                     Ok(payload) => process_payload(config, repo, raw_repo, stream, payload, None, fx_cache).await?,
                     Err(error) => {
-                        warn!(
-                            stream_config_id = %config.stream_config_id,
-                            source_id = %config.source_id,
-                            error = ?error,
+                        common::log_error!(
+                            warn,
+                            error,
                             "http_poll connector returned error",
+                            stream_config_id = %config.stream_config_id,
+                            source_id = %config.source_id
                         );
                     }
                 }

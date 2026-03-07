@@ -39,6 +39,37 @@ pub mod errors {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct LogEvent {
+    pub message: String,
+    pub details: String,
+}
+
+impl LogEvent {
+    pub fn new(message: impl Into<String>, details: impl AsRef<str>) -> Self {
+        Self {
+            message: message.into(),
+            details: flatten_multiline(details.as_ref()),
+        }
+    }
+
+    pub fn from_error(message: impl Into<String>, error: &impl std::fmt::Debug) -> Self {
+        Self::new(message, format!("{error:?}"))
+    }
+}
+
+#[macro_export]
+macro_rules! log_error {
+    ($level:ident, $error:expr, $message:expr $(, $($fields:tt)+)?) => {{
+        let log_event = $crate::LogEvent::from_error($message, &$error);
+        tracing::$level!(
+            message = %log_event.message,
+            details = %log_event.details
+            $(, $($fields)+)?
+        );
+    }};
+}
+
 pub fn init_logging(default_filter: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
@@ -54,7 +85,14 @@ fn install_single_line_panic_hook() {
     std::panic::set_hook(Box::new(|panic_info| {
         let location = panic_info
             .location()
-            .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()))
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
             .unwrap_or_else(|| "unknown".to_string());
         let payload = panic_info
             .payload()
@@ -64,18 +102,19 @@ fn install_single_line_panic_hook() {
             .unwrap_or_else(|| "panic".to_string());
         let backtrace = std::backtrace::Backtrace::force_capture();
         let backtrace_text = flatten_multiline(&format!("{backtrace:?}"));
+        let log_event = LogEvent::new("application panic", &payload);
 
         error!(
             target: "panic",
+            message = %log_event.message,
+            details = %log_event.details,
             location = %location,
-            payload = %flatten_multiline(&payload),
             backtrace = %backtrace_text,
-            "application panic"
         );
     }));
 }
 
-fn flatten_multiline(value: &str) -> String {
+pub fn flatten_multiline(value: &str) -> String {
     value
         .lines()
         .map(str::trim)
