@@ -30,7 +30,7 @@ resource "aws_db_subnet_group" "main" {
 resource "aws_db_instance" "main" {
   identifier     = "raksha-${var.environment}-db"
   engine         = "postgres"
-  engine_version = "15.5"
+  engine_version = "15"
   instance_class = var.db_instance_class
 
   allocated_storage     = var.db_allocated_storage
