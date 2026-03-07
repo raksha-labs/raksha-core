@@ -16,6 +16,12 @@ variable "vpc_cidr" {
   default     = "10.50.0.0/16"
 }
 
+variable "az_count" {
+  description = "Number of AZs to use when managed data is enabled"
+  type        = number
+  default     = 2
+}
+
 variable "compute_mode" {
   description = "Compute mode for test"
   type        = string

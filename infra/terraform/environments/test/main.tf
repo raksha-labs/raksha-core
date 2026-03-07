@@ -17,6 +17,9 @@ locals {
     svc.service_name => svc
   }
   secret_prefix = "raksha/${var.environment}"
+  # Managed RDS/Redis require private subnets in at least two AZs.
+  network_single_az = !var.enable_managed_data
+  network_az_count  = var.enable_managed_data ? max(var.az_count, 2) : 1
   # Fargate tasks need outbound access for image pull/secrets. If NAT is off in test,
   # place tasks in public subnets and assign public IP.
   use_public_network_for_fargate = var.compute_mode != "ec2" && !var.create_nat_gateway
@@ -33,8 +36,8 @@ module "network" {
 
   environment        = var.environment
   vpc_cidr           = var.vpc_cidr
-  single_az          = true
-  az_count           = 1
+  single_az          = local.network_single_az
+  az_count           = local.network_az_count
   create_nat_gateway = var.create_nat_gateway
   nat_gateway_per_az = false
   tags               = var.tags

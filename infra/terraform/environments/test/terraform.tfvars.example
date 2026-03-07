@@ -2,6 +2,7 @@ aws_region            = "eu-west-1"
 environment           = "test"
 compute_mode          = "fargate_mix"
 ec2_instance_type     = "t4g.medium"  # 4 GB ARM — fits all services at reduced test sizes
+az_count              = 2
 enable_managed_data   = false
 budget_limit_usd      = 100
 # To switch back to EC2-backed ECS capacity for test, set:
