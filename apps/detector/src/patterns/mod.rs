@@ -12,6 +12,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use event_schema::{DetectionResult, UnifiedEvent};
+use serde_json::{Map, Value};
 use state_manager::{PostgresRepository, RedisStreamPublisher};
 
 /// Trait implemented by every detection pattern.
@@ -42,6 +43,55 @@ pub trait DetectionPattern: Send {
         now: DateTime<Utc>,
         repo: &PostgresRepository,
     ) -> Result<Option<DetectionResult>>;
+}
+
+pub(crate) fn append_snapshot_meta(event: &UnifiedEvent, data: Value) -> Value {
+    let mut snapshot = match data {
+        Value::Object(map) => map,
+        other => {
+            let mut map = Map::new();
+            map.insert("value".to_string(), other);
+            map
+        }
+    };
+
+    let mut meta = match snapshot.remove("_meta") {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    meta.insert(
+        "event_timestamp".to_string(),
+        Value::String(event.timestamp.to_rfc3339()),
+    );
+
+    if let Some(simulation) = event.payload.get("simulation").cloned() {
+        meta.insert("simulation".to_string(), simulation);
+    }
+
+    snapshot.insert("_meta".to_string(), Value::Object(meta));
+    Value::Object(snapshot)
+}
+
+pub(crate) fn simulation_metadata_from_event(event: &UnifiedEvent) -> (bool, Option<String>) {
+    let simulation = event
+        .payload
+        .get("simulation")
+        .and_then(|value| value.as_object());
+    let run_id = simulation
+        .and_then(|meta| {
+            meta.get("run_id")
+                .or_else(|| meta.get("simulation_run_id"))
+                .and_then(|value| value.as_str())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let is_simulated = simulation
+        .and_then(|meta| meta.get("is_simulated"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || run_id.is_some();
+    (is_simulated, run_id)
 }
 
 /// Owns all registered patterns and dispatches events to each in turn.

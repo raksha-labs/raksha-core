@@ -36,7 +36,7 @@ use serde_json::Value;
 use state_manager::PostgresRepository;
 use uuid::Uuid;
 
-use super::DetectionPattern;
+use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
 
 pub const PATTERN_ID: &str = "flash_loan";
 
@@ -185,9 +185,10 @@ impl DetectionPattern for FlashLoanPattern {
                     &event.tenant_id,
                     PATTERN_ID,
                     &cooldown_key,
-                    snapshot_data,
+                    append_snapshot_meta(event, snapshot_data),
                     Some(fl.profit_usd),
                     Some("high"),
+                    event.timestamp,
                 )
                 .await;
 
@@ -352,6 +353,7 @@ fn build_detection(
     now: DateTime<Utc>,
     rule: &FlashLoanRule,
 ) -> DetectionResult {
+    let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
     let tx_hash = event
         .tx_hash
         .clone()
@@ -410,6 +412,8 @@ fn build_detection(
             "Pause affected protocol pools immediately.".to_string(),
             "Notify protocol team and security researchers.".to_string(),
         ],
+        is_simulated,
+        simulation_run_id,
         created_at: now,
     }
 }

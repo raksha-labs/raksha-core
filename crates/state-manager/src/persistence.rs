@@ -226,8 +226,11 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO detections (id, tx_hash, chain, protocol, subject_type, subject_key, tenant_id, pattern_id, severity, risk_score, payload)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                INSERT INTO detections (
+                    id, tx_hash, chain, protocol, subject_type, subject_key, tenant_id, pattern_id,
+                    severity, risk_score, payload, is_simulated, simulation_run_id
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 ON CONFLICT (id) DO NOTHING
                 "#,
                 &[
@@ -242,6 +245,8 @@ impl PostgresRepository {
                     &format!("{:?}", detection.severity).to_lowercase(),
                     &detection.risk_score.score,
                     &payload,
+                    &detection.is_simulated,
+                    &detection.simulation_run_id,
                 ],
             )
             .await?;
@@ -254,8 +259,12 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO alerts (id, incident_id, tx_hash, chain, chain_slug, protocol, block_number, subject_type, subject_key, tenant_id, pattern_id, lifecycle_state, severity, risk_score, payload)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                INSERT INTO alerts (
+                    id, incident_id, tx_hash, chain, chain_slug, protocol, block_number, subject_type,
+                    subject_key, tenant_id, pattern_id, lifecycle_state, severity, risk_score, payload,
+                    is_simulated, simulation_run_id
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                 ON CONFLICT (id) DO UPDATE
                 SET incident_id = EXCLUDED.incident_id,
                     lifecycle_state = EXCLUDED.lifecycle_state,
@@ -266,7 +275,9 @@ impl PostgresRepository {
                     subject_key = EXCLUDED.subject_key,
                     tenant_id = EXCLUDED.tenant_id,
                     pattern_id = EXCLUDED.pattern_id,
-                    payload = EXCLUDED.payload
+                    payload = EXCLUDED.payload,
+                    is_simulated = EXCLUDED.is_simulated,
+                    simulation_run_id = EXCLUDED.simulation_run_id
                 "#,
                 &[
                     &alert.alert_id.to_string(),
@@ -284,6 +295,8 @@ impl PostgresRepository {
                     &format!("{:?}", alert.severity).to_lowercase(),
                     &alert.risk_score,
                     &payload,
+                    &alert.is_simulated,
+                    &alert.simulation_run_id,
                 ],
             )
             .await?;
@@ -999,13 +1012,14 @@ impl PostgresRepository {
         data: serde_json::Value,
         score: Option<f64>,
         severity: Option<&str>,
+        observed_at: DateTime<Utc>,
     ) -> Result<()> {
         self.client
             .execute(
                 r#"
                 INSERT INTO pattern_snapshots
-                    (tenant_id, pattern_id, snapshot_key, data, score, severity)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                    (tenant_id, pattern_id, snapshot_key, data, score, severity, observed_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 "#,
                 &[
                     &tenant_id,
@@ -1014,6 +1028,7 @@ impl PostgresRepository {
                     &data,
                     &score,
                     &severity,
+                    &observed_at,
                 ],
             )
             .await?;

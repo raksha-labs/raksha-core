@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+pub mod field_mapping;
+pub use field_mapping::{
+    apply_mappings, default_mappings_for_parser, resolve_field_mappings,
+    CanonicalField, FieldMapping, FieldTransform, MappedFields,
+};
+
 // ---------------------------------------------------------------------------
 // Unified event: the single event type that flows through the system.
 // All data sources (EVM chains, CEX, DEX, oracles, custom APIs) produce this.
@@ -258,6 +264,10 @@ pub struct DetectionResult {
     pub confidence_breakdown: HashMap<String, f64>,
     pub oracle_context: HashMap<String, serde_json::Value>,
     pub actions_recommended: Vec<String>,
+    #[serde(default)]
+    pub is_simulated: bool,
+    #[serde(default)]
+    pub simulation_run_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -292,6 +302,10 @@ pub struct AlertEvent {
     pub block_number: u64,
     pub oracle_context: HashMap<String, serde_json::Value>,
     pub actions_recommended: Vec<String>,
+    #[serde(default)]
+    pub is_simulated: bool,
+    #[serde(default)]
+    pub simulation_run_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

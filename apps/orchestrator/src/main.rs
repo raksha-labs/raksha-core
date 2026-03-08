@@ -323,6 +323,8 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
         block_number: detection.block_number as u64,
         oracle_context: detection.oracle_context.clone(),
         actions_recommended: detection.actions_recommended.clone(),
+        is_simulated: detection.is_simulated,
+        simulation_run_id: detection.simulation_run_id.clone(),
         created_at: Utc::now(),
     }
 }

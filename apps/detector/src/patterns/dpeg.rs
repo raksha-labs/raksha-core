@@ -19,7 +19,7 @@ use serde_json::Value;
 use state_manager::PostgresRepository;
 use uuid::Uuid;
 
-use super::DetectionPattern;
+use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
 
 pub const PATTERN_ID: &str = "dpeg";
 
@@ -324,11 +324,39 @@ pub struct DpegPattern {
     policies: HashMap<(String, String), DpegPolicy>,
     /// (tenant_id, market_key) → latest quote per source_id
     quote_cache: HashMap<(String, String), HashMap<String, QuoteInput>>,
-    /// (tenant_id, market_key) → in-memory alert state
-    state_cache: HashMap<(String, String), DpegAlertState>,
+    /// Active simulated replay run per tenant, used to prevent cached quotes
+    /// from one historical replay contaminating another.
+    active_simulation_run_by_tenant: HashMap<String, String>,
 }
 
 impl DpegPattern {
+    fn prepare_quote_cache_scope(
+        &mut self,
+        tenant_id: &str,
+        is_simulated: bool,
+        simulation_run_id: Option<&str>,
+    ) {
+        if is_simulated {
+            let Some(run_id) = simulation_run_id.filter(|value| !value.trim().is_empty()) else {
+                return;
+            };
+            let should_reset = self
+                .active_simulation_run_by_tenant
+                .get(tenant_id)
+                .map(|current| current != run_id)
+                .unwrap_or(true);
+            if should_reset {
+                self.quote_cache
+                    .retain(|(cached_tenant, _), _| cached_tenant != tenant_id);
+            }
+            self.active_simulation_run_by_tenant
+                .insert(tenant_id.to_string(), run_id.to_string());
+        } else if self.active_simulation_run_by_tenant.remove(tenant_id).is_some() {
+            self.quote_cache
+                .retain(|(cached_tenant, _), _| cached_tenant != tenant_id);
+        }
+    }
+
     fn classify_context(&self, policy: &DpegPolicy, now: DateTime<Utc>) -> ContextClassification {
         if !policy.toggles.contagion_detection {
             return ContextClassification::Isolated;
@@ -413,9 +441,17 @@ impl DetectionPattern for DpegPattern {
     async fn process_event(
         &mut self,
         event: &UnifiedEvent,
-        now: DateTime<Utc>,
+        _now: DateTime<Utc>,
         repo: &PostgresRepository,
     ) -> Result<Option<DetectionResult>> {
+        let evaluation_time = event.timestamp;
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
+        self.prepare_quote_cache_scope(
+            &event.tenant_id,
+            is_simulated,
+            simulation_run_id.as_deref(),
+        );
+
         // Only care about market price feed events.
         let (Some(market_key), Some(price)) = (event.market_key.as_deref(), event.price) else {
             return Ok(None);
@@ -444,24 +480,22 @@ impl DetectionPattern for DpegPattern {
             },
         );
 
-        // Lazily load state from DB on first encounter.
-        if !self.state_cache.contains_key(&policy_key) {
-            let loaded = repo
-                .load_pattern_state(&policy_key.0, PATTERN_ID, &policy_key.1)
-                .await?
-                .and_then(|v| serde_json::from_value::<DpegAlertState>(v).ok())
-                .unwrap_or_default();
-            self.state_cache.insert(policy_key.clone(), loaded);
-        }
-
-        let current_state = self
-            .state_cache
-            .get(&policy_key)
-            .cloned()
+        // Use persisted state as the source of truth so cleanup/reset operations
+        // take effect on the next replay without needing a detector restart.
+        let current_state = repo
+            .load_pattern_state(&policy_key.0, PATTERN_ID, &policy_key.1)
+            .await?
+            .and_then(|v| serde_json::from_value::<DpegAlertState>(v).ok())
             .unwrap_or_default();
         let quotes: Vec<QuoteInput> = market_quotes.values().cloned().collect();
-        let classification = self.classify_context(&policy, now);
-        let outcome = evaluate_policy(&policy, &quotes, &current_state, now, classification)?;
+        let classification = self.classify_context(&policy, evaluation_time);
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &current_state,
+            evaluation_time,
+            classification,
+        )?;
 
         // Persist snapshot regardless of whether an alert fired.
         let snapshot_data = serde_json::json!({
@@ -488,9 +522,10 @@ impl DetectionPattern for DpegPattern {
                 &policy_key.0,
                 PATTERN_ID,
                 market_key,
-                snapshot_data,
+                append_snapshot_meta(event, snapshot_data),
                 Some(outcome.snapshot.divergence_pct),
                 severity_str.as_deref(),
+                event.timestamp,
             )
             .await;
 
@@ -499,18 +534,17 @@ impl DetectionPattern for DpegPattern {
         let _ = repo
             .upsert_pattern_state(&policy_key.0, PATTERN_ID, &policy_key.1, state_value)
             .await;
-        self.state_cache
-            .insert(policy_key.clone(), outcome.next_state);
 
         // Emit detection if needed.
         if outcome.should_emit_alert {
             if let Some(severity) = outcome.emitted_severity.clone() {
                 return Ok(Some(build_detection(
+                    event,
                     &policy,
                     &outcome.snapshot,
                     severity,
                     outcome.transition,
-                    now,
+                    evaluation_time,
                 )));
             }
         }
@@ -563,6 +597,9 @@ fn evaluate_policy(
         let age_ms = now
             .signed_duration_since(quote.observed_at)
             .num_milliseconds();
+        if age_ms < 0 {
+            continue;
+        }
         if age_ms > stale_ms {
             continue;
         }
@@ -942,12 +979,14 @@ fn infer_source_kind(source_type: &str) -> String {
 }
 
 fn build_detection(
+    event: &UnifiedEvent,
     policy: &DpegPolicy,
     snapshot: &ConsensusSnapshot,
     severity: Severity,
     transition: Option<IncidentTransition>,
     now: DateTime<Utc>,
 ) -> DetectionResult {
+    let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
     let subject_key = format!("{}:{}", policy.tenant_id, policy.market_key);
     let divergence_str = format!("{:.3}%", snapshot.divergence_pct);
     let description = format!(
@@ -1033,6 +1072,8 @@ fn build_detection(
         confidence_breakdown: snapshot.confidence_breakdown.clone(),
         oracle_context,
         actions_recommended,
+        is_simulated,
+        simulation_run_id,
         created_at: now,
     }
 }
@@ -1108,6 +1149,65 @@ mod tests {
             price,
             observed_at,
         }
+    }
+
+    #[test]
+    fn prepare_quote_cache_scope_resets_on_simulation_run_change() {
+        let mut pattern = DpegPattern::default();
+        pattern.quote_cache.insert(
+            ("glider".to_string(), "USDC/USD".to_string()),
+            HashMap::from([(
+                "binance-global".to_string(),
+                quote("binance-global", "cex", 0.99, Utc::now()),
+            )]),
+        );
+
+        pattern.prepare_quote_cache_scope("glider", true, Some("run-a"));
+        assert_eq!(
+            pattern.active_simulation_run_by_tenant.get("glider"),
+            Some(&"run-a".to_string())
+        );
+        assert!(pattern.quote_cache.is_empty());
+
+        pattern.quote_cache.insert(
+            ("glider".to_string(), "USDC/USD".to_string()),
+            HashMap::from([(
+                "coinbase-spot".to_string(),
+                quote("coinbase-spot", "cex", 0.98, Utc::now()),
+            )]),
+        );
+        pattern.prepare_quote_cache_scope("glider", true, Some("run-a"));
+        assert_eq!(pattern.quote_cache.len(), 1);
+
+        pattern.prepare_quote_cache_scope("glider", true, Some("run-b"));
+        assert!(pattern.quote_cache.is_empty());
+        assert_eq!(
+            pattern.active_simulation_run_by_tenant.get("glider"),
+            Some(&"run-b".to_string())
+        );
+    }
+
+    #[test]
+    fn future_quotes_are_ignored_for_consensus() {
+        let now = Utc::now();
+        let policy = base_policy();
+        let quotes = vec![
+            quote("cex-a", "cex", 0.99, now),
+            quote("cex-b", "cex", 0.99, now),
+            quote("cex-future", "cex", 0.50, now + Duration::seconds(30)),
+        ];
+
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &DpegAlertState::default(),
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+
+        assert_eq!(outcome.snapshot.source_count, 2);
+        assert!((outcome.snapshot.weighted_median_price - 0.99).abs() < 1e-9);
     }
 
     #[test]

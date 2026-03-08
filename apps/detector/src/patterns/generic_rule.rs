@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use state_manager::PostgresRepository;
 use uuid::Uuid;
 
-use super::DetectionPattern;
+use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
 
 pub const PATTERN_ID: &str = "generic_rule";
 
@@ -192,6 +192,7 @@ impl GenericRulePattern {
         alert: &RuntimeAlert,
         runtime_trace: &[String],
     ) -> DetectionResult {
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
         let severity = Self::severity_from_runtime(&alert.severity);
         let score = Self::risk_score_for_severity(&severity);
         let chain = Self::chain_from_event(event);
@@ -253,6 +254,8 @@ impl GenericRulePattern {
                 "Review runtime-generated alert payload".to_string(),
                 "Confirm source freshness and quorum".to_string(),
             ],
+            is_simulated,
+            simulation_run_id,
             created_at: Utc::now(),
         }
     }
@@ -573,9 +576,10 @@ impl DetectionPattern for GenericRulePattern {
                     &event.tenant_id,
                     &pattern_id,
                     &format!("{}:{}", rule.rule_id, event.event_id),
-                    snapshot,
+                    append_snapshot_meta(event, snapshot),
                     Some(Self::risk_score_for_severity(&detection.severity)),
                     Some(severity.as_str()),
+                    event.timestamp,
                 )
                 .await
             {
