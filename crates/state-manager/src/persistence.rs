@@ -392,6 +392,37 @@ impl PostgresRepository {
         Ok(map)
     }
 
+    pub async fn load_simulation_run_pattern_config(
+        &self,
+        run_id: &str,
+        pattern_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let row = self
+            .client
+            .query_opt(
+                r#"
+                SELECT COALESCE(
+                    sr.metadata_json -> 'pattern_config_overrides' -> $2,
+                    sc.metadata_json -> 'runtime_pattern_configs' -> $2,
+                    CASE
+                        WHEN lower(COALESCE(sc.metadata_json ->> 'pattern_id', '')) = lower($2)
+                        THEN sc.metadata_json -> 'pattern_config'
+                        ELSE NULL
+                    END
+                ) AS config
+                FROM simulation_runs sr
+                JOIN simulation_scenarios sc
+                  ON sc.scenario_id = sr.scenario_id
+                WHERE sr.run_id = $1
+                LIMIT 1
+                "#,
+                &[&run_id, &pattern_id],
+            )
+            .await?;
+
+        Ok(row.and_then(|record| record.get::<_, Option<serde_json::Value>>(0)))
+    }
+
     pub async fn list_effective_stream_configs(&self) -> Result<Vec<EffectiveStreamConfig>> {
         let rows = match self
             .client

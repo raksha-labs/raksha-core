@@ -314,6 +314,7 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
             "slack".to_string(),
             "telegram".to_string(),
             "discord".to_string(),
+            "email".to_string(),
         ],
         dedup_key: detection.event_key.clone(),
         attribution: detection.risk_score.attribution.clone(),
@@ -325,6 +326,7 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
         actions_recommended: detection.actions_recommended.clone(),
         is_simulated: detection.is_simulated,
         simulation_run_id: detection.simulation_run_id.clone(),
+        simulation_operating_mode: detection.simulation_operating_mode.clone(),
         created_at: Utc::now(),
     }
 }

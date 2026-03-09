@@ -322,6 +322,8 @@ struct DpegAlertState {
 pub struct DpegPattern {
     /// (tenant_id, market_key) → DpegPolicy
     policies: HashMap<(String, String), DpegPolicy>,
+    /// simulation_run_id → (market_key → policy)
+    simulation_policies: HashMap<String, HashMap<String, DpegPolicy>>,
     /// (tenant_id, market_key) → latest quote per source_id
     quote_cache: HashMap<(String, String), HashMap<String, QuoteInput>>,
     /// Active simulated replay run per tenant, used to prevent cached quotes
@@ -330,6 +332,38 @@ pub struct DpegPattern {
 }
 
 impl DpegPattern {
+    fn parse_policies(tenant_id: &str, config: &Value) -> Vec<DpegPolicy> {
+        let entries: Vec<DpegPolicy> = match serde_json::from_value(config.clone()) {
+            Ok(value) => value,
+            Err(err) => {
+                common::log_error!(
+                    warn,
+                    err,
+                    "failed to parse dpeg config",
+                    tenant_id = %tenant_id
+                );
+                return Vec::new();
+            }
+        };
+
+        let mut parsed = Vec::new();
+        for mut policy in entries {
+            policy.tenant_id = tenant_id.to_string();
+            if let Err(err) = policy.validate() {
+                common::log_error!(
+                    warn,
+                    err,
+                    "invalid dpeg policy — skipping market",
+                    tenant_id = %tenant_id,
+                    market_key = %policy.market_key
+                );
+                continue;
+            }
+            parsed.push(policy);
+        }
+        parsed
+    }
+
     fn prepare_quote_cache_scope(
         &mut self,
         tenant_id: &str,
@@ -357,31 +391,87 @@ impl DpegPattern {
         }
     }
 
-    fn classify_context(&self, policy: &DpegPolicy, now: DateTime<Utc>) -> ContextClassification {
+    async fn simulation_policy_map(
+        &mut self,
+        tenant_id: &str,
+        simulation_run_id: Option<&str>,
+        repo: &PostgresRepository,
+    ) -> Result<Option<HashMap<String, DpegPolicy>>> {
+        let Some(run_id) = simulation_run_id.filter(|value| !value.trim().is_empty()) else {
+            return Ok(None);
+        };
+
+        if let Some(cached) = self.simulation_policies.get(run_id) {
+            return Ok(Some(cached.clone()));
+        }
+
+        let Some(config) = repo
+            .load_simulation_run_pattern_config(run_id, PATTERN_ID)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let policies = Self::parse_policies(tenant_id, &config)
+            .into_iter()
+            .map(|policy| (policy.market_key.clone(), policy))
+            .collect::<HashMap<_, _>>();
+        self.simulation_policies
+            .insert(run_id.to_string(), policies.clone());
+        Ok(Some(policies))
+    }
+
+    fn effective_policy(
+        &self,
+        tenant_id: &str,
+        market_key: &str,
+        simulation_policies: Option<&HashMap<String, DpegPolicy>>,
+    ) -> Option<DpegPolicy> {
+        if let Some(policies) = simulation_policies {
+            return policies.get(market_key).cloned();
+        }
+        self.policies
+            .get(&(tenant_id.to_string(), market_key.to_string()))
+            .cloned()
+    }
+
+    fn classify_context(
+        &self,
+        policy: &DpegPolicy,
+        tenant_id: &str,
+        override_policies: Option<&HashMap<String, DpegPolicy>>,
+        now: DateTime<Utc>,
+    ) -> ContextClassification {
         if !policy.toggles.contagion_detection {
             return ContextClassification::Isolated;
         }
 
-        let tenant_id = policy.tenant_id.as_str();
+        let tenant_policies: Vec<DpegPolicy> = match override_policies {
+            Some(policies) => policies.values().cloned().collect(),
+            None => self
+                .policies
+                .iter()
+                .filter(|((candidate_tenant, _), _)| candidate_tenant == tenant_id)
+                .map(|(_, candidate_policy)| candidate_policy.clone())
+                .collect(),
+        };
         let mut systemic_markets = 0usize;
-        for ((candidate_tenant, candidate_market), candidate_policy) in &self.policies {
-            if candidate_tenant != tenant_id {
-                continue;
-            }
+        for candidate_policy in tenant_policies {
+            let candidate_market = candidate_policy.market_key.clone();
             if !candidate_market.to_ascii_uppercase().ends_with("/USD") {
                 continue;
             }
             let Some(quotes) = self
                 .quote_cache
-                .get(&(candidate_tenant.clone(), candidate_market.clone()))
+                .get(&(tenant_id.to_string(), candidate_market.clone()))
             else {
                 continue;
             };
             let quote_values = quotes.values().cloned().collect::<Vec<_>>();
             if let Some(divergence_pct) =
-                market_divergence_pct(candidate_policy, &quote_values, now)
+                market_divergence_pct(&candidate_policy, &quote_values, now)
             {
-                if divergence_pct >= policy.systemic_floor_pct {
+                if divergence_pct >= candidate_policy.systemic_floor_pct {
                     systemic_markets += 1;
                 }
             }
@@ -405,31 +495,7 @@ impl DetectionPattern for DpegPattern {
             if pattern_id != PATTERN_ID {
                 continue;
             }
-            // The config JSONB is an array of DpegPolicy objects (one per market_key).
-            let entries: Vec<DpegPolicy> = match serde_json::from_value(config.clone()) {
-                Ok(v) => v,
-                Err(err) => {
-                    common::log_error!(
-                        warn,
-                        err,
-                        "failed to parse dpeg config — skipping tenant",
-                        tenant_id = %tenant_id
-                    );
-                    continue;
-                }
-            };
-            for mut policy in entries {
-                policy.tenant_id = tenant_id.clone();
-                if let Err(err) = policy.validate() {
-                    common::log_error!(
-                        warn,
-                        err,
-                        "invalid dpeg policy — skipping market",
-                        tenant_id = %tenant_id,
-                        market_key = %policy.market_key
-                    );
-                    continue;
-                }
+            for policy in Self::parse_policies(tenant_id, config) {
                 new_policies.insert((tenant_id.clone(), policy.market_key.clone()), policy);
             }
         }
@@ -445,7 +511,7 @@ impl DetectionPattern for DpegPattern {
         repo: &PostgresRepository,
     ) -> Result<Option<DetectionResult>> {
         let evaluation_time = event.timestamp;
-        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
+        let (is_simulated, simulation_run_id, _) = simulation_metadata_from_event(event);
         self.prepare_quote_cache_scope(
             &event.tenant_id,
             is_simulated,
@@ -460,10 +526,18 @@ impl DetectionPattern for DpegPattern {
             return Ok(None);
         }
 
-        let policy_key = (event.tenant_id.clone(), market_key.to_string());
-        let Some(policy) = self.policies.get(&policy_key).cloned() else {
+        let simulation_policies = self
+            .simulation_policy_map(&event.tenant_id, simulation_run_id.as_deref(), repo)
+            .await?;
+        let policy = self.effective_policy(
+            &event.tenant_id,
+            market_key,
+            simulation_policies.as_ref(),
+        );
+        let Some(policy) = policy else {
             return Ok(None);
         };
+        let policy_key = (event.tenant_id.clone(), market_key.to_string());
 
         // Infer source_kind from source_type string.
         let source_kind = infer_source_kind(&format!("{:?}", event.source_type));
@@ -488,7 +562,12 @@ impl DetectionPattern for DpegPattern {
             .and_then(|v| serde_json::from_value::<DpegAlertState>(v).ok())
             .unwrap_or_default();
         let quotes: Vec<QuoteInput> = market_quotes.values().cloned().collect();
-        let classification = self.classify_context(&policy, evaluation_time);
+        let classification = self.classify_context(
+            &policy,
+            &event.tenant_id,
+            simulation_policies.as_ref(),
+            evaluation_time,
+        );
         let outcome = evaluate_policy(
             &policy,
             &quotes,
@@ -986,7 +1065,8 @@ fn build_detection(
     transition: Option<IncidentTransition>,
     now: DateTime<Utc>,
 ) -> DetectionResult {
-    let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
+    let (is_simulated, simulation_run_id, simulation_operating_mode) =
+        simulation_metadata_from_event(event);
     let subject_key = format!("{}:{}", policy.tenant_id, policy.market_key);
     let divergence_str = format!("{:.3}%", snapshot.divergence_pct);
     let description = format!(
@@ -1074,6 +1154,7 @@ fn build_detection(
         actions_recommended,
         is_simulated,
         simulation_run_id,
+        simulation_operating_mode,
         created_at: now,
     }
 }
@@ -1242,8 +1323,36 @@ mod tests {
             policy.clone(),
         );
 
-        let classification = pattern.classify_context(&policy, now);
+        let classification = pattern.classify_context(&policy, &policy.tenant_id, None, now);
         assert!(matches!(classification, ContextClassification::Isolated));
+    }
+
+    #[test]
+    fn simulation_policy_scope_does_not_fall_back_to_tenant_default() {
+        let mut pattern = DpegPattern::default();
+        let usdt_default = DpegPolicy {
+            market_key: "USDT/USD".to_string(),
+            ..base_policy()
+        };
+        pattern.policies.insert(
+            (usdt_default.tenant_id.clone(), usdt_default.market_key.clone()),
+            usdt_default,
+        );
+
+        let simulation_policies = HashMap::from([(
+            "USDC/USD".to_string(),
+            DpegPolicy {
+                market_key: "USDC/USD".to_string(),
+                ..base_policy()
+            },
+        )]);
+
+        assert!(pattern
+            .effective_policy("glider", "USDC/USD", Some(&simulation_policies))
+            .is_some());
+        assert!(pattern
+            .effective_policy("glider", "USDT/USD", Some(&simulation_policies))
+            .is_none());
     }
 
     #[test]

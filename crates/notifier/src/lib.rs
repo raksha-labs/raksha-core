@@ -123,7 +123,7 @@ impl NotifierGatewayClient {
             .filter(|channel| {
                 matches!(
                     channel.as_str(),
-                    "webhook" | "slack" | "telegram" | "discord"
+                    "webhook" | "slack" | "telegram" | "discord" | "email"
                 )
             })
             .cloned()

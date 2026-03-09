@@ -128,6 +128,7 @@ services:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/raksha
       REDIS_URL: redis://redis:6379
       RUST_LOG: info
+      NOTIFIER_GATEWAY_URL: http://notifier-gateway:3002
     depends_on:
       postgres:
         condition: service_healthy

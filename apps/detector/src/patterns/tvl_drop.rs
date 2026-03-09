@@ -210,6 +210,8 @@ struct PauseDetectionContext<'a> {
 pub struct TvlDropPattern {
     // tenant_id -> rules
     configs: HashMap<String, Vec<TvlDropRule>>,
+    // simulation_run_id -> rules
+    simulation_configs: HashMap<String, Vec<TvlDropRule>>,
     // `${tenant_id}:${rule_id}:${subject_key}` -> state
     state_cache: HashMap<String, TvlRuleState>,
 }
@@ -221,6 +223,33 @@ impl TvlDropPattern {
 
     fn cache_key(tenant_id: &str, load_state_key: &str) -> String {
         format!("{tenant_id}:{load_state_key}")
+    }
+
+    async fn effective_rules(
+        &mut self,
+        tenant_id: &str,
+        simulation_run_id: Option<&str>,
+        repo: &PostgresRepository,
+    ) -> Result<Option<Vec<TvlDropRule>>> {
+        let Some(run_id) = simulation_run_id.filter(|value| !value.trim().is_empty()) else {
+            return Ok(self.configs.get(tenant_id).cloned());
+        };
+
+        if let Some(cached) = self.simulation_configs.get(run_id) {
+            return Ok(Some(cached.clone()));
+        }
+
+        if let Some(config) = repo
+            .load_simulation_run_pattern_config(run_id, PATTERN_ID)
+            .await?
+        {
+            let rules = parse_tvl_drop_rules(&config, tenant_id);
+            self.simulation_configs
+                .insert(run_id.to_string(), rules.clone());
+            return Ok(Some(rules));
+        }
+
+        Ok(self.configs.get(tenant_id).cloned())
     }
 
     fn has_concurrent_active_drop(
@@ -329,7 +358,8 @@ impl TvlDropPattern {
         evaluation: &TvlEvaluation,
         sample: &TvlStateEvent,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
+        let (is_simulated, simulation_run_id, simulation_operating_mode) =
+            simulation_metadata_from_event(event);
         let confidence_breakdown = HashMap::from([
             ("fast_drop_pct".to_string(), evaluation.fast_drop_pct),
             ("slow_drop_pct".to_string(), evaluation.slow_drop_pct),
@@ -434,6 +464,7 @@ impl TvlDropPattern {
             actions_recommended: recommended_actions_for_severity(&context.severity),
             is_simulated,
             simulation_run_id,
+            simulation_operating_mode,
             created_at: context.now,
         }
     }
@@ -444,7 +475,8 @@ impl TvlDropPattern {
         context: &PauseDetectionContext<'_>,
         pause: &TvlPauseEvent,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
+        let (is_simulated, simulation_run_id, simulation_operating_mode) =
+            simulation_metadata_from_event(event);
         let state_label = if pause.paused { "paused" } else { "unpaused" };
         let mut oracle_context = HashMap::new();
         oracle_context.insert("protocol_id".to_string(), json!(pause.protocol_id));
@@ -508,6 +540,7 @@ impl TvlDropPattern {
             ],
             is_simulated,
             simulation_run_id,
+            simulation_operating_mode,
             created_at: context.now,
         }
     }
@@ -542,7 +575,11 @@ impl DetectionPattern for TvlDropPattern {
         now: DateTime<Utc>,
         repo: &PostgresRepository,
     ) -> Result<Option<DetectionResult>> {
-        let Some(rules) = self.configs.get(&event.tenant_id).cloned() else {
+        let (_, simulation_run_id, _) = simulation_metadata_from_event(event);
+        let Some(rules) = self
+            .effective_rules(&event.tenant_id, simulation_run_id.as_deref(), repo)
+            .await?
+        else {
             return Ok(None);
         };
 
