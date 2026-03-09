@@ -90,6 +90,7 @@ pub enum AttackFamily {
     OracleUpgradeRisk,
     DecimalPrecisionRisk,
     LiquidationCascade,
+    HighUtilization,
     Unknown,
 }
 
@@ -161,6 +162,7 @@ pub enum SignalType {
     TvlDropDetected,
     TvlVelocityDrop,
     ProtocolPauseState,
+    UtilizationHighDetected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

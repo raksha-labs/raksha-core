@@ -7,6 +7,7 @@ pub mod dpeg;
 pub mod flash_loan;
 pub mod generic_rule;
 pub mod tvl_drop;
+pub mod utilization_high;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -122,6 +123,7 @@ impl PatternRegistry {
                 Box::new(flash_loan::FlashLoanPattern::default()),
                 Box::new(tvl_drop::TvlDropPattern::default()),
                 Box::new(generic_rule::GenericRulePattern::default()),
+                Box::new(utilization_high::UtilizationHighPattern::default()),
             ],
         }
     }
