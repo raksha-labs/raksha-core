@@ -15,7 +15,7 @@ use event_schema::{
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use state_manager::PostgresRepository;
+use state_manager::{PatternSnapshotInsert, PostgresRepository};
 use uuid::Uuid;
 
 use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
@@ -574,15 +574,15 @@ impl DetectionPattern for GenericRulePattern {
             });
             let severity = first.severity.to_ascii_lowercase();
             if let Err(error) = repo
-                .insert_pattern_snapshot(
-                    &event.tenant_id,
-                    &pattern_id,
-                    &format!("{}:{}", rule.rule_id, event.event_id),
-                    append_snapshot_meta(event, snapshot),
-                    Some(Self::risk_score_for_severity(&detection.severity)),
-                    Some(severity.as_str()),
-                    event.timestamp,
-                )
+                .insert_pattern_snapshot(PatternSnapshotInsert {
+                    tenant_id: &event.tenant_id,
+                    pattern_id: &pattern_id,
+                    snapshot_key: &format!("{}:{}", rule.rule_id, event.event_id),
+                    data: append_snapshot_meta(event, snapshot),
+                    score: Some(Self::risk_score_for_severity(&detection.severity)),
+                    severity: Some(severity.as_str()),
+                    observed_at: event.timestamp,
+                })
                 .await
             {
                 common::log_error!(

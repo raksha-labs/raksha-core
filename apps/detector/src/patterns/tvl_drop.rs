@@ -15,7 +15,7 @@ use event_schema::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use state_manager::PostgresRepository;
+use state_manager::{PatternSnapshotInsert, PostgresRepository};
 use uuid::Uuid;
 
 use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
@@ -606,7 +606,8 @@ impl DetectionPattern for TvlDropPattern {
                     .await?
                     .and_then(|value| serde_json::from_value::<TvlRuleState>(value).ok())
                     .unwrap_or_default();
-                self.state_cache.insert(cache_key.clone(), current_state.clone());
+                self.state_cache
+                    .insert(cache_key.clone(), current_state.clone());
 
                 let mut state = current_state;
                 state.protocol_chain_key = Some(protocol_chain_key.clone());
@@ -694,15 +695,15 @@ impl DetectionPattern for TvlDropPattern {
                     None
                 };
                 let _ = repo
-                    .insert_pattern_snapshot(
-                        &event.tenant_id,
-                        PATTERN_ID,
-                        &state_key,
-                        append_snapshot_meta(event, snapshot),
-                        Some(evaluation.selected_drop_pct),
-                        severity_str.as_deref(),
-                        event.timestamp,
-                    )
+                    .insert_pattern_snapshot(PatternSnapshotInsert {
+                        tenant_id: &event.tenant_id,
+                        pattern_id: PATTERN_ID,
+                        snapshot_key: &state_key,
+                        data: append_snapshot_meta(event, snapshot),
+                        score: Some(evaluation.selected_drop_pct),
+                        severity: severity_str.as_deref(),
+                        observed_at: event.timestamp,
+                    })
                     .await;
                 let _ = repo
                     .upsert_pattern_state(
@@ -757,7 +758,8 @@ impl DetectionPattern for TvlDropPattern {
                     .await?
                     .and_then(|value| serde_json::from_value::<TvlRuleState>(value).ok())
                     .unwrap_or_default();
-                self.state_cache.insert(cache_key.clone(), current_state.clone());
+                self.state_cache
+                    .insert(cache_key.clone(), current_state.clone());
                 let mut state = current_state;
                 state.protocol_chain_key = Some(protocol_chain_key);
 
@@ -782,15 +784,15 @@ impl DetectionPattern for TvlDropPattern {
                     "context_classification": context_classification_str(&classification),
                 });
                 let _ = repo
-                    .insert_pattern_snapshot(
-                        &event.tenant_id,
-                        PATTERN_ID,
-                        &state_key,
-                        append_snapshot_meta(event, snapshot),
-                        state.last_drop_pct,
-                        state.last_severity.as_deref(),
-                        event.timestamp,
-                    )
+                    .insert_pattern_snapshot(PatternSnapshotInsert {
+                        tenant_id: &event.tenant_id,
+                        pattern_id: PATTERN_ID,
+                        snapshot_key: &state_key,
+                        data: append_snapshot_meta(event, snapshot),
+                        score: state.last_drop_pct,
+                        severity: state.last_severity.as_deref(),
+                        observed_at: event.timestamp,
+                    })
                     .await;
                 let _ = repo
                     .upsert_pattern_state(

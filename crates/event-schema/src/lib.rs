@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 pub mod field_mapping;
 pub use field_mapping::{
-    apply_mappings, default_mappings_for_parser, resolve_field_mappings,
-    CanonicalField, FieldMapping, FieldTransform, MappedFields,
+    apply_mappings, default_mappings_for_parser, resolve_field_mappings, CanonicalField,
+    FieldMapping, FieldTransform, MappedFields,
 };
 
 // ---------------------------------------------------------------------------

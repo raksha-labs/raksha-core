@@ -39,26 +39,32 @@ export IMAGE_TAG=latest
 `raksha-core` now includes a manual workflow at
 `.github/workflows/destroy-environment.yml`.
 
-Use it when you want to destroy core-managed shared infrastructure from the
-GitHub Actions UI instead of a local shell or CloudShell.
+Use it when you want a single GitHub Actions entry point from `raksha-core`
+that tears down `raksha-platform`, `raksha-simlab`, and finally `raksha-core`
+for a full zero-cost shared-environment destroy.
 
-Before running it:
+Requirements:
 
-1. Destroy `raksha-platform` first.
-2. Destroy `raksha-simlab` second.
-3. Run the core destroy workflow last.
+1. `raksha-core` must have access to read the sibling repos.
+2. If the default GitHub token cannot read `raksha-platform` and `raksha-simlab`,
+   add a `CROSS_REPO_READ_TOKEN` secret in `raksha-core` with read access to both repos.
 
 Workflow inputs:
 
 - `environment`: `test`, `stage`, or `prod`
 - `confirmation`: type `DESTROY-<environment>`
-- `confirm_dependents_destroyed`: must be checked before the workflow runs
 - `purge_ecr_images`: recommended, because non-empty ECR repositories can block
   Terraform destroy
 
-The workflow still uses the same Terraform backend secrets as the deploy
-workflows. If those secrets or IAM permissions are missing, use the manual shell
-commands below instead.
+The workflow destroys in this order:
+
+1. `raksha-platform`
+2. `raksha-simlab`
+3. `raksha-core`
+
+It still uses the same Terraform backend secrets as the deploy workflows. If
+those secrets, IAM permissions, or cross-repo checkout access are missing, use
+the manual shell commands below instead.
 
 ## Test Environment
 

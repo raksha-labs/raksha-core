@@ -16,7 +16,7 @@ use event_schema::{
 };
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use state_manager::PostgresRepository;
+use state_manager::{PatternSnapshotInsert, PostgresRepository};
 use uuid::Uuid;
 
 use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
@@ -385,7 +385,11 @@ impl DpegPattern {
             }
             self.active_simulation_run_by_tenant
                 .insert(tenant_id.to_string(), run_id.to_string());
-        } else if self.active_simulation_run_by_tenant.remove(tenant_id).is_some() {
+        } else if self
+            .active_simulation_run_by_tenant
+            .remove(tenant_id)
+            .is_some()
+        {
             self.quote_cache
                 .retain(|(cached_tenant, _), _| cached_tenant != tenant_id);
         }
@@ -529,11 +533,8 @@ impl DetectionPattern for DpegPattern {
         let simulation_policies = self
             .simulation_policy_map(&event.tenant_id, simulation_run_id.as_deref(), repo)
             .await?;
-        let policy = self.effective_policy(
-            &event.tenant_id,
-            market_key,
-            simulation_policies.as_ref(),
-        );
+        let policy =
+            self.effective_policy(&event.tenant_id, market_key, simulation_policies.as_ref());
         let Some(policy) = policy else {
             return Ok(None);
         };
@@ -597,15 +598,15 @@ impl DetectionPattern for DpegPattern {
             .as_ref()
             .map(|s| format!("{:?}", s).to_lowercase());
         let _ = repo
-            .insert_pattern_snapshot(
-                &policy_key.0,
-                PATTERN_ID,
-                market_key,
-                append_snapshot_meta(event, snapshot_data),
-                Some(outcome.snapshot.divergence_pct),
-                severity_str.as_deref(),
-                event.timestamp,
-            )
+            .insert_pattern_snapshot(PatternSnapshotInsert {
+                tenant_id: &policy_key.0,
+                pattern_id: PATTERN_ID,
+                snapshot_key: market_key,
+                data: append_snapshot_meta(event, snapshot_data),
+                score: Some(outcome.snapshot.divergence_pct),
+                severity: severity_str.as_deref(),
+                observed_at: event.timestamp,
+            })
             .await;
 
         // Persist updated alert state to DB.
@@ -1335,7 +1336,10 @@ mod tests {
             ..base_policy()
         };
         pattern.policies.insert(
-            (usdt_default.tenant_id.clone(), usdt_default.market_key.clone()),
+            (
+                usdt_default.tenant_id.clone(),
+                usdt_default.market_key.clone(),
+            ),
             usdt_default,
         );
 

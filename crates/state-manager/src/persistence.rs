@@ -133,6 +133,17 @@ pub struct OperationalSourcePrice {
     pub observed_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PatternSnapshotInsert<'a> {
+    pub tenant_id: &'a str,
+    pub pattern_id: &'a str,
+    pub snapshot_key: &'a str,
+    pub data: Value,
+    pub score: Option<f64>,
+    pub severity: Option<&'a str>,
+    pub observed_at: DateTime<Utc>,
+}
+
 #[derive(Clone)]
 pub struct PostgresRepository {
     client: Arc<Client>,
@@ -1035,16 +1046,7 @@ impl PostgresRepository {
         Ok(())
     }
 
-    pub async fn insert_pattern_snapshot(
-        &self,
-        tenant_id: &str,
-        pattern_id: &str,
-        snapshot_key: &str,
-        data: serde_json::Value,
-        score: Option<f64>,
-        severity: Option<&str>,
-        observed_at: DateTime<Utc>,
-    ) -> Result<()> {
+    pub async fn insert_pattern_snapshot(&self, snapshot: PatternSnapshotInsert<'_>) -> Result<()> {
         self.client
             .execute(
                 r#"
@@ -1053,13 +1055,13 @@ impl PostgresRepository {
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                 "#,
                 &[
-                    &tenant_id,
-                    &pattern_id,
-                    &snapshot_key,
-                    &data,
-                    &score,
-                    &severity,
-                    &observed_at,
+                    &snapshot.tenant_id,
+                    &snapshot.pattern_id,
+                    &snapshot.snapshot_key,
+                    &snapshot.data,
+                    &snapshot.score,
+                    &snapshot.severity,
+                    &snapshot.observed_at,
                 ],
             )
             .await?;

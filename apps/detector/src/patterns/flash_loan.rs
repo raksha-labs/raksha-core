@@ -33,7 +33,7 @@ use event_schema::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use state_manager::PostgresRepository;
+use state_manager::{PatternSnapshotInsert, PostgresRepository};
 use uuid::Uuid;
 
 use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
@@ -181,15 +181,15 @@ impl DetectionPattern for FlashLoanPattern {
                 "tx_hash": event.tx_hash,
             });
             let _ = repo
-                .insert_pattern_snapshot(
-                    &event.tenant_id,
-                    PATTERN_ID,
-                    &cooldown_key,
-                    append_snapshot_meta(event, snapshot_data),
-                    Some(fl.profit_usd),
-                    Some("high"),
-                    event.timestamp,
-                )
+                .insert_pattern_snapshot(PatternSnapshotInsert {
+                    tenant_id: &event.tenant_id,
+                    pattern_id: PATTERN_ID,
+                    snapshot_key: &cooldown_key,
+                    data: append_snapshot_meta(event, snapshot_data),
+                    score: Some(fl.profit_usd),
+                    severity: Some("high"),
+                    observed_at: event.timestamp,
+                })
                 .await;
 
             return Ok(Some(build_detection(event, &fl, now, &rule)));

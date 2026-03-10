@@ -8,7 +8,7 @@
 //!   - Trigger   → first crossing of a threshold
 //!   - Escalate  → threshold tier increases (Medium → High → Critical)
 //!   - Resolve   → utilization remains below resolution threshold for
-//!                 `resolution_confirmation_blocks` consecutive blocks
+//!     `resolution_confirmation_blocks` consecutive blocks
 //!
 //! Protocol-pause events suspend auto-resolution and emit an Update signal.
 
@@ -23,7 +23,7 @@ use event_schema::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use state_manager::PostgresRepository;
+use state_manager::{PatternSnapshotInsert, PostgresRepository};
 use uuid::Uuid;
 
 use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
@@ -126,9 +126,7 @@ impl UtilizationHighRule {
             return Err(anyhow!("market scope requires market_id"));
         }
         if self.medium_threshold_pct >= self.high_threshold_pct {
-            return Err(anyhow!(
-                "medium_threshold_pct must be < high_threshold_pct"
-            ));
+            return Err(anyhow!("medium_threshold_pct must be < high_threshold_pct"));
         }
         if self.high_threshold_pct >= self.critical_threshold_pct {
             return Err(anyhow!(
@@ -151,9 +149,7 @@ impl UtilizationHighRule {
             ));
         }
         if self.resolution_confirmation_blocks == 0 {
-            return Err(anyhow!(
-                "resolution_confirmation_blocks must be >= 1"
-            ));
+            return Err(anyhow!("resolution_confirmation_blocks must be >= 1"));
         }
         if self.min_tvl_floor_usd < 0.0 {
             return Err(anyhow!("min_tvl_floor_usd must be >= 0"));
@@ -184,10 +180,7 @@ impl UtilizationHighRule {
         true
     }
 
-    fn subject_for_event(
-        &self,
-        market_id: Option<&str>,
-    ) -> Option<(String, String, String)> {
+    fn subject_for_event(&self, market_id: Option<&str>) -> Option<(String, String, String)> {
         let protocol_key = format!(
             "{}:{}",
             self.protocol_id.to_ascii_lowercase(),
@@ -391,10 +384,7 @@ fn parse_utilization_rules(config: &Value, tenant_id: &str) -> Vec<UtilizationHi
     // Accept either:
     //   { "rules": [ {...}, ... ] }   (list of rules)
     //   { "rule_id": "...", ... }     (single rule object — wrap in vec)
-    let raw_rules: Vec<Value> = if let Some(arr) = config
-        .get("rules")
-        .and_then(|v| v.as_array())
-    {
+    let raw_rules: Vec<Value> = if let Some(arr) = config.get("rules").and_then(|v| v.as_array()) {
         arr.clone()
     } else if config.is_object() {
         vec![config.clone()]
@@ -456,10 +446,7 @@ fn severity_rank(s: Option<&Severity>) -> u8 {
     }
 }
 
-fn classify_severity(
-    utilization_pct: f64,
-    rule: &UtilizationHighRule,
-) -> Option<Severity> {
+fn classify_severity(utilization_pct: f64, rule: &UtilizationHighRule) -> Option<Severity> {
     if utilization_pct >= rule.critical_threshold_pct {
         Some(Severity::Critical)
     } else if utilization_pct >= rule.high_threshold_pct {
@@ -547,6 +534,14 @@ pub struct UtilizationHighPattern {
     state_cache: HashMap<String, UtilizationRuleState>,
 }
 
+struct UtilizationDetectionContext<'a> {
+    subject_type: &'a str,
+    subject_key: &'a str,
+    severity: &'a Severity,
+    transition: &'a IncidentTransition,
+    observed_at: DateTime<Utc>,
+}
+
 impl UtilizationHighPattern {
     fn state_key(rule_id: &str, subject_key: &str) -> String {
         format!("{rule_id}:{subject_key}")
@@ -588,19 +583,15 @@ impl UtilizationHighPattern {
     fn build_utilization_detection(
         event: &UnifiedEvent,
         rule: &UtilizationHighRule,
-        subject_type: &str,
-        subject_key: &str,
-        severity: &Severity,
-        transition: &IncidentTransition,
+        context: &UtilizationDetectionContext<'_>,
         sample: &UtilizationStateEvent,
         state: &UtilizationRuleState,
-        now: DateTime<Utc>,
     ) -> DetectionResult {
         let (is_simulated, simulation_run_id, simulation_operating_mode) =
             simulation_metadata_from_event(event);
 
-        let rate_10min = rate_of_change(&state.samples, now, 10).unwrap_or(0.0);
-        let rate_60min = rate_of_change(&state.samples, now, 60).unwrap_or(0.0);
+        let rate_10min = rate_of_change(&state.samples, context.observed_at, 10).unwrap_or(0.0);
+        let rate_60min = rate_of_change(&state.samples, context.observed_at, 60).unwrap_or(0.0);
 
         let mut oracle_context = HashMap::new();
         oracle_context.insert("protocol_id".to_string(), json!(sample.protocol_id));
@@ -621,26 +612,23 @@ impl UtilizationHighPattern {
         oracle_context.insert("tvl_usd".to_string(), json!(sample.tvl_usd));
         oracle_context.insert("rate_of_change_10min".to_string(), json!(rate_10min));
         oracle_context.insert("rate_of_change_60min".to_string(), json!(rate_60min));
-        oracle_context.insert(
-            "paused_status".to_string(),
-            json!(state.paused_status),
-        );
+        oracle_context.insert("paused_status".to_string(), json!(state.paused_status));
         oracle_context.insert(
             "transition".to_string(),
-            json!(format!("{transition:?}").to_ascii_lowercase()),
+            json!(format!("{:?}", context.transition).to_ascii_lowercase()),
         );
 
-        let risk_score_val = risk_score_for_severity(severity);
+        let risk_score_val = risk_score_for_severity(context.severity);
 
         DetectionResult {
             detection_id: Uuid::new_v4(),
             pattern_id: PATTERN_ID.to_string(),
             event_key: Some(format!(
                 "utilization_high:{}:{}:{}",
-                event.tenant_id, rule.rule_id, subject_key
+                event.tenant_id, rule.rule_id, context.subject_key
             )),
-            subject_type: Some(subject_type.to_string()),
-            subject_key: Some(subject_key.to_string()),
+            subject_type: Some(context.subject_type.to_string()),
+            subject_key: Some(context.subject_key.to_string()),
             tenant_id: Some(event.tenant_id.clone()),
             chain: chain_from_slug(&sample.chain_slug),
             chain_slug: sample.chain_slug.clone(),
@@ -648,7 +636,7 @@ impl UtilizationHighPattern {
             lifecycle_state: LifecycleState::Confirmed,
             requires_confirmation: false,
             attack_family: AttackFamily::HighUtilization,
-            severity: severity.clone(),
+            severity: context.severity.clone(),
             description: Some(format!(
                 "High utilization detected: {:.2}% in {}/{} ({}). Rule: '{}'.",
                 sample.utilization_pct,
@@ -686,18 +674,18 @@ impl UtilizationHighPattern {
                 ],
                 attribution: Vec::new(),
             },
-            incident_transition: Some(transition.clone()),
+            incident_transition: Some(context.transition.clone()),
             context_classification: Some(ContextClassification::Isolated),
             confidence_breakdown: HashMap::from([(
                 "utilization_pct".to_string(),
                 sample.utilization_pct,
             )]),
             oracle_context,
-            actions_recommended: actions_for_severity(severity, state.paused_status),
+            actions_recommended: actions_for_severity(context.severity, state.paused_status),
             is_simulated,
             simulation_run_id,
             simulation_operating_mode,
-            created_at: now,
+            created_at: context.observed_at,
         }
     }
 
@@ -880,10 +868,7 @@ impl DetectionPattern for UtilizationHighPattern {
         PATTERN_ID
     }
 
-    async fn reload_config(
-        &mut self,
-        config_map: &HashMap<(String, String), Value>,
-    ) -> Result<()> {
+    async fn reload_config(&mut self, config_map: &HashMap<(String, String), Value>) -> Result<()> {
         let mut next = HashMap::new();
         for ((tenant_id, pattern_id), config) in config_map {
             if pattern_id != PATTERN_ID {
@@ -1005,15 +990,13 @@ impl DetectionPattern for UtilizationHighPattern {
                     }
                     (Some(prev_sev_str), None) => {
                         // Below detection threshold — check resolution path
-                        let resolution_threshold =
-                            rule.resolution_threshold_for(state.last_severity.as_deref().unwrap_or("medium"));
+                        let resolution_threshold = rule.resolution_threshold_for(
+                            state.last_severity.as_deref().unwrap_or("medium"),
+                        );
 
-                        if sample.utilization_pct < resolution_threshold
-                            && !state.paused_status
-                        {
+                        if sample.utilization_pct < resolution_threshold && !state.paused_status {
                             state.resolution_block_counter += 1;
-                            if state.resolution_block_counter
-                                >= rule.resolution_confirmation_blocks
+                            if state.resolution_block_counter >= rule.resolution_confirmation_blocks
                             {
                                 // Emit resolution
                                 do_resolve = true;
@@ -1052,13 +1035,15 @@ impl DetectionPattern for UtilizationHighPattern {
                     let detection = Self::build_utilization_detection(
                         event,
                         rule,
-                        &subject_type,
-                        &subject_key,
-                        sev_ref,
-                        t,
+                        &UtilizationDetectionContext {
+                            subject_type: &subject_type,
+                            subject_key: &subject_key,
+                            severity: sev_ref,
+                            transition: t,
+                            observed_at: now,
+                        },
                         &sample,
                         &state,
-                        now,
                     );
                     emitted = pick_higher(emitted, detection);
                 }
@@ -1078,15 +1063,15 @@ impl DetectionPattern for UtilizationHighPattern {
                     "do_resolve": do_resolve,
                 });
                 let _ = repo
-                    .insert_pattern_snapshot(
-                        &event.tenant_id,
-                        PATTERN_ID,
-                        &state_key,
-                        append_snapshot_meta(event, snapshot),
-                        Some(sample.utilization_pct),
-                        state.last_severity.as_deref(),
-                        event.timestamp,
-                    )
+                    .insert_pattern_snapshot(PatternSnapshotInsert {
+                        tenant_id: &event.tenant_id,
+                        pattern_id: PATTERN_ID,
+                        snapshot_key: &state_key,
+                        data: append_snapshot_meta(event, snapshot),
+                        score: Some(sample.utilization_pct),
+                        severity: state.last_severity.as_deref(),
+                        observed_at: event.timestamp,
+                    })
                     .await;
                 let _ = repo
                     .upsert_pattern_state(
@@ -1144,15 +1129,15 @@ impl DetectionPattern for UtilizationHighPattern {
                     "incident_transition": "update",
                 });
                 let _ = repo
-                    .insert_pattern_snapshot(
-                        &event.tenant_id,
-                        PATTERN_ID,
-                        &state_key,
-                        append_snapshot_meta(event, snapshot),
-                        None,
-                        Some(&active_severity_str),
-                        event.timestamp,
-                    )
+                    .insert_pattern_snapshot(PatternSnapshotInsert {
+                        tenant_id: &event.tenant_id,
+                        pattern_id: PATTERN_ID,
+                        snapshot_key: &state_key,
+                        data: append_snapshot_meta(event, snapshot),
+                        score: None,
+                        severity: Some(&active_severity_str),
+                        observed_at: event.timestamp,
+                    })
                     .await;
                 let _ = repo
                     .upsert_pattern_state(

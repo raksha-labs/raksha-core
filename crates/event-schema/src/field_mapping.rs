@@ -113,68 +113,258 @@ pub struct FieldMapping {
 pub fn default_mappings_for_parser(parser_name: &str) -> Vec<FieldMapping> {
     match parser_name {
         "binance_miniticker_v1" => vec![
-            FieldMapping { source_field: "$.c".into(), canonical_field: CanonicalField::Price,     transform: FieldTransform::ToF64,              description: Some("Close price (string float)".into()) },
-            FieldMapping { source_field: "$.s".into(), canonical_field: CanonicalField::MarketKey, transform: FieldTransform::SymbolToMarketKey,   description: Some("Symbol → market key".into()) },
-            FieldMapping { source_field: "$.E".into(), canonical_field: CanonicalField::Timestamp, transform: FieldTransform::ParseTsMs,           description: Some("Event time (epoch ms)".into()) },
+            FieldMapping {
+                source_field: "$.c".into(),
+                canonical_field: CanonicalField::Price,
+                transform: FieldTransform::ToF64,
+                description: Some("Close price (string float)".into()),
+            },
+            FieldMapping {
+                source_field: "$.s".into(),
+                canonical_field: CanonicalField::MarketKey,
+                transform: FieldTransform::SymbolToMarketKey,
+                description: Some("Symbol → market key".into()),
+            },
+            FieldMapping {
+                source_field: "$.E".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsMs,
+                description: Some("Event time (epoch ms)".into()),
+            },
         ],
         "coinbase_ticker_v1" => vec![
-            FieldMapping { source_field: "$.price".into(),      canonical_field: CanonicalField::Price,     transform: FieldTransform::ToF64,            description: Some("Last trade price".into()) },
-            FieldMapping { source_field: "$.product_id".into(), canonical_field: CanonicalField::MarketKey, transform: FieldTransform::SymbolToMarketKey, description: Some("Product ID → market key".into()) },
-            FieldMapping { source_field: "$.time".into(),       canonical_field: CanonicalField::Timestamp, transform: FieldTransform::ParseTsIso8601,   description: Some("Event time (ISO 8601)".into()) },
+            FieldMapping {
+                source_field: "$.price".into(),
+                canonical_field: CanonicalField::Price,
+                transform: FieldTransform::ToF64,
+                description: Some("Last trade price".into()),
+            },
+            FieldMapping {
+                source_field: "$.product_id".into(),
+                canonical_field: CanonicalField::MarketKey,
+                transform: FieldTransform::SymbolToMarketKey,
+                description: Some("Product ID → market key".into()),
+            },
+            FieldMapping {
+                source_field: "$.time".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsIso8601,
+                description: Some("Event time (ISO 8601)".into()),
+            },
         ],
         "kraken_ticker_v2" => vec![
-            FieldMapping { source_field: "$.data[0].last".into(),   canonical_field: CanonicalField::Price,     transform: FieldTransform::ToF64,            description: Some("Last trade price".into()) },
-            FieldMapping { source_field: "$.data[0].symbol".into(), canonical_field: CanonicalField::MarketKey, transform: FieldTransform::SymbolToMarketKey, description: Some("Symbol → market key".into()) },
+            FieldMapping {
+                source_field: "$.data[0].last".into(),
+                canonical_field: CanonicalField::Price,
+                transform: FieldTransform::ToF64,
+                description: Some("Last trade price".into()),
+            },
+            FieldMapping {
+                source_field: "$.data[0].symbol".into(),
+                canonical_field: CanonicalField::MarketKey,
+                transform: FieldTransform::SymbolToMarketKey,
+                description: Some("Symbol → market key".into()),
+            },
         ],
         "okx_tickers_v5" => vec![
-            FieldMapping { source_field: "$.data[0].last".into(),   canonical_field: CanonicalField::Price,     transform: FieldTransform::ToF64,            description: Some("Last price (string float)".into()) },
-            FieldMapping { source_field: "$.data[0].instId".into(), canonical_field: CanonicalField::MarketKey, transform: FieldTransform::SymbolToMarketKey, description: Some("Instrument ID → market key".into()) },
-            FieldMapping { source_field: "$.data[0].ts".into(),     canonical_field: CanonicalField::Timestamp, transform: FieldTransform::ParseTsMs,         description: Some("Event time (epoch ms)".into()) },
+            FieldMapping {
+                source_field: "$.data[0].last".into(),
+                canonical_field: CanonicalField::Price,
+                transform: FieldTransform::ToF64,
+                description: Some("Last price (string float)".into()),
+            },
+            FieldMapping {
+                source_field: "$.data[0].instId".into(),
+                canonical_field: CanonicalField::MarketKey,
+                transform: FieldTransform::SymbolToMarketKey,
+                description: Some("Instrument ID → market key".into()),
+            },
+            FieldMapping {
+                source_field: "$.data[0].ts".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsMs,
+                description: Some("Event time (epoch ms)".into()),
+            },
         ],
         "bybit_tickers_v5" => vec![
-            FieldMapping { source_field: "$.data.lastPrice".into(), canonical_field: CanonicalField::Price,     transform: FieldTransform::ToF64,            description: Some("Last price".into()) },
-            FieldMapping { source_field: "$.data.symbol".into(),    canonical_field: CanonicalField::MarketKey, transform: FieldTransform::SymbolToMarketKey, description: Some("Symbol → market key".into()) },
-            FieldMapping { source_field: "$.ts".into(),             canonical_field: CanonicalField::Timestamp, transform: FieldTransform::ParseTsMs,         description: Some("Event time (epoch ms)".into()) },
+            FieldMapping {
+                source_field: "$.data.lastPrice".into(),
+                canonical_field: CanonicalField::Price,
+                transform: FieldTransform::ToF64,
+                description: Some("Last price".into()),
+            },
+            FieldMapping {
+                source_field: "$.data.symbol".into(),
+                canonical_field: CanonicalField::MarketKey,
+                transform: FieldTransform::SymbolToMarketKey,
+                description: Some("Symbol → market key".into()),
+            },
+            FieldMapping {
+                source_field: "$.ts".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsMs,
+                description: Some("Event time (epoch ms)".into()),
+            },
         ],
         "gemini_marketdata_v1" => vec![
-            FieldMapping { source_field: "$.price".into(),       canonical_field: CanonicalField::Price,     transform: FieldTransform::ToF64,    description: Some("Trade price".into()) },
-            FieldMapping { source_field: "$.timestampms".into(), canonical_field: CanonicalField::Timestamp, transform: FieldTransform::ParseTsMs, description: Some("Event time (epoch ms)".into()) },
+            FieldMapping {
+                source_field: "$.price".into(),
+                canonical_field: CanonicalField::Price,
+                transform: FieldTransform::ToF64,
+                description: Some("Trade price".into()),
+            },
+            FieldMapping {
+                source_field: "$.timestampms".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsMs,
+                description: Some("Event time (epoch ms)".into()),
+            },
         ],
         "chainlink_answer_updated_v1" => vec![
-            FieldMapping { source_field: "$.answer".into(),    canonical_field: CanonicalField::Price,     transform: FieldTransform::ScalePrice, description: Some("Oracle answer ÷ 10^8 → price".into()) },
-            FieldMapping { source_field: "$.updatedAt".into(), canonical_field: CanonicalField::Timestamp, transform: FieldTransform::ParseTsS,   description: Some("Update time (epoch sec)".into()) },
+            FieldMapping {
+                source_field: "$.answer".into(),
+                canonical_field: CanonicalField::Price,
+                transform: FieldTransform::ScalePrice,
+                description: Some("Oracle answer ÷ 10^8 → price".into()),
+            },
+            FieldMapping {
+                source_field: "$.updatedAt".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsS,
+                description: Some("Update time (epoch sec)".into()),
+            },
         ],
         "uniswap_v2_swap_price_v1" => vec![
-            FieldMapping { source_field: "$.amount0In".into(),       canonical_field: CanonicalField::Price,       transform: FieldTransform::ToF64,   description: Some("Derived swap price from amounts + decimals".into()) },
-            FieldMapping { source_field: "$.block.timestamp".into(), canonical_field: CanonicalField::Timestamp,   transform: FieldTransform::ParseTsS, description: Some("Block timestamp (epoch sec)".into()) },
-            FieldMapping { source_field: "$.transactionHash".into(), canonical_field: CanonicalField::TxHash,      transform: FieldTransform::Identity, description: Some("Transaction hash".into()) },
-            FieldMapping { source_field: "$.blockNumber".into(),     canonical_field: CanonicalField::BlockNumber, transform: FieldTransform::ToU64,    description: Some("Block number".into()) },
+            FieldMapping {
+                source_field: "$.amount0In".into(),
+                canonical_field: CanonicalField::Price,
+                transform: FieldTransform::ToF64,
+                description: Some("Derived swap price from amounts + decimals".into()),
+            },
+            FieldMapping {
+                source_field: "$.block.timestamp".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsS,
+                description: Some("Block timestamp (epoch sec)".into()),
+            },
+            FieldMapping {
+                source_field: "$.transactionHash".into(),
+                canonical_field: CanonicalField::TxHash,
+                transform: FieldTransform::Identity,
+                description: Some("Transaction hash".into()),
+            },
+            FieldMapping {
+                source_field: "$.blockNumber".into(),
+                canonical_field: CanonicalField::BlockNumber,
+                transform: FieldTransform::ToU64,
+                description: Some("Block number".into()),
+            },
         ],
         "uniswap_v3_swap_price_v1" => vec![
-            FieldMapping { source_field: "$.sqrtPriceX96".into(),    canonical_field: CanonicalField::Price,       transform: FieldTransform::SqrtRatioToPrice, description: Some("sqrtPriceX96 → price".into()) },
-            FieldMapping { source_field: "$.block.timestamp".into(), canonical_field: CanonicalField::Timestamp,   transform: FieldTransform::ParseTsS,          description: Some("Block timestamp (epoch sec)".into()) },
-            FieldMapping { source_field: "$.transactionHash".into(), canonical_field: CanonicalField::TxHash,      transform: FieldTransform::Identity,          description: Some("Transaction hash".into()) },
-            FieldMapping { source_field: "$.blockNumber".into(),     canonical_field: CanonicalField::BlockNumber, transform: FieldTransform::ToU64,             description: Some("Block number".into()) },
+            FieldMapping {
+                source_field: "$.sqrtPriceX96".into(),
+                canonical_field: CanonicalField::Price,
+                transform: FieldTransform::SqrtRatioToPrice,
+                description: Some("sqrtPriceX96 → price".into()),
+            },
+            FieldMapping {
+                source_field: "$.block.timestamp".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsS,
+                description: Some("Block timestamp (epoch sec)".into()),
+            },
+            FieldMapping {
+                source_field: "$.transactionHash".into(),
+                canonical_field: CanonicalField::TxHash,
+                transform: FieldTransform::Identity,
+                description: Some("Transaction hash".into()),
+            },
+            FieldMapping {
+                source_field: "$.blockNumber".into(),
+                canonical_field: CanonicalField::BlockNumber,
+                transform: FieldTransform::ToU64,
+                description: Some("Block number".into()),
+            },
         ],
         "protocol_tvl_v1" => vec![
-            FieldMapping { source_field: "$.tvl_usd".into(),     canonical_field: CanonicalField::TvlUsd,      transform: FieldTransform::ToF64,   description: Some("Protocol TVL in USD".into()) },
-            FieldMapping { source_field: "$.protocol_id".into(), canonical_field: CanonicalField::ProtocolId,  transform: FieldTransform::Identity, description: Some("Protocol identifier".into()) },
-            FieldMapping { source_field: "$.chain_slug".into(),  canonical_field: CanonicalField::ChainSlug,   transform: FieldTransform::Identity, description: Some("Chain slug".into()) },
-            FieldMapping { source_field: "$.market_id".into(),   canonical_field: CanonicalField::MarketId,    transform: FieldTransform::Identity, description: Some("Market identifier".into()) },
-            FieldMapping { source_field: "$.block_number".into(),canonical_field: CanonicalField::BlockNumber, transform: FieldTransform::ToU64,    description: Some("Block number".into()) },
+            FieldMapping {
+                source_field: "$.tvl_usd".into(),
+                canonical_field: CanonicalField::TvlUsd,
+                transform: FieldTransform::ToF64,
+                description: Some("Protocol TVL in USD".into()),
+            },
+            FieldMapping {
+                source_field: "$.protocol_id".into(),
+                canonical_field: CanonicalField::ProtocolId,
+                transform: FieldTransform::Identity,
+                description: Some("Protocol identifier".into()),
+            },
+            FieldMapping {
+                source_field: "$.chain_slug".into(),
+                canonical_field: CanonicalField::ChainSlug,
+                transform: FieldTransform::Identity,
+                description: Some("Chain slug".into()),
+            },
+            FieldMapping {
+                source_field: "$.market_id".into(),
+                canonical_field: CanonicalField::MarketId,
+                transform: FieldTransform::Identity,
+                description: Some("Market identifier".into()),
+            },
+            FieldMapping {
+                source_field: "$.block_number".into(),
+                canonical_field: CanonicalField::BlockNumber,
+                transform: FieldTransform::ToU64,
+                description: Some("Block number".into()),
+            },
         ],
         "protocol_pause_v1" => vec![
-            FieldMapping { source_field: "$.protocol_id".into(), canonical_field: CanonicalField::ProtocolId, transform: FieldTransform::Identity, description: Some("Protocol identifier".into()) },
-            FieldMapping { source_field: "$.chain_slug".into(),  canonical_field: CanonicalField::ChainSlug,  transform: FieldTransform::Identity, description: Some("Chain slug".into()) },
+            FieldMapping {
+                source_field: "$.protocol_id".into(),
+                canonical_field: CanonicalField::ProtocolId,
+                transform: FieldTransform::Identity,
+                description: Some("Protocol identifier".into()),
+            },
+            FieldMapping {
+                source_field: "$.chain_slug".into(),
+                canonical_field: CanonicalField::ChainSlug,
+                transform: FieldTransform::Identity,
+                description: Some("Chain slug".into()),
+            },
         ],
         "evm_block_v1" => vec![
-            FieldMapping { source_field: "$.timestamp".into(), canonical_field: CanonicalField::Timestamp,   transform: FieldTransform::ParseTsS, description: Some("Block timestamp (epoch sec)".into()) },
-            FieldMapping { source_field: "$.number".into(),    canonical_field: CanonicalField::BlockNumber, transform: FieldTransform::ToU64,    description: Some("Block number".into()) },
+            FieldMapping {
+                source_field: "$.timestamp".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsS,
+                description: Some("Block timestamp (epoch sec)".into()),
+            },
+            FieldMapping {
+                source_field: "$.number".into(),
+                canonical_field: CanonicalField::BlockNumber,
+                transform: FieldTransform::ToU64,
+                description: Some("Block number".into()),
+            },
         ],
         "evm_log_v1" => vec![
-            FieldMapping { source_field: "$.blockNumber".into(),     canonical_field: CanonicalField::BlockNumber, transform: FieldTransform::ToU64,    description: Some("Block number".into()) },
-            FieldMapping { source_field: "$.transactionHash".into(), canonical_field: CanonicalField::TxHash,      transform: FieldTransform::Identity, description: Some("Transaction hash".into()) },
-            FieldMapping { source_field: "$.block.timestamp".into(), canonical_field: CanonicalField::Timestamp,   transform: FieldTransform::ParseTsS, description: Some("Block timestamp".into()) },
+            FieldMapping {
+                source_field: "$.blockNumber".into(),
+                canonical_field: CanonicalField::BlockNumber,
+                transform: FieldTransform::ToU64,
+                description: Some("Block number".into()),
+            },
+            FieldMapping {
+                source_field: "$.transactionHash".into(),
+                canonical_field: CanonicalField::TxHash,
+                transform: FieldTransform::Identity,
+                description: Some("Transaction hash".into()),
+            },
+            FieldMapping {
+                source_field: "$.block.timestamp".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsS,
+                description: Some("Block timestamp".into()),
+            },
         ],
         _ => vec![],
     }
@@ -248,19 +438,33 @@ fn eval_jsonpath<'a>(payload: &'a Value, path: &str) -> Option<&'a Value> {
 fn symbol_to_market_key(symbol: &str) -> Option<String> {
     let s = symbol.to_uppercase().replace(['-', '/'], "");
     let known: &[(&str, &str)] = &[
-        ("USDCUSDT", "USDC/USD"), ("USDCUSD", "USDC/USD"),
-        ("USDTUSDC", "USDT/USD"), ("USDTUSD", "USDT/USD"),
-        ("DAIUSDT", "DAI/USD"),   ("DAIUSD", "DAI/USD"),
+        ("USDCUSDT", "USDC/USD"),
+        ("USDCUSD", "USDC/USD"),
+        ("USDTUSDC", "USDT/USD"),
+        ("USDTUSD", "USDT/USD"),
+        ("DAIUSDT", "DAI/USD"),
+        ("DAIUSD", "DAI/USD"),
     ];
-    known.iter().find(|(sym, _)| *sym == s.as_str()).map(|(_, mk)| mk.to_string())
+    known
+        .iter()
+        .find(|(sym, _)| *sym == s.as_str())
+        .map(|(_, mk)| mk.to_string())
         .or_else(|| {
             // Fallback: if already in USDC/USD form
-            if symbol.contains('/') { Some(symbol.to_string()) } else { None }
+            if symbol.contains('/') {
+                Some(symbol.to_string())
+            } else {
+                None
+            }
         })
 }
 
 /// Apply field mappings to a raw payload and populate `MappedFields`.
-pub fn apply_mappings(mappings: &[FieldMapping], payload: &Value, filter_config: Option<&Value>) -> MappedFields {
+pub fn apply_mappings(
+    mappings: &[FieldMapping],
+    payload: &Value,
+    filter_config: Option<&Value>,
+) -> MappedFields {
     let decimals = filter_config
         .and_then(|c| c.get("decimals"))
         .and_then(Value::as_u64)
@@ -277,12 +481,12 @@ pub fn apply_mappings(mappings: &[FieldMapping], payload: &Value, filter_config:
         match &mapping.canonical_field {
             CanonicalField::Price => {
                 let price = match &mapping.transform {
-                    FieldTransform::ToF64 => {
-                        raw.as_f64()
-                            .or_else(|| raw.as_str().and_then(|s| s.parse().ok()))
-                    }
+                    FieldTransform::ToF64 => raw
+                        .as_f64()
+                        .or_else(|| raw.as_str().and_then(|s| s.parse().ok())),
                     FieldTransform::ScalePrice => {
-                        let raw_int_opt = raw.as_i64()
+                        let raw_int_opt = raw
+                            .as_i64()
                             .or_else(|| raw.as_str().and_then(|s| s.parse().ok()));
                         raw_int_opt.map(|v| v as f64 / 10f64.powi(decimals))
                     }
@@ -303,10 +507,15 @@ pub fn apply_mappings(mappings: &[FieldMapping], payload: &Value, filter_config:
                 }
             }
             CanonicalField::MarketKey => {
-                let s = raw.as_str().map(str::to_string).or_else(|| Some(raw.to_string()));
+                let s = raw
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| Some(raw.to_string()));
                 if let Some(sym) = s {
                     out.market_key = match &mapping.transform {
-                        FieldTransform::SymbolToMarketKey => symbol_to_market_key(&sym).or(Some(sym)),
+                        FieldTransform::SymbolToMarketKey => {
+                            symbol_to_market_key(&sym).or(Some(sym))
+                        }
                         _ => Some(sym),
                     };
                 }
@@ -315,7 +524,8 @@ pub fn apply_mappings(mappings: &[FieldMapping], payload: &Value, filter_config:
                 out.timestamp_raw = Some(raw.clone());
             }
             CanonicalField::BlockNumber => {
-                out.block_number = raw.as_u64()
+                out.block_number = raw
+                    .as_u64()
                     .or_else(|| raw.as_str().and_then(|s| s.parse().ok()));
             }
             CanonicalField::TxHash => {
@@ -331,15 +541,18 @@ pub fn apply_mappings(mappings: &[FieldMapping], payload: &Value, filter_config:
                 out.market_id = raw.as_str().map(str::to_string);
             }
             CanonicalField::TvlUsd => {
-                out.tvl_usd = raw.as_f64()
+                out.tvl_usd = raw
+                    .as_f64()
                     .or_else(|| raw.as_str().and_then(|s| s.parse().ok()));
             }
             CanonicalField::LoanAmountUsd => {
-                out.loan_amount_usd = raw.as_f64()
+                out.loan_amount_usd = raw
+                    .as_f64()
                     .or_else(|| raw.as_str().and_then(|s| s.parse().ok()));
             }
             CanonicalField::ProfitUsd => {
-                out.profit_usd = raw.as_f64()
+                out.profit_usd = raw
+                    .as_f64()
                     .or_else(|| raw.as_str().and_then(|s| s.parse().ok()));
             }
             CanonicalField::TokenAddress => {
