@@ -18,6 +18,9 @@ VALUES
      TRUE),
     ('flash_loan', 'Flash Loan Attack', 
      'Detects flash loan attacks by monitoring EVM chain events for anomalous loan + extraction patterns.', 
+     TRUE),
+    ('utilization_high', 'Protocol High Utilization',
+     'Detects sustained high utilization in lending protocols using protocol_state events and per-market or protocol thresholds.',
      TRUE)
 ON CONFLICT (pattern_id) DO NOTHING;
 
@@ -35,6 +38,26 @@ VALUES
             "min_loan_amount_usd": 100000,
             "profit_threshold_usd": 1000,
             "cooldown_sec": 300
+          }
+        ]
+    }'::jsonb),
+    ('utilization_high', '{
+        "rules": [
+          {
+            "rule_id": "utilization-default",
+            "protocol_id": "aave_v3",
+            "chain_slug": "base",
+            "scope": "protocol",
+            "market_id": null,
+            "medium_threshold_pct": 90,
+            "high_threshold_pct": 95,
+            "critical_threshold_pct": 99,
+            "resolution_medium_pct": 85,
+            "resolution_high_pct": 88,
+            "resolution_critical_pct": 90,
+            "resolution_confirmation_blocks": 10,
+            "min_tvl_floor_usd": 500000,
+            "enabled": true
           }
         ]
     }'::jsonb)
@@ -94,6 +117,28 @@ VALUES
             "min_loan_amount_usd": 100000,
             "profit_threshold_usd": 1000,
             "cooldown_sec": 300
+          }
+        ]
+    }'::jsonb),
+
+    -- High Utilization: default protocol-level rule
+    ('glider', 'utilization_high', TRUE, '{
+        "rules": [
+          {
+            "rule_id": "utilization-default",
+            "protocol_id": "aave_v3",
+            "chain_slug": "base",
+            "scope": "protocol",
+            "market_id": null,
+            "medium_threshold_pct": 90,
+            "high_threshold_pct": 95,
+            "critical_threshold_pct": 99,
+            "resolution_medium_pct": 85,
+            "resolution_high_pct": 88,
+            "resolution_critical_pct": 90,
+            "resolution_confirmation_blocks": 10,
+            "min_tvl_floor_usd": 500000,
+            "enabled": true
           }
         ]
     }'::jsonb)
