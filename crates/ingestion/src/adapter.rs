@@ -75,6 +75,7 @@ pub struct EvmChainAdapter {
     confirmation_depth: u64,
     lookback_blocks: u64,
     filter_chunk_size: usize,
+    log_block_range_size: u64,
     active_provider_index: usize,
     oracle_protocol_map: OracleProtocolMap,
     flash_loan_source_map: FlashLoanSourceMap,
@@ -168,6 +169,7 @@ impl EvmChainAdapter {
             chain_id,
             lookback_blocks,
             filter_chunk_size: 250,
+            log_block_range_size: 10,
             active_provider_index: 0,
             oracle_protocol_map,
             flash_loan_source_map: HashMap::new(),
@@ -183,6 +185,13 @@ impl EvmChainAdapter {
     pub fn with_filter_chunk_size(mut self, filter_chunk_size: usize) -> Self {
         if filter_chunk_size > 0 {
             self.filter_chunk_size = filter_chunk_size;
+        }
+        self
+    }
+
+    pub fn with_log_block_range_size(mut self, log_block_range_size: u64) -> Self {
+        if log_block_range_size > 0 {
+            self.log_block_range_size = log_block_range_size;
         }
         self
     }
@@ -253,8 +262,33 @@ impl EvmChainAdapter {
     }
 
     async fn fetch_logs_in_range(&mut self, from: U64, to: U64) -> Result<LogBatch> {
-        let mut logs = self.fetch_oracle_logs_in_range(from, to).await?;
-        logs.extend(self.fetch_flash_logs_in_range(from, to).await?);
+        let mut logs = Vec::new();
+        let mut chunk_start = from.as_u64();
+        let end = to.as_u64();
+        let chunk_size = self.log_block_range_size.max(1);
+
+        while chunk_start <= end {
+            let chunk_end = chunk_start
+                .saturating_add(chunk_size.saturating_sub(1))
+                .min(end);
+            let range_start = U64::from(chunk_start);
+            let range_end = U64::from(chunk_end);
+
+            let mut chunk_logs = self
+                .fetch_oracle_logs_in_range(range_start, range_end)
+                .await?;
+            chunk_logs.extend(
+                self.fetch_flash_logs_in_range(range_start, range_end)
+                    .await?,
+            );
+            logs.extend(chunk_logs);
+
+            if chunk_end == u64::MAX {
+                break;
+            }
+            chunk_start = chunk_end.saturating_add(1);
+        }
+
         Ok(LogBatch {
             logs: dedupe_provider_logs(logs),
         })
