@@ -4,6 +4,9 @@ target/
 *.md
 docs/
 infra/
+!infra/sql/
+!infra/sql/bootstrap/
+!infra/sql/bootstrap/**
 .env
 .env.*
 *.log
