@@ -1,10 +1,22 @@
-use anyhow::Result;
-use native_tls::TlsConnector;
+use std::{env, fs, path::Path};
+
+use anyhow::{Context, Result};
+use native_tls::{Certificate, TlsConnector};
 use postgres_native_tls::MakeTlsConnector;
 use tokio_postgres::Client;
 
+const DEFAULT_RDS_CA_BUNDLE_PATH: &str = "/app/certs/rds-global-bundle.pem";
+
 pub fn make_postgres_tls_connector() -> Result<MakeTlsConnector> {
-    let connector = TlsConnector::builder().build()?;
+    let mut builder = TlsConnector::builder();
+
+    if let Some(bundle_path) = postgres_root_cert_bundle_path() {
+        for certificate in load_pem_certificates(&bundle_path)? {
+            builder.add_root_certificate(certificate);
+        }
+    }
+
+    let connector = builder.build()?;
     Ok(MakeTlsConnector::new(connector))
 }
 
@@ -22,4 +34,54 @@ pub async fn connect_postgres_client(
     });
 
     Ok(client)
+}
+
+fn postgres_root_cert_bundle_path() -> Option<String> {
+    env::var("POSTGRES_SSL_ROOT_CERT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            Path::new(DEFAULT_RDS_CA_BUNDLE_PATH)
+                .exists()
+                .then(|| DEFAULT_RDS_CA_BUNDLE_PATH.to_string())
+        })
+}
+
+fn load_pem_certificates(bundle_path: &str) -> Result<Vec<Certificate>> {
+    let pem_bytes = fs::read(bundle_path)
+        .with_context(|| format!("failed to read postgres root cert bundle at {bundle_path}"))?;
+    let pem_text = String::from_utf8(pem_bytes).with_context(|| {
+        format!("postgres root cert bundle at {bundle_path} is not valid UTF-8")
+    })?;
+
+    let mut certificates = Vec::new();
+    for pem in split_pem_certificates(&pem_text) {
+        let certificate = Certificate::from_pem(pem.as_bytes()).with_context(|| {
+            format!("failed to parse postgres root certificate from {bundle_path}")
+        })?;
+        certificates.push(certificate);
+    }
+
+    if certificates.is_empty() {
+        return Err(anyhow::anyhow!(
+            "postgres root cert bundle at {bundle_path} did not contain any PEM certificates"
+        ));
+    }
+
+    Ok(certificates)
+}
+
+fn split_pem_certificates(pem_bundle: &str) -> Vec<String> {
+    let end_marker = "-----END CERTIFICATE-----";
+    pem_bundle
+        .split(end_marker)
+        .filter_map(|chunk| {
+            let trimmed = chunk.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(format!("{trimmed}\n{end_marker}\n"))
+            }
+        })
+        .collect()
 }

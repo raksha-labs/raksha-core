@@ -5,10 +5,13 @@ FROM rust:slim AS builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
+    curl \
     pkg-config \
     libssl-dev \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /tmp/rds-global-bundle.pem
 
 WORKDIR /app
 
@@ -47,6 +50,7 @@ COPY --from=builder /app/target/release/detector /app/bin/detector
 COPY --from=builder /app/target/release/orchestrator /app/bin/orchestrator
 COPY --from=builder /app/target/release/finality /app/bin/finality
 COPY --from=builder /app/target/release/history-worker /app/bin/history-worker
+COPY --from=builder /tmp/rds-global-bundle.pem /app/certs/rds-global-bundle.pem
 
 # Copy schemas and rules (needed for runtime validation)
 COPY schemas ./schemas
