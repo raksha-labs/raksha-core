@@ -4,6 +4,7 @@ target/
 *.md
 docs/
 infra/
+!infra/
 !infra/sql/
 !infra/sql/bootstrap/
 !infra/sql/bootstrap/**
