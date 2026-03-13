@@ -50,6 +50,7 @@ pub fn describe_redis_url(redis_url: &str) -> String {
 #[derive(Clone)]
 pub struct RedisStreamPublisher {
     client: redis::Client,
+    connection_target: String,
     normalized_events_stream: String,
     reorg_notices_stream: String,
     finality_updates_stream: String,
@@ -63,6 +64,7 @@ impl RedisStreamPublisher {
     pub fn from_url(redis_url: &str) -> Result<Self> {
         Ok(Self {
             client: redis::Client::open(redis_url)?,
+            connection_target: describe_redis_url(redis_url),
             normalized_events_stream: STREAM_NORMALIZED_EVENTS.to_string(),
             reorg_notices_stream: STREAM_REORG_NOTICES.to_string(),
             finality_updates_stream: STREAM_FINALITY_UPDATES.to_string(),
@@ -77,6 +79,21 @@ impl RedisStreamPublisher {
         std::env::var("REDIS_URL")
             .ok()
             .map(|url| Self::from_url(&url))
+    }
+
+    fn connection_error_context(&self, action: &str, error_text: &str) -> String {
+        let tls_hint = if self.connection_target.starts_with("rediss://")
+            && error_text.contains("tls handshake eof")
+        {
+            " The remote endpoint closed the TLS handshake. This usually means REDIS_URL points to a plain Redis endpoint, a stale endpoint, or a service that is not Redis TLS on port 6379."
+        } else {
+            ""
+        };
+
+        format!(
+            "redis {action} failed for {}.{}",
+            self.connection_target, tls_hint
+        )
     }
 
     pub async fn publish_normalized_event(&self, event: &NormalizedEvent) -> Result<()> {
@@ -113,8 +130,21 @@ impl RedisStreamPublisher {
     }
 
     pub async fn healthcheck(&self) -> Result<()> {
-        let mut connection = self.client.get_multiplexed_async_connection().await?;
-        let pong: String = redis::cmd("PING").query_async(&mut connection).await?;
+        let mut connection = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|err| {
+                let details = err.to_string();
+                anyhow::Error::new(err).context(self.connection_error_context("connect", &details))
+            })?;
+        let pong: String = redis::cmd("PING")
+            .query_async(&mut connection)
+            .await
+            .map_err(|err| {
+                let details = err.to_string();
+                anyhow::Error::new(err).context(self.connection_error_context("PING", &details))
+            })?;
         info!(pong = %pong, "redis healthcheck passed");
         Ok(())
     }
