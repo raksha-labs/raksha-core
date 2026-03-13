@@ -1,9 +1,9 @@
 name: Cost Alert Monitor
 
 on:
-  schedule:
-    # Run daily at 9 AM PST (5 PM UTC)
-    - cron: '0 17 * * *'
+  # schedule:
+  #   # Run daily at 9 AM PST (5 PM UTC)
+  #   - cron: '0 17 * * *'
   workflow_dispatch:
     inputs:
       alert_threshold:

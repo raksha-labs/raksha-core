@@ -35,19 +35,34 @@ jobs:
       - name: Checkout raksha-core
         uses: actions/checkout@v4
 
+      - name: Validate cross-repo checkout token
+        env:
+          CROSS_REPO_READ_TOKEN: ${{ secrets.CROSS_REPO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CROSS_REPO_READ_TOKEN}" ]; then
+            echo "Secret CROSS_REPO_READ_TOKEN is required for Destroy Shared Environment." >&2
+            echo "The workflow must read private repos raksha-labs/raksha-platform and raksha-labs/raksha-simlab." >&2
+            echo "The default GITHUB_TOKEN from raksha-core cannot read those repositories." >&2
+            exit 1
+          fi
+
       - name: Checkout raksha-platform
         uses: actions/checkout@v4
         with:
           repository: raksha-labs/raksha-platform
           path: raksha-platform
-          token: ${{ secrets.CROSS_REPO_READ_TOKEN != '' && secrets.CROSS_REPO_READ_TOKEN || github.token }}
+          ref: master
+          token: ${{ secrets.CROSS_REPO_READ_TOKEN }}
 
       - name: Checkout raksha-simlab
         uses: actions/checkout@v4
         with:
           repository: raksha-labs/raksha-simlab
           path: raksha-simlab
-          token: ${{ secrets.CROSS_REPO_READ_TOKEN != '' && secrets.CROSS_REPO_READ_TOKEN || github.token }}
+          ref: master
+          token: ${{ secrets.CROSS_REPO_READ_TOKEN }}
 
       - name: Validate confirmation input
         env:
