@@ -97,6 +97,16 @@ jobs:
           role-to-assume: ${{ secrets.aws_role_arn }}
           aws-region: ${{ inputs.aws_region }}
 
+      - name: Bootstrap databases in ECS
+        if: ${{ inputs.apply_infra }}
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          TF_BACKEND_BUCKET: ${{ secrets.tf_backend_bucket }}
+          TF_BACKEND_DYNAMODB_TABLE: ${{ secrets.tf_backend_dynamodb_table }}
+          TF_BACKEND_KMS_KEY_ID: ${{ secrets.tf_backend_kms_key_id }}
+        run: |
+          bash scripts/ci/bootstrap_databases_via_ecs.sh "${{ inputs.environment }}"
+
       - name: Run ECS rollout
         env:
           AWS_REGION: ${{ inputs.aws_region }}

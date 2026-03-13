@@ -37,6 +37,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -56,6 +57,8 @@ COPY --from=builder /tmp/rds-global-bundle.pem /app/certs/rds-global-bundle.pem
 COPY schemas ./schemas
 COPY rules ./rules
 COPY scenarios ./scenarios
+COPY infra/sql/bootstrap ./sql/bootstrap
+COPY scripts/runtime ./scripts
 
 # Set ownership
 RUN chown -R appuser:appuser /app
@@ -65,6 +68,7 @@ USER appuser
 # Default to ingestion worker (override with CMD)
 ENV RUST_LOG=info
 ENV RUST_BACKTRACE=1
+ENV POSTGRES_SSL_ROOT_CERT=/app/certs/rds-global-bundle.pem
 
 # Default command can be overridden in docker-compose.
 CMD ["/app/bin/indexer"]

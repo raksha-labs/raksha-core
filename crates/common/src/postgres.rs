@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use native_tls::{Certificate, TlsConnector};
 use postgres_native_tls::MakeTlsConnector;
 use tokio_postgres::Client;
+use tracing::{info, warn};
 
 const DEFAULT_RDS_CA_BUNDLE_PATH: &str = "/app/certs/rds-global-bundle.pem";
 
@@ -11,9 +12,17 @@ pub fn make_postgres_tls_connector() -> Result<MakeTlsConnector> {
     let mut builder = TlsConnector::builder();
 
     if let Some(bundle_path) = postgres_root_cert_bundle_path() {
-        for certificate in load_pem_certificates(&bundle_path)? {
+        let certificates = load_pem_certificates(&bundle_path)?;
+        info!(
+            bundle_path = %bundle_path,
+            certificate_count = certificates.len(),
+            "loading postgres root certificates"
+        );
+        for certificate in certificates {
             builder.add_root_certificate(certificate);
         }
+    } else {
+        warn!("postgres root cert bundle not configured; relying on system trust store");
     }
 
     let connector = builder.build()?;
