@@ -145,7 +145,11 @@ module "compute" {
   fargate_spot_scaling_classes = var.fargate_spot_scaling_classes
   service_static_env           = local.service_static_env
   service_secret_env           = local.service_secret_env
-  tags                         = var.tags
+  # Keep decrypt access to the data CMK until all existing secret versions have
+  # been re-encrypted away from it. Removing this too early prevents ECS from
+  # injecting legacy Secrets Manager versions during rollout.
+  secret_kms_key_arns = [module.data_prod[0].kms_key_arn]
+  tags                = var.tags
 }
 
 locals {

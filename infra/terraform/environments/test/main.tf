@@ -196,7 +196,11 @@ module "compute" {
   ec2_max_capacity             = var.ec2_max_capacity
   service_static_env           = local.service_static_env
   service_secret_env           = local.service_secret_env
-  tags                         = var.tags
+  # Keep decrypt access to the data CMK until all existing secret versions have
+  # been re-encrypted away from it. Removing this too early prevents ECS from
+  # injecting legacy Secrets Manager versions during rollout.
+  secret_kms_key_arns = var.enable_managed_data ? [module.data_prod[0].kms_key_arn] : []
+  tags                = var.tags
 }
 
 locals {
