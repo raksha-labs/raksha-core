@@ -409,13 +409,25 @@ if [[ "${exit_code}" != "0" ]]; then
   fi
   if [[ -n "${log_group_name}" && -n "${log_stream_name}" ]]; then
     printf '[ci] last bootstrap task logs from %s / %s\n' "${log_group_name}" "${log_stream_name}" >&2
-    aws logs get-log-events \
+    bootstrap_log_events=$(aws logs get-log-events \
       --log-group-name "${log_group_name}" \
       --log-stream-name "${log_stream_name}" \
       --region "${AWS_REGION}" \
       --limit 200 \
-      --query 'events[].message' \
-      --output text >&2 || true
+      --output json 2>/dev/null || true)
+    if [[ -n "${bootstrap_log_events}" ]]; then
+      python3 - "${bootstrap_log_events}" >&2 <<'PY'
+import json
+import sys
+
+doc = json.loads(sys.argv[1])
+for event in doc.get("events", []):
+    message = event.get("message", "")
+    if not message:
+        continue
+    print(message.rstrip("\n"))
+PY
+    fi
   fi
   exit 1
 fi
