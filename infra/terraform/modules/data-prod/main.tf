@@ -98,6 +98,7 @@ resource "aws_secretsmanager_secret" "database" {
   description = "Managed PostgreSQL connection string"
   # Use the AWS managed Secrets Manager key so pending deletion of the data-tier
   # CMK cannot strand shared runtime secrets during destroy/recreate cycles.
+  kms_key_id = "alias/aws/secretsmanager"
 
   tags = var.tags
 }
@@ -117,6 +118,7 @@ resource "aws_secretsmanager_secret_version" "database" {
 resource "aws_secretsmanager_secret" "raw_database" {
   name        = "${var.secret_prefix}/shared/RAW_DATABASE_URL"
   description = "Managed raw ingestion PostgreSQL connection string"
+  kms_key_id  = "alias/aws/secretsmanager"
 
   tags = var.tags
 }
@@ -136,6 +138,7 @@ resource "aws_secretsmanager_secret_version" "raw_database" {
 resource "aws_secretsmanager_secret" "redis" {
   name        = "${var.secret_prefix}/shared/REDIS_URL"
   description = "Managed Redis connection string"
+  kms_key_id  = "alias/aws/secretsmanager"
 
   tags = var.tags
 }
