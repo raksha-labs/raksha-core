@@ -116,17 +116,20 @@ async fn main() -> Result<()> {
                 normalized_last_id = entry_id.clone();
             }
 
-            let tracker = trackers.entry(event.chain.clone()).or_insert_with(|| {
-                // Try to load existing state from database
-                if let Some(repo) = &repository {
+            if !trackers.contains_key(&event.chain) {
+                let tracker = if let Some(repo) = &repository {
                     let chain_str = format!("{:?}", event.chain).to_lowercase();
-                    match load_tracker_from_db(repo, &event.chain, &chain_str) {
+                    match load_tracker_from_db(repo, &event.chain, &chain_str).await {
                         Ok(Some(tracker)) => {
                             info!(chain = ?event.chain, "loaded finality state from database");
-                            return tracker;
+                            tracker
                         }
                         Ok(None) => {
                             info!(chain = ?event.chain, "no existing finality state found");
+                            ChainFinalityTracker::new(
+                                event.chain.clone(),
+                                default_confirmation_depth_for_chain(&event.chain),
+                            )
                         }
                         Err(e) => {
                             common::log_error!(
@@ -135,16 +138,24 @@ async fn main() -> Result<()> {
                                 "failed to load finality state",
                                 chain = ?event.chain
                             );
+                            ChainFinalityTracker::new(
+                                event.chain.clone(),
+                                default_confirmation_depth_for_chain(&event.chain),
+                            )
                         }
                     }
-                }
+                } else {
+                    ChainFinalityTracker::new(
+                        event.chain.clone(),
+                        default_confirmation_depth_for_chain(&event.chain),
+                    )
+                };
+                trackers.insert(event.chain.clone(), tracker);
+            }
 
-                // Create new tracker if loading failed or no database
-                ChainFinalityTracker::new(
-                    event.chain.clone(),
-                    default_confirmation_depth_for_chain(&event.chain),
-                )
-            });
+            let tracker = trackers
+                .get_mut(&event.chain)
+                .expect("tracker should exist after initialization");
 
             let batch = tracker.observe_event(&event);
             if let Some(notice) = batch.reorg_notice {
@@ -335,13 +346,12 @@ async fn init_repository() -> Option<PostgresRepository> {
     }
 }
 
-fn load_tracker_from_db(
+async fn load_tracker_from_db(
     repo: &PostgresRepository,
     chain: &Chain,
     chain_str: &str,
 ) -> Result<Option<ChainFinalityTracker>> {
-    let runtime = tokio::runtime::Handle::current();
-    let state = runtime.block_on(repo.load_finality_state(chain_str))?;
+    let state = repo.load_finality_state(chain_str).await?;
 
     let Some(state) = state else {
         return Ok(None);
