@@ -727,6 +727,8 @@ async fn sync_simlab_catalog(
             .and_then(Value::as_i64)
             .unwrap_or(10)
             .max(1);
+        let default_speed = i32::try_from(default_speed)
+            .with_context(|| format!("default_speed for scenario '{scenario_id}' exceeds i32 range"))?;
         let summary = scenario_obj
             .get("description")
             .and_then(Value::as_str)

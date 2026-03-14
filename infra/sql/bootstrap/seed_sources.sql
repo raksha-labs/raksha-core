@@ -259,11 +259,11 @@ desired_test_streams AS (
     ls.filter_config,
     CASE
       WHEN ls.connector_mode = 'websocket' THEN
-        jsonb_build_object('ws_endpoint', format('ws://host.docker.internal:8010/api/simulation/mock/ws/%s', ls.source_id))
+        jsonb_build_object('ws_endpoint', format('{simlab_mock_ws_base_url}/%s', ls.source_id))
       WHEN ls.connector_mode IN ('rpc_logs', 'rpc_state') THEN
-        jsonb_build_object('rpc_url', format('ws://host.docker.internal:8010/api/simulation/mock/rpc/%s', ls.source_id))
+        jsonb_build_object('rpc_url', format('{simlab_mock_rpc_base_url}/%s', ls.source_id))
       WHEN ls.connector_mode = 'http_poll' THEN
-        jsonb_build_object('http_url', format('http://host.docker.internal:8010/api/simulation/mock/http/%s', ls.source_id))
+        jsonb_build_object('http_url', format('{simlab_mock_http_base_url}/%s', ls.source_id))
       ELSE '{}'::jsonb
     END AS connection_config_override,
     ls.auth_secret_ref,
@@ -323,6 +323,28 @@ WHERE NOT EXISTS (
     AND COALESCE(existing.asset_pair, '') = COALESCE(dts.asset_pair, '')
     AND COALESCE(existing.subscription_key, '') = COALESCE(dts.subscription_key, '')
 );
+
+UPDATE source_stream_configs existing
+SET connector_mode = dts.connector_mode,
+    operating_mode_profile = dts.operating_mode_profile,
+    event_type = dts.event_type,
+    parser_name = dts.parser_name,
+    market_key = dts.market_key,
+    filter_config = dts.filter_config,
+    connection_config_override = dts.connection_config_override,
+    auth_secret_ref = dts.auth_secret_ref,
+    auth_config = dts.auth_config,
+    payload_ts_path = dts.payload_ts_path,
+    payload_ts_unit = dts.payload_ts_unit,
+    poll_interval_ms = dts.poll_interval_ms,
+    enabled = dts.enabled,
+    created_by = dts.created_by
+FROM desired_test_streams dts
+WHERE existing.source_id = dts.source_id
+  AND existing.operating_mode_profile = 'test'
+  AND existing.stream_name = dts.stream_name
+  AND COALESCE(existing.asset_pair, '') = COALESCE(dts.asset_pair, '')
+  AND COALESCE(existing.subscription_key, '') = COALESCE(dts.subscription_key, '');
 
 WITH desired_stream_refs AS (
   SELECT source_id, stream_name, subscription_key, asset_pair
