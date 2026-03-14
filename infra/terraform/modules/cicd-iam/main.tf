@@ -162,7 +162,9 @@ resource "aws_iam_role_policy" "deploy" {
         Action = [
           "ecs:DescribeServices",
           "ecs:DescribeTaskDefinition",
+          "ecs:DescribeTasks",
           "ecs:RegisterTaskDefinition",
+          "ecs:RunTask",
           "ecs:UpdateService",
           "ecs:DescribeClusters",
           "ecs:ListServices",
@@ -183,6 +185,8 @@ resource "aws_iam_role_policy" "deploy" {
           "application-autoscaling:PutScalingPolicy",
           "cloudwatch:DescribeAlarms",
           "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams",
+          "logs:GetLogEvents",
           "iam:PassRole",
           "elasticloadbalancing:DescribeTargetGroups",
           "elasticloadbalancing:DescribeListenerAttributes",
