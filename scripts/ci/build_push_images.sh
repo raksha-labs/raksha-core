@@ -15,8 +15,12 @@ PUSH_LATEST="${PUSH_LATEST:-false}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-log "logging in to ECR ${REGISTRY}"
-aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+if [[ "${SKIP_DOCKER_LOGIN:-false}" == "true" ]]; then
+  log "skipping docker login; assuming workflow already authenticated to ECR ${REGISTRY}"
+else
+  log "logging in to ECR ${REGISTRY}"
+  aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+fi
 
 BUNDLE_IMAGE="raksha-core-bundle:${IMAGE_TAG}"
 log "building shared core runtime image from Dockerfile"

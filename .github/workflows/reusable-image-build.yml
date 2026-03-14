@@ -41,11 +41,15 @@ jobs:
           role-to-assume: ${{ secrets.aws_role_arn }}
           aws-region: ${{ inputs.aws_region }}
 
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
       - name: Build and push images
         env:
           AWS_REGION: ${{ inputs.aws_region }}
           SERVICE_FILTER: ${{ inputs.service_filter }}
           IMAGE_TAG: ${{ inputs.image_tag != '' && inputs.image_tag || format('sha-{0}', github.sha) }}
           PUSH_LATEST: ${{ inputs.push_latest }}
+          SKIP_DOCKER_LOGIN: 'true'
         run: |
           scripts/ci/build_push_images.sh
