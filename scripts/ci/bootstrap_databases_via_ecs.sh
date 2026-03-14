@@ -101,6 +101,23 @@ if [[ -z "${service_json}" || "${service_json}" == "null" ]]; then
   fail "unable to describe ECS service ${SERVICE_NAME}"
 fi
 
+task_definition_arn=$(python3 - "${service_json}" <<'PY'
+import json
+import sys
+
+service = json.loads(sys.argv[1])
+print(service.get("taskDefinition", ""))
+PY
+)
+
+[[ -n "${task_definition_arn}" ]] || fail "unable to resolve task definition for ECS service ${SERVICE_NAME}"
+
+task_definition_json=$(aws ecs describe-task-definition \
+  --task-definition "${task_definition_arn}" \
+  --region "${AWS_REGION}" \
+  --query 'taskDefinition' \
+  --output json)
+
 cluster_capacity_providers=$(aws ecs describe-clusters \
   --clusters "${CLUSTER_NAME}" \
   --region "${AWS_REGION}" \
@@ -217,17 +234,44 @@ task_json=$(aws ecs describe-tasks \
   --query 'tasks[0]' \
   --output json)
 
-task_status=$(python3 - "${task_json}" <<'PY'
+task_status=$(python3 - "${task_json}" "${task_definition_json}" "${BOOTSTRAP_SERVICE_NAME}" "${task_arn}" <<'PY'
 import json
 import sys
 
 task = json.loads(sys.argv[1])
+task_definition = json.loads(sys.argv[2])
+container_name = sys.argv[3]
+task_arn = sys.argv[4]
 containers = task.get("containers") or []
-container = containers[0] if containers else {}
+container = next((entry for entry in containers if entry.get("name") == container_name), None)
+if container is None:
+    container = containers[0] if containers else {}
+
+log_group_name = ""
+log_stream_name = container.get("logStreamName") or ""
+
+container_definitions = task_definition.get("containerDefinitions") or []
+container_definition = next(
+    (entry for entry in container_definitions if entry.get("name") == container_name),
+    None,
+)
+if container_definition is None:
+    container_definition = container_definitions[0] if container_definitions else {}
+
+log_options = (container_definition.get("logConfiguration") or {}).get("options") or {}
+log_group_name = log_options.get("awslogs-group", "")
+if not log_stream_name:
+    stream_prefix = log_options.get("awslogs-stream-prefix", "")
+    task_id = task_arn.rsplit("/", 1)[-1] if "/" in task_arn else task_arn
+    effective_container_name = container.get("name") or container_name
+    if stream_prefix and effective_container_name and task_id:
+        log_stream_name = f"{stream_prefix}/{effective_container_name}/{task_id}"
+
 print(json.dumps({
     "exit_code": container.get("exitCode"),
     "reason": container.get("reason") or task.get("stoppedReason") or "unknown",
-    "log_stream_name": container.get("logStreamName") or "",
+    "log_group_name": log_group_name,
+    "log_stream_name": log_stream_name,
 }))
 PY
 )
@@ -256,8 +300,19 @@ print(status.get("log_stream_name", ""))
 PY
 )
 
+log_group_name=$(python3 - "${task_status}" <<'PY'
+import json
+import sys
+status = json.loads(sys.argv[1])
+print(status.get("log_group_name", ""))
+PY
+)
+
 if [[ -z "${exit_code}" ]]; then
   printf '[ci] ERROR: database bootstrap task stopped without exit code reason=%s\n' "${reason}" >&2
+  if [[ -n "${log_group_name}" ]]; then
+    printf '[ci] bootstrap task log group: %s\n' "${log_group_name}" >&2
+  fi
   if [[ -n "${log_stream_name}" ]]; then
     printf '[ci] bootstrap task log stream: %s\n' "${log_stream_name}" >&2
   fi
@@ -266,8 +321,10 @@ fi
 
 if [[ "${exit_code}" != "0" ]]; then
   printf '[ci] ERROR: database bootstrap task failed exit_code=%s reason=%s\n' "${exit_code}" "${reason}" >&2
-  if [[ -n "${log_stream_name}" ]]; then
-    log_group_name="/ecs/raksha/${ENVIRONMENT}/${BOOTSTRAP_SERVICE_NAME}"
+  if [[ -n "${log_group_name}" ]]; then
+    printf '[ci] bootstrap task log group: %s\n' "${log_group_name}" >&2
+  fi
+  if [[ -n "${log_group_name}" && -n "${log_stream_name}" ]]; then
     printf '[ci] last bootstrap task logs from %s / %s\n' "${log_group_name}" "${log_stream_name}" >&2
     aws logs get-log-events \
       --log-group-name "${log_group_name}" \
