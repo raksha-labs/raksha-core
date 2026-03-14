@@ -3,11 +3,6 @@ target/
 .gitignore
 *.md
 docs/
-infra/
-!infra/
-!infra/sql/
-!infra/sql/bootstrap/
-!infra/sql/bootstrap/**
 .env
 .env.*
 *.log
