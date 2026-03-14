@@ -1,5 +1,5 @@
 locals {
-  database_url     = "postgresql://${var.db_username}:${var.db_password}@${var.postgres_host}:${var.postgres_port}/${var.db_name}?sslmode=disable"
+  database_url     = "postgresql://${urlencode(var.db_username)}:${urlencode(var.db_password)}@${var.postgres_host}:${var.postgres_port}/${var.db_name}?sslmode=disable"
   raw_database_url = local.database_url
   redis_url        = "redis://${var.redis_host}:${var.redis_port}"
 }
