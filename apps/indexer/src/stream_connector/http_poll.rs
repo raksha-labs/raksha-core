@@ -33,7 +33,12 @@ impl HttpPollConnector {
             .await
             .with_context(|| format!("http_poll request failed for {}", self.endpoint))?
             .error_for_status()
-            .with_context(|| format!("http_poll returned non-success status for {}", self.endpoint))?;
+            .with_context(|| {
+                format!(
+                    "http_poll returned non-success status for {}",
+                    self.endpoint
+                )
+            })?;
         response
             .json::<Value>()
             .await
