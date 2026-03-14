@@ -333,8 +333,9 @@ VALUES
         NULL,
         TRUE
     )
-ON CONFLICT (scenario_id) DO UPDATE
+ON CONFLICT ON CONSTRAINT replay_catalog_tenant_id_slug_dataset_version_key DO UPDATE
 SET
+    scenario_id = EXCLUDED.scenario_id,
     tenant_id = EXCLUDED.tenant_id,
     case_id = EXCLUDED.case_id,
     slug = EXCLUDED.slug,
