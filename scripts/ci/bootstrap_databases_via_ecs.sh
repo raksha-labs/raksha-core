@@ -43,7 +43,6 @@ fi
 
 cluster_capacity_providers=$(aws ecs describe-clusters \
   --clusters "${CLUSTER_NAME}" \
-  --include CAPACITY_PROVIDERS \
   --region "${AWS_REGION}" \
   --query 'clusters[0].capacityProviders' \
   --output json)
