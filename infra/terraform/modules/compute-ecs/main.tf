@@ -564,7 +564,7 @@ resource "aws_ecs_service" "service" {
   }
 
   dynamic "load_balancer" {
-    for_each = try(each.value.exposure, "internal") == "public" ? [1] : []
+    for_each = contains(keys(local.public_services), each.key) ? [1] : []
     content {
       target_group_arn = aws_lb_target_group.public[each.key].arn
       container_name   = each.key
@@ -573,7 +573,7 @@ resource "aws_ecs_service" "service" {
   }
 
   dynamic "load_balancer" {
-    for_each = try(each.value.exposure, "internal") == "private-admin" && var.admin_access_mode == "private-only" ? [1] : []
+    for_each = contains(keys(local.admin_services), each.key) ? [1] : []
     content {
       target_group_arn = aws_lb_target_group.admin[each.key].arn
       container_name   = each.key
