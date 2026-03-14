@@ -41,18 +41,26 @@ if [[ -z "${service_json}" || "${service_json}" == "null" ]]; then
   fail "unable to describe ECS service ${SERVICE_NAME}"
 fi
 
+cluster_capacity_providers=$(aws ecs describe-clusters \
+  --clusters "${CLUSTER_NAME}" \
+  --include CAPACITY_PROVIDERS \
+  --region "${AWS_REGION}" \
+  --query 'clusters[0].capacityProviders' \
+  --output json)
+
 tmp_input=$(mktemp)
 trap 'rm -f "${tmp_input}"' EXIT
 
-python3 - "${service_json}" "${CLUSTER_NAME}" "${TASK_COMMAND}" "${BOOTSTRAP_SERVICE_NAME}" > "${tmp_input}" <<'PY'
+python3 - "${service_json}" "${cluster_capacity_providers}" "${CLUSTER_NAME}" "${TASK_COMMAND}" "${BOOTSTRAP_SERVICE_NAME}" > "${tmp_input}" <<'PY'
 import json
 import shlex
 import sys
 
 service = json.loads(sys.argv[1])
-cluster = sys.argv[2]
-command = sys.argv[3]
-container_name = sys.argv[4]
+cluster_capacity_providers = set(json.loads(sys.argv[2]) or [])
+cluster = sys.argv[3]
+command = sys.argv[4]
+container_name = sys.argv[5]
 
 task_definition = service.get("taskDefinition")
 if not task_definition:
@@ -88,16 +96,31 @@ launch_type = service.get("launchType")
 capacity_provider_strategy = service.get("capacityProviderStrategy") or []
 
 if capacity_provider_strategy:
-    payload["capacityProviderStrategy"] = [
+    valid_capacity_provider_strategy = [
         {
             "capacityProvider": entry["capacityProvider"],
             "weight": entry.get("weight", 0),
             "base": entry.get("base", 0),
         }
         for entry in capacity_provider_strategy
+        if entry.get("capacityProvider") in cluster_capacity_providers
     ]
+    if valid_capacity_provider_strategy:
+        payload["capacityProviderStrategy"] = valid_capacity_provider_strategy
+    elif "FARGATE" in cluster_capacity_providers or "FARGATE_SPOT" in cluster_capacity_providers:
+        payload["launchType"] = "FARGATE"
+    elif launch_type and launch_type != "None":
+        payload["launchType"] = launch_type
+    else:
+        raise SystemExit(
+            "service capacity provider strategy is not valid for the cluster and no launch type fallback is available"
+        )
 elif launch_type and launch_type != "None":
     payload["launchType"] = launch_type
+elif "FARGATE" in cluster_capacity_providers or "FARGATE_SPOT" in cluster_capacity_providers:
+    payload["launchType"] = "FARGATE"
+else:
+    raise SystemExit("unable to determine a valid ECS launch mode for the bootstrap task")
 
 print(json.dumps(payload))
 PY
