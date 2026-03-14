@@ -217,20 +217,67 @@ task_json=$(aws ecs describe-tasks \
   --query 'tasks[0]' \
   --output json)
 
-python3 - "${task_json}" <<'PY'
+task_status=$(python3 - "${task_json}" <<'PY'
 import json
 import sys
 
 task = json.loads(sys.argv[1])
 containers = task.get("containers") or []
 container = containers[0] if containers else {}
-exit_code = container.get("exitCode")
-reason = container.get("reason") or task.get("stoppedReason") or "unknown"
-if exit_code not in (0, None):
-    print(f"[ci] ERROR: database bootstrap task failed exit_code={exit_code} reason={reason}", file=sys.stderr)
-    raise SystemExit(1)
-if exit_code is None:
-    print(f"[ci] ERROR: database bootstrap task stopped without exit code reason={reason}", file=sys.stderr)
-    raise SystemExit(1)
-print(f"[ci] database bootstrap task completed exit_code={exit_code} reason={reason}")
+print(json.dumps({
+    "exit_code": container.get("exitCode"),
+    "reason": container.get("reason") or task.get("stoppedReason") or "unknown",
+    "log_stream_name": container.get("logStreamName") or "",
+}))
 PY
+)
+
+exit_code=$(python3 - "${task_status}" <<'PY'
+import json
+import sys
+status = json.loads(sys.argv[1])
+print("" if status.get("exit_code") is None else status["exit_code"])
+PY
+)
+
+reason=$(python3 - "${task_status}" <<'PY'
+import json
+import sys
+status = json.loads(sys.argv[1])
+print(status.get("reason", "unknown"))
+PY
+)
+
+log_stream_name=$(python3 - "${task_status}" <<'PY'
+import json
+import sys
+status = json.loads(sys.argv[1])
+print(status.get("log_stream_name", ""))
+PY
+)
+
+if [[ -z "${exit_code}" ]]; then
+  printf '[ci] ERROR: database bootstrap task stopped without exit code reason=%s\n' "${reason}" >&2
+  if [[ -n "${log_stream_name}" ]]; then
+    printf '[ci] bootstrap task log stream: %s\n' "${log_stream_name}" >&2
+  fi
+  exit 1
+fi
+
+if [[ "${exit_code}" != "0" ]]; then
+  printf '[ci] ERROR: database bootstrap task failed exit_code=%s reason=%s\n' "${exit_code}" "${reason}" >&2
+  if [[ -n "${log_stream_name}" ]]; then
+    log_group_name="/ecs/raksha/${ENVIRONMENT}/${BOOTSTRAP_SERVICE_NAME}"
+    printf '[ci] last bootstrap task logs from %s / %s\n' "${log_group_name}" "${log_stream_name}" >&2
+    aws logs get-log-events \
+      --log-group-name "${log_group_name}" \
+      --log-stream-name "${log_stream_name}" \
+      --region "${AWS_REGION}" \
+      --limit 200 \
+      --query 'events[].message' \
+      --output text >&2 || true
+  fi
+  exit 1
+fi
+
+printf '[ci] database bootstrap task completed exit_code=%s reason=%s\n' "${exit_code}" "${reason}"

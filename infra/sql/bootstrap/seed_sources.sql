@@ -324,6 +324,56 @@ WHERE NOT EXISTS (
     AND COALESCE(existing.subscription_key, '') = COALESCE(dts.subscription_key, '')
 );
 
+WITH live_streams AS (
+  SELECT
+    ssc.source_id,
+    ssc.connector_mode,
+    ssc.stream_name,
+    ssc.subscription_key,
+    ssc.event_type,
+    ssc.parser_name,
+    ssc.market_key,
+    ssc.asset_pair,
+    ssc.filter_config,
+    ssc.auth_secret_ref,
+    ssc.auth_config,
+    ssc.payload_ts_path,
+    ssc.payload_ts_unit,
+    ssc.poll_interval_ms,
+    ssc.enabled
+  FROM source_stream_configs ssc
+  WHERE ssc.operating_mode_profile = 'live'
+),
+desired_test_streams AS (
+  SELECT
+    ls.source_id,
+    ls.connector_mode,
+    'test'::text AS operating_mode_profile,
+    CONCAT(ls.stream_name, '__simlab_test') AS stream_name,
+    ls.subscription_key,
+    ls.event_type,
+    ls.parser_name,
+    ls.market_key,
+    ls.asset_pair,
+    ls.filter_config,
+    CASE
+      WHEN ls.connector_mode = 'websocket' THEN
+        jsonb_build_object('ws_endpoint', format('{simlab_mock_ws_base_url}/%s', ls.source_id))
+      WHEN ls.connector_mode IN ('rpc_logs', 'rpc_state') THEN
+        jsonb_build_object('rpc_url', format('{simlab_mock_rpc_base_url}/%s', ls.source_id))
+      WHEN ls.connector_mode = 'http_poll' THEN
+        jsonb_build_object('http_url', format('{simlab_mock_http_base_url}/%s', ls.source_id))
+      ELSE '{}'::jsonb
+    END AS connection_config_override,
+    ls.auth_secret_ref,
+    ls.auth_config,
+    ls.payload_ts_path,
+    ls.payload_ts_unit,
+    ls.poll_interval_ms,
+    ls.enabled,
+    'bootstrap:test-mode'::text AS created_by
+  FROM live_streams ls
+)
 UPDATE source_stream_configs existing
 SET connector_mode = dts.connector_mode,
     operating_mode_profile = dts.operating_mode_profile,
