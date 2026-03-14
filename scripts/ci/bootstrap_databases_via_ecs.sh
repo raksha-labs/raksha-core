@@ -87,6 +87,7 @@ desired_ecs_launch_mode() {
 SERVICE_NAME="raksha-${ENVIRONMENT}-${BOOTSTRAP_SERVICE_NAME}"
 TASK_COMMAND="${BOOTSTRAP_TASK_COMMAND:-/bin/sh /app/scripts/bootstrap_databases.sh}"
 DESIRED_LAUNCH_MODE="${DESIRED_LAUNCH_MODE:-$(desired_ecs_launch_mode)}"
+BOOTSTRAP_IMAGE_TAG="${BOOTSTRAP_IMAGE_TAG:-}"
 
 log "preparing database bootstrap task from ECS service ${SERVICE_NAME}"
 
@@ -125,7 +126,89 @@ cluster_capacity_providers=$(aws ecs describe-clusters \
   --output json)
 
 tmp_input=$(mktemp)
-trap 'rm -f "${tmp_input}"' EXIT
+tmp_task_definition_input=""
+trap 'rm -f "${tmp_input}" "${tmp_task_definition_input:-}"' EXIT
+
+if [[ -n "${BOOTSTRAP_IMAGE_TAG}" ]]; then
+  tmp_task_definition_input=$(mktemp)
+  python3 - "${task_definition_json}" "${BOOTSTRAP_SERVICE_NAME}" "${BOOTSTRAP_IMAGE_TAG}" > "${tmp_task_definition_input}" <<'PY'
+import json
+import sys
+
+task_definition = json.loads(sys.argv[1])
+container_name = sys.argv[2]
+image_tag = sys.argv[3]
+
+def retag_image(image: str, new_tag: str) -> str:
+    base = image.split("@", 1)[0]
+    last_slash = base.rfind("/")
+    last_colon = base.rfind(":")
+    if last_colon > last_slash:
+        base = base[:last_colon]
+    return f"{base}:{new_tag}"
+
+container_definitions = task_definition.get("containerDefinitions") or []
+updated = False
+for container in container_definitions:
+    if container.get("name") == container_name:
+        container["image"] = retag_image(container["image"], image_tag)
+        updated = True
+
+if not updated:
+    raise SystemExit(f"container '{container_name}' not found in task definition")
+
+payload = {}
+for key in (
+    "family",
+    "taskRoleArn",
+    "executionRoleArn",
+    "networkMode",
+    "containerDefinitions",
+    "volumes",
+    "placementConstraints",
+    "requiresCompatibilities",
+    "cpu",
+    "memory",
+    "tags",
+    "pidMode",
+    "ipcMode",
+    "proxyConfiguration",
+    "inferenceAccelerators",
+    "ephemeralStorage",
+    "runtimePlatform",
+):
+    value = task_definition.get(key)
+    if value not in (None, [], {}):
+        payload[key] = value
+
+print(json.dumps(payload))
+PY
+
+  registered_task_definition_json=$(aws ecs register-task-definition \
+    --cli-input-json "file://${tmp_task_definition_input}" \
+    --region "${AWS_REGION}" \
+    --output json)
+
+  task_definition_arn=$(python3 - "${registered_task_definition_json}" <<'PY'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+task_definition = document.get("taskDefinition") or {}
+print(task_definition.get("taskDefinitionArn", ""))
+PY
+)
+
+  [[ -n "${task_definition_arn}" ]] || fail "failed to register bootstrap task definition"
+
+  task_definition_json=$(aws ecs describe-task-definition \
+    --task-definition "${task_definition_arn}" \
+    --region "${AWS_REGION}" \
+    --query 'taskDefinition' \
+    --output json)
+
+  log "registered bootstrap task definition ${task_definition_arn} using image tag ${BOOTSTRAP_IMAGE_TAG}"
+fi
 
 python3 - "${service_json}" "${cluster_capacity_providers}" "${CLUSTER_NAME}" "${TASK_COMMAND}" "${BOOTSTRAP_SERVICE_NAME}" "${DESIRED_LAUNCH_MODE}" > "${tmp_input}" <<'PY'
 import json

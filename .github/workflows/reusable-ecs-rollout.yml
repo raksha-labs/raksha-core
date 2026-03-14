@@ -101,6 +101,7 @@ jobs:
         if: ${{ inputs.apply_infra }}
         env:
           AWS_REGION: ${{ inputs.aws_region }}
+          BOOTSTRAP_IMAGE_TAG: ${{ inputs.image_tag }}
           TF_BACKEND_BUCKET: ${{ secrets.tf_backend_bucket }}
           TF_BACKEND_DYNAMODB_TABLE: ${{ secrets.tf_backend_dynamodb_table }}
           TF_BACKEND_KMS_KEY_ID: ${{ secrets.tf_backend_kms_key_id }}
