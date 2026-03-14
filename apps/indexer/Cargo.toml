@@ -31,3 +31,4 @@ ethers = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
 hex = { workspace = true }
+reqwest = { workspace = true }
