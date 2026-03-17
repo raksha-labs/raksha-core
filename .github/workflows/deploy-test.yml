@@ -67,7 +67,7 @@ jobs:
 
   build-images:
     needs: detect-changes
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.image_tag == '' || github.event.inputs.force_build == 'true') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.force_build == 'true' || (github.event.inputs.image_tag == '' && needs.detect-changes.outputs.build_required == 'true')) }}
     uses: ./.github/workflows/reusable-image-build.yml
     with:
       aws_region: eu-west-1
