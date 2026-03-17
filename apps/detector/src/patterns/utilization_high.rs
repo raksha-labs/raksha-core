@@ -1187,3 +1187,139 @@ fn pick_higher(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn base_rule() -> UtilizationHighRule {
+        UtilizationHighRule {
+            rule_id: "util-default".to_string(),
+            protocol_id: "aave_v3".to_string(),
+            chain_slug: "base".to_string(),
+            scope: "protocol".to_string(),
+            market_id: None,
+            medium_threshold_pct: 90.0,
+            high_threshold_pct: 95.0,
+            critical_threshold_pct: 99.0,
+            resolution_medium_pct: 85.0,
+            resolution_high_pct: 88.0,
+            resolution_critical_pct: 90.0,
+            resolution_confirmation_blocks: 10,
+            min_tvl_floor_usd: 500_000.0,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn parser_supports_rule_list_shape() {
+        let rules = parse_utilization_rules(
+            &json!({
+                "rules": [{
+                    "rule_id": "util-market",
+                    "protocol_id": "morpho_blue",
+                    "chain_slug": "ethereum",
+                    "scope": "market",
+                    "market_id": "usdc",
+                    "medium_threshold_pct": 88,
+                    "high_threshold_pct": 93,
+                    "critical_threshold_pct": 97,
+                    "resolution_medium_pct": 83,
+                    "resolution_high_pct": 86,
+                    "resolution_critical_pct": 89,
+                    "resolution_confirmation_blocks": 6,
+                    "min_tvl_floor_usd": 750000,
+                    "enabled": true
+                }]
+            }),
+            "tenant-a",
+        );
+
+        assert_eq!(rules.len(), 1);
+        let rule = &rules[0];
+        assert_eq!(rule.rule_id, "util-market");
+        assert_eq!(rule.protocol_id, "morpho_blue");
+        assert_eq!(rule.chain_slug, "ethereum");
+        assert_eq!(rule.scope, "market");
+        assert_eq!(rule.market_id.as_deref(), Some("usdc"));
+        assert_eq!(rule.medium_threshold_pct, 88.0);
+        assert_eq!(rule.resolution_confirmation_blocks, 6);
+    }
+
+    #[tokio::test]
+    async fn reload_config_keeps_tenant_rules_isolated_for_same_subject() {
+        let mut pattern = UtilizationHighPattern::default();
+        let mut config_map = HashMap::new();
+
+        config_map.insert(
+            ("tenant-a".to_string(), PATTERN_ID.to_string()),
+            json!({
+                "rules": [{
+                    "rule_id": "util-a",
+                    "protocol_id": "aave_v3",
+                    "chain_slug": "base",
+                    "scope": "protocol",
+                    "medium_threshold_pct": 90,
+                    "high_threshold_pct": 95,
+                    "critical_threshold_pct": 99,
+                    "resolution_medium_pct": 85,
+                    "resolution_high_pct": 88,
+                    "resolution_critical_pct": 90,
+                    "resolution_confirmation_blocks": 10,
+                    "min_tvl_floor_usd": 500000,
+                    "enabled": true
+                }]
+            }),
+        );
+        config_map.insert(
+            ("tenant-b".to_string(), PATTERN_ID.to_string()),
+            json!({
+                "rules": [{
+                    "rule_id": "util-b",
+                    "protocol_id": "aave_v3",
+                    "chain_slug": "base",
+                    "scope": "protocol",
+                    "medium_threshold_pct": 97,
+                    "high_threshold_pct": 98,
+                    "critical_threshold_pct": 99.5,
+                    "resolution_medium_pct": 92,
+                    "resolution_high_pct": 94,
+                    "resolution_critical_pct": 95,
+                    "resolution_confirmation_blocks": 3,
+                    "min_tvl_floor_usd": 1000000,
+                    "enabled": true
+                }]
+            }),
+        );
+
+        pattern
+            .reload_config(&config_map)
+            .await
+            .expect("reload config");
+
+        let tenant_a = pattern.configs.get("tenant-a").expect("tenant-a rules");
+        let tenant_b = pattern.configs.get("tenant-b").expect("tenant-b rules");
+
+        assert_eq!(tenant_a[0].medium_threshold_pct, 90.0);
+        assert_eq!(tenant_b[0].medium_threshold_pct, 97.0);
+        assert_eq!(tenant_a[0].resolution_confirmation_blocks, 10);
+        assert_eq!(tenant_b[0].resolution_confirmation_blocks, 3);
+    }
+
+    #[test]
+    fn classify_severity_uses_tenant_specific_thresholds_independently() {
+        let tenant_a_rule = base_rule();
+
+        let mut tenant_b_rule = base_rule();
+        tenant_b_rule.medium_threshold_pct = 97.0;
+        tenant_b_rule.high_threshold_pct = 98.0;
+        tenant_b_rule.critical_threshold_pct = 99.5;
+
+        let tenant_a = classify_severity(91.0, &tenant_a_rule);
+        let tenant_b = classify_severity(91.0, &tenant_b_rule);
+
+        assert!(matches!(tenant_a, Some(Severity::Medium)));
+        assert!(tenant_b.is_none());
+    }
+}

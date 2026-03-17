@@ -11,7 +11,7 @@
 
 -- ─── Pattern Catalog ─────────────────────────────────────────────────────────
 
-INSERT INTO patterns (pattern_id, pattern_name, description, enabled)
+INSERT INTO pattern.patterns (pattern_id, pattern_name, description, enabled)
 VALUES
     ('dpeg', 'De-Peg Detection', 
      'Detects sustained divergence of a pegged asset from its peg target using a weighted price consensus across multiple market sources.', 
@@ -26,7 +26,7 @@ ON CONFLICT (pattern_id) DO NOTHING;
 
 -- ─── Pattern Default Configurations ─────────────────────────────────────────
 
-INSERT INTO pattern_configs (pattern_id, config)
+INSERT INTO pattern.pattern_configs (pattern_id, config)
 VALUES
     ('dpeg', '{}'::jsonb),
     ('flash_loan', '{
@@ -65,7 +65,7 @@ ON CONFLICT (pattern_id) DO NOTHING;
 
 -- ─── Tenant Pattern Configurations ──────────────────────────────────────────
 
-INSERT INTO tenant_pattern_configs (tenant_id, pattern_id, enabled, config)
+INSERT INTO pattern.tenant_pattern_configs (tenant_id, pattern_id, enabled, config)
 VALUES
     -- DPEG: Example policy array monitoring USDT, USDC, and DAI
     ('glider', 'dpeg', TRUE, '[
@@ -146,29 +146,29 @@ ON CONFLICT (tenant_id, pattern_id) DO NOTHING;
 
 -- ─── Default Tenant Policy ───────────────────────────────────────────────────
 
-INSERT INTO tenant_policies (tenant_id, severity_threshold, cooldown_sec, default_channels, protocol_watchlist)
+INSERT INTO pattern.tenant_policies (tenant_id, severity_threshold, cooldown_sec, default_channels, protocol_watchlist)
 VALUES
     ('glider', 'medium', 300, '{webhook}', '{}')
 ON CONFLICT (tenant_id) DO NOTHING;
 
 -- ─── Pattern Ingestion Bindings (backfill from tenant_data_sources) ─────────
 
-INSERT INTO tenant_pattern_source_bindings (tenant_id, pattern_id, source_id, enabled, binding_config)
+INSERT INTO pattern.tenant_pattern_source_bindings (tenant_id, pattern_id, source_id, enabled, binding_config)
 SELECT
   tpc.tenant_id,
   tpc.pattern_id,
   tds.source_id,
   tds.enabled,
   '{}'::jsonb
-FROM tenant_pattern_configs tpc
-JOIN tenant_data_sources tds
+FROM pattern.tenant_pattern_configs tpc
+JOIN catalog.tenant_data_sources tds
   ON tds.tenant_id = tpc.tenant_id
 WHERE tpc.enabled = TRUE
 ON CONFLICT (tenant_id, pattern_id, source_id) DO NOTHING;
 
 -- ─── Pattern Alerting Policies (backfill from tenant_policies) ──────────────
 
-INSERT INTO tenant_pattern_alert_policies (
+INSERT INTO pattern.tenant_pattern_alert_policies (
   tenant_id,
   pattern_id,
   severity_threshold,
@@ -183,15 +183,15 @@ SELECT
   tp.cooldown_sec,
   tp.default_channels,
   tp.route_overrides
-FROM tenant_pattern_configs tpc
-JOIN tenant_policies tp
+FROM pattern.tenant_pattern_configs tpc
+JOIN pattern.tenant_policies tp
   ON tp.tenant_id = tpc.tenant_id
 WHERE tpc.enabled = TRUE
 ON CONFLICT (tenant_id, pattern_id) DO NOTHING;
 
 -- ─── Pattern Notification Channel Overrides (default inherit) ────────────────
 
-INSERT INTO tenant_pattern_notification_channels (
+INSERT INTO pattern.tenant_pattern_notification_channels (
   tenant_id,
   pattern_id,
   channel,
@@ -206,7 +206,7 @@ SELECT
   FALSE,
   '{}'::jsonb,
   TRUE
-FROM tenant_pattern_configs tpc
+FROM pattern.tenant_pattern_configs tpc
 CROSS JOIN (
   VALUES ('webhook'), ('slack'), ('telegram'), ('discord')
 ) AS channel_value(channel)

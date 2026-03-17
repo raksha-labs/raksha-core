@@ -45,33 +45,3 @@ jobs:
       tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET }}
       tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
       tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
-
-  notify-platform:
-    needs: deploy
-    runs-on: ubuntu-latest
-    if: ${{ needs.deploy.result == 'success' }}
-    env:
-      PLATFORM_REPO_DISPATCH_TOKEN: ${{ secrets.PLATFORM_REPO_DISPATCH_TOKEN }}
-
-    steps:
-      - name: Skip platform dispatch when token is not configured
-        if: ${{ env.PLATFORM_REPO_DISPATCH_TOKEN == '' }}
-        run: echo "::warning title=Platform dispatch skipped::Secret PLATFORM_REPO_DISPATCH_TOKEN is not configured; core deploy completed without triggering raksha-platform."
-
-      - name: Trigger platform deployment dispatch
-        if: ${{ env.PLATFORM_REPO_DISPATCH_TOKEN != '' }}
-        env:
-          GH_TOKEN: ${{ env.PLATFORM_REPO_DISPATCH_TOKEN }}
-          TARGET_REPO: raksha-labs/raksha-platform
-          TARGET_ENV: ${{ inputs.target_environment }}
-          CORE_IMAGE_TAG: ${{ inputs.image_tag }}
-          CORE_CONTRACT_VERSION: ${{ needs.deploy.outputs.core_contract_version }}
-          TRIGGER_SHA: ${{ github.sha }}
-        run: |
-          payload=$(printf '{"event_type":"core_release_ready","client_payload":{"environment":"%s","core_image_tag":"%s","core_contract_version":"%s","trigger_sha":"%s"}}' "$TARGET_ENV" "$CORE_IMAGE_TAG" "$CORE_CONTRACT_VERSION" "$TRIGGER_SHA")
-
-          curl -sS -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            https://api.github.com/repos/${TARGET_REPO}/dispatches \
-            -d "${payload}"

@@ -107,6 +107,23 @@ pub struct DpegToggles {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpegConfidenceWeights {
+    pub source_agreement: f64,
+    pub oracle_confirmation: f64,
+    pub volume_confirmation: f64,
+}
+
+impl Default for DpegConfidenceWeights {
+    fn default() -> Self {
+        Self {
+            source_agreement: 60.0,
+            oracle_confirmation: 25.0,
+            volume_confirmation: 15.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DpegSourceOverride {
     pub source_id: String,
     pub weight: f64,
@@ -143,6 +160,10 @@ pub struct DpegPolicy {
     pub source_filter: DpegSourceFilter,
     #[serde(default)]
     pub toggles: DpegToggles,
+    #[serde(default)]
+    pub confidence_weights: DpegConfidenceWeights,
+    #[serde(default = "default_min_confidence_to_fire")]
+    pub min_confidence_to_fire: f64,
     #[serde(default, deserialize_with = "deserialize_source_overrides")]
     pub source_overrides: HashMap<String, DpegSourceOverride>,
 }
@@ -161,6 +182,10 @@ fn default_deescalation_blocks() -> i64 {
 
 fn default_resolution_blocks() -> i64 {
     30
+}
+
+fn default_min_confidence_to_fire() -> f64 {
+    50.0
 }
 
 fn deserialize_source_overrides<'de, D>(
@@ -222,6 +247,22 @@ impl DpegPolicy {
         }
         if self.resolution_blocks <= 0 {
             return Err(anyhow!("resolution_blocks must be > 0"));
+        }
+        if !(0.0..=100.0).contains(&self.min_confidence_to_fire) {
+            return Err(anyhow!("min_confidence_to_fire must be between 0 and 100"));
+        }
+        if self.confidence_weights.source_agreement < 0.0
+            || self.confidence_weights.oracle_confirmation < 0.0
+            || self.confidence_weights.volume_confirmation < 0.0
+        {
+            return Err(anyhow!("confidence_weights must be non-negative"));
+        }
+        if self.confidence_weights.source_agreement
+            + self.confidence_weights.oracle_confirmation
+            + self.confidence_weights.volume_confirmation
+            <= 0.0
+        {
+            return Err(anyhow!("confidence_weights total must be > 0"));
         }
         Ok(())
     }
@@ -333,7 +374,13 @@ pub struct DpegPattern {
 
 impl DpegPattern {
     fn parse_policies(tenant_id: &str, config: &Value) -> Vec<DpegPolicy> {
-        let entries: Vec<DpegPolicy> = match serde_json::from_value(config.clone()) {
+        let config_value = config
+            .as_object()
+            .and_then(|object| object.get("policies"))
+            .cloned()
+            .unwrap_or_else(|| config.clone());
+
+        let entries: Vec<DpegPolicy> = match serde_json::from_value(config_value) {
             Ok(value) => value,
             Err(err) => {
                 common::log_error!(
@@ -751,9 +798,15 @@ fn evaluate_policy(
         oracle_confirmed,
         policy.peg_target,
     );
+    let confidence_total = confidence_breakdown
+        .get("total")
+        .copied()
+        .unwrap_or_default();
     let threshold_breach = divergence_pct >= trigger_floor_pct && severity.is_some();
-    let breach_active =
-        quorum_met && threshold_breach && (!policy.toggles.oracle_confirmation || oracle_confirmed);
+    let breach_active = quorum_met
+        && threshold_breach
+        && (!policy.toggles.oracle_confirmation || oracle_confirmed)
+        && confidence_total >= policy.min_confidence_to_fire;
 
     let mut next_state = current_state.clone();
     let mut should_emit_alert = false;
@@ -961,14 +1014,14 @@ fn compute_confidence_breakdown(
         50.0
     };
     let volume_score = 50.0;
-    let source_weight: f64 = 0.7;
+    let source_weight: f64 = policy.confidence_weights.source_agreement.max(0.0);
     let oracle_weight: f64 = if policy.toggles.oracle_confirmation {
-        0.2
+        policy.confidence_weights.oracle_confirmation.max(0.0)
     } else {
         0.0
     };
     let volume_weight: f64 = if policy.toggles.volume_confirmation {
-        0.1
+        policy.confidence_weights.volume_confirmation.max(0.0)
     } else {
         0.0
     };
@@ -1215,6 +1268,8 @@ mod tests {
             resolution_blocks: 30,
             source_filter: DpegSourceFilter::default(),
             toggles: DpegToggles::default(),
+            confidence_weights: DpegConfidenceWeights::default(),
+            min_confidence_to_fire: 50.0,
             source_overrides: HashMap::new(),
         }
     }
@@ -1326,6 +1381,110 @@ mod tests {
 
         let classification = pattern.classify_context(&policy, &policy.tenant_id, None, now);
         assert!(matches!(classification, ContextClassification::Isolated));
+    }
+
+    #[tokio::test]
+    async fn reload_config_keeps_tenant_policies_isolated_for_same_market() {
+        let mut pattern = DpegPattern::default();
+        let mut config_map = HashMap::new();
+
+        config_map.insert(
+            ("tenant-a".to_string(), PATTERN_ID.to_string()),
+            serde_json::json!({
+                "policies": [{
+                    "market_key": "USDC/USD",
+                    "peg_target": 1.0,
+                    "min_sources": 1,
+                    "quorum_pct": 0.0,
+                    "sustained_window_ms": 1,
+                    "cooldown_sec": 0,
+                    "stale_timeout_ms": 60000,
+                    "severity_bands": { "medium": 0.5, "high": 1.0, "critical": 5.0 }
+                }]
+            }),
+        );
+        config_map.insert(
+            ("tenant-b".to_string(), PATTERN_ID.to_string()),
+            serde_json::json!({
+                "policies": [{
+                    "market_key": "USDC/USD",
+                    "peg_target": 0.98,
+                    "min_sources": 3,
+                    "quorum_pct": 0.8,
+                    "sustained_window_ms": 30000,
+                    "cooldown_sec": 600,
+                    "stale_timeout_ms": 120000,
+                    "severity_bands": { "medium": 2.0, "high": 4.0, "critical": 8.0 }
+                }]
+            }),
+        );
+
+        pattern
+            .reload_config(&config_map)
+            .await
+            .expect("reload config");
+
+        let tenant_a = pattern
+            .policies
+            .get(&(String::from("tenant-a"), String::from("USDC/USD")))
+            .expect("tenant-a policy");
+        let tenant_b = pattern
+            .policies
+            .get(&(String::from("tenant-b"), String::from("USDC/USD")))
+            .expect("tenant-b policy");
+
+        assert_eq!(tenant_a.peg_target, 1.0);
+        assert_eq!(tenant_a.min_sources, 1);
+        assert_eq!(tenant_b.peg_target, 0.98);
+        assert_eq!(tenant_b.min_sources, 3);
+    }
+
+    #[test]
+    fn evaluate_policy_uses_tenant_specific_thresholds_independently() {
+        let now = Utc::now();
+        let quotes = vec![quote("cex-a", "cex", 0.99, now)];
+
+        let mut tenant_a_policy = base_policy();
+        tenant_a_policy.tenant_id = "tenant-a".to_string();
+        tenant_a_policy.severity_bands.medium = 0.5;
+        tenant_a_policy.severity_bands_isolated = Some(DpegSeverityBands {
+            medium: 0.5,
+            high: 1.0,
+            critical: 5.0,
+        });
+        tenant_a_policy.min_confidence_to_fire = 0.0;
+
+        let mut tenant_b_policy = base_policy();
+        tenant_b_policy.tenant_id = "tenant-b".to_string();
+        tenant_b_policy.severity_bands.medium = 2.0;
+        tenant_b_policy.severity_bands_isolated = Some(DpegSeverityBands {
+            medium: 2.0,
+            high: 4.0,
+            critical: 8.0,
+        });
+        tenant_b_policy.min_confidence_to_fire = 0.0;
+
+        let tenant_a = evaluate_policy(
+            &tenant_a_policy,
+            &quotes,
+            &DpegAlertState::default(),
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("tenant-a evaluation");
+        let tenant_b = evaluate_policy(
+            &tenant_b_policy,
+            &quotes,
+            &DpegAlertState::default(),
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("tenant-b evaluation");
+
+        assert!(tenant_a.snapshot.severity.is_some());
+        assert!(tenant_a.snapshot.breach_active);
+        assert!(tenant_b.snapshot.severity.is_none());
+        assert!(!tenant_b.snapshot.breach_active);
     }
 
     #[test]

@@ -1397,4 +1397,121 @@ mod tests {
         assert_eq!(rule.velocity_critical_minutes, 2);
         assert_eq!(rule.concurrent_window_minutes, 10);
     }
+
+    #[tokio::test]
+    async fn reload_config_keeps_tenant_rules_isolated_for_same_subject() {
+        let mut pattern = TvlDropPattern::default();
+        let mut config_map = HashMap::new();
+
+        config_map.insert(
+            ("tenant-a".to_string(), PATTERN_ID.to_string()),
+            json!({
+                "rules": [{
+                    "rule_id": "tvl-a",
+                    "scope": {
+                        "chain_slug": "base",
+                        "protocol_id": "aave_v3",
+                        "market_id": "all"
+                    },
+                    "thresholds": {
+                        "fast_drop_pct": 10,
+                        "fast_window_sec": 300,
+                        "slow_drop_pct": 20,
+                        "slow_window_sec": 3600,
+                        "velocity_critical_pct": 5,
+                        "velocity_window_sec": 120
+                    },
+                    "contagion": {
+                        "enabled": true,
+                        "overlap_window_sec": 300
+                    },
+                    "min_tvl_floor_usd": 1000000,
+                    "enabled": true
+                }]
+            }),
+        );
+        config_map.insert(
+            ("tenant-b".to_string(), PATTERN_ID.to_string()),
+            json!({
+                "rules": [{
+                    "rule_id": "tvl-b",
+                    "scope": {
+                        "chain_slug": "base",
+                        "protocol_id": "aave_v3",
+                        "market_id": "all"
+                    },
+                    "thresholds": {
+                        "fast_drop_pct": 35,
+                        "fast_window_sec": 300,
+                        "slow_drop_pct": 50,
+                        "slow_window_sec": 3600,
+                        "velocity_critical_pct": 25,
+                        "velocity_window_sec": 120
+                    },
+                    "contagion": {
+                        "enabled": false,
+                        "overlap_window_sec": 900
+                    },
+                    "min_tvl_floor_usd": 2000000,
+                    "enabled": true
+                }]
+            }),
+        );
+
+        pattern
+            .reload_config(&config_map)
+            .await
+            .expect("reload config");
+
+        let tenant_a = pattern.configs.get("tenant-a").expect("tenant-a rules");
+        let tenant_b = pattern.configs.get("tenant-b").expect("tenant-b rules");
+
+        assert_eq!(tenant_a.len(), 1);
+        assert_eq!(tenant_b.len(), 1);
+        assert_eq!(tenant_a[0].fast_drop_pct, 10.0);
+        assert_eq!(tenant_b[0].fast_drop_pct, 35.0);
+        assert!(tenant_a[0].contagion_enabled);
+        assert!(!tenant_b[0].contagion_enabled);
+    }
+
+    #[test]
+    fn process_state_sample_uses_tenant_specific_thresholds_independently() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(4), 100_000_000.0));
+        let mut tenant_a_state = state.clone();
+        let mut tenant_b_state = state;
+
+        let event = TvlStateEvent {
+            protocol_id: "aave_v3".to_string(),
+            chain_slug: "base".to_string(),
+            market_id: None,
+            tvl_usd: 80_000_000.0,
+            block_number: 1,
+            tx_hash: None,
+        };
+
+        let mut tenant_a_rule = base_rule();
+        tenant_a_rule.fast_drop_pct = 10.0;
+        tenant_a_rule.slow_drop_pct = 20.0;
+        tenant_a_rule.velocity_critical_pct = 25.0;
+
+        let mut tenant_b_rule = base_rule();
+        tenant_b_rule.fast_drop_pct = 30.0;
+        tenant_b_rule.slow_drop_pct = 45.0;
+        tenant_b_rule.velocity_critical_pct = 25.0;
+
+        let pattern = TvlDropPattern::default();
+        let tenant_a =
+            pattern.process_state_sample(&tenant_a_rule, &mut tenant_a_state, &event, now);
+        let tenant_b =
+            pattern.process_state_sample(&tenant_b_rule, &mut tenant_b_state, &event, now);
+
+        assert!(tenant_a.base_severity.is_some());
+        assert!(tenant_a.selected_drop_pct >= tenant_a_rule.fast_drop_pct);
+        assert!(tenant_b.base_severity.is_none());
+        assert!(tenant_b.selected_drop_pct < tenant_b_rule.fast_drop_pct);
+    }
 }

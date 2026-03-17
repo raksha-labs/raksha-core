@@ -16,8 +16,7 @@ locals {
     for svc in local.service_catalog_raw.services :
     svc.service_name => svc
   }
-  secret_prefix                    = "raksha/${var.environment}"
-  service_discovery_namespace_name = "raksha-${var.environment}.local"
+  secret_prefix = "raksha/${var.environment}"
   # Managed RDS/Redis require private subnets in at least two AZs.
   network_single_az = !var.enable_managed_data
   network_az_count  = var.enable_managed_data ? max(var.az_count, 2) : 1
@@ -112,9 +111,7 @@ locals {
 
   service_static_env_overrides = {
     indexer = {
-      SIMLAB_MOCK_WS_BASE_URL   = "ws://simlab-api-service.${local.service_discovery_namespace_name}:8000/api/simulation/mock/ws"
-      SIMLAB_MOCK_RPC_BASE_URL  = "ws://simlab-api-service.${local.service_discovery_namespace_name}:8000/api/simulation/mock/rpc"
-      SIMLAB_MOCK_HTTP_BASE_URL = "http://simlab-api-service.${local.service_discovery_namespace_name}:8000/api/simulation/mock/http"
+      INDEXER_ALLOW_MOCK_FALLBACK = "false"
     }
     orchestrator = {
       ALERT_FALLBACK_TENANT_ID = "glider"
@@ -155,8 +152,8 @@ locals {
 }
 
 locals {
-  # streams_enabled = true sets desired_count = 1 for the full data pipeline.
-  # service_desired_counts can override individual services on top of this.
+  # Acceptance test keeps the real pipeline on by default.
+  # service_desired_counts can still override individual services on top of this.
   streams_desired = var.streams_enabled ? {
     indexer          = 1
     detector         = 1

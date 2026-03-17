@@ -3,7 +3,7 @@
 -- These are example sources. Real deployments should configure their own
 -- via the admin API or by inserting rows directly with actual API keys.
 
-INSERT INTO data_sources (
+INSERT INTO catalog.data_sources (
   source_id,
   source_type,
   source_name,
@@ -73,7 +73,7 @@ ON CONFLICT (source_id) DO NOTHING;
 -- Associates all default sources and patterns with the built-in tenant.
 -- Adjust or remove as appropriate for your deployment.
 
-INSERT INTO tenant_data_sources (tenant_id, source_id, enabled, override_config)
+INSERT INTO catalog.tenant_data_sources (tenant_id, source_id, enabled, override_config)
 VALUES
     ('glider', 'binance-global', TRUE, '{
       "pair_mappings": [
@@ -171,7 +171,7 @@ WITH desired_stream_configs AS (
     created_by
   )
 )
-INSERT INTO source_stream_configs (
+INSERT INTO catalog.source_stream_configs (
   source_id,
   connector_mode,
   stream_name,
@@ -209,12 +209,12 @@ SELECT
 FROM desired_stream_configs ds
 WHERE EXISTS (
   SELECT 1
-  FROM data_sources src
+  FROM catalog.data_sources src
   WHERE src.source_id = ds.source_id
 )
 AND NOT EXISTS (
   SELECT 1
-  FROM source_stream_configs ssc
+  FROM catalog.source_stream_configs ssc
   WHERE ssc.source_id = ds.source_id
     AND ssc.stream_name = ds.stream_name
     AND COALESCE(ssc.asset_pair, '') = COALESCE(ds.asset_pair, '')
@@ -242,7 +242,7 @@ WITH live_streams AS (
     ssc.payload_ts_unit,
     ssc.poll_interval_ms,
     ssc.enabled
-  FROM source_stream_configs ssc
+  FROM catalog.source_stream_configs ssc
   WHERE ssc.operating_mode_profile = 'live'
 ),
 desired_test_streams AS (
@@ -275,7 +275,7 @@ desired_test_streams AS (
     'bootstrap:test-mode'::text AS created_by
   FROM live_streams ls
 )
-INSERT INTO source_stream_configs (
+INSERT INTO catalog.source_stream_configs (
   source_id,
   connector_mode,
   operating_mode_profile,
@@ -317,7 +317,7 @@ SELECT
 FROM desired_test_streams dts
 WHERE NOT EXISTS (
   SELECT 1
-  FROM source_stream_configs existing
+  FROM catalog.source_stream_configs existing
   WHERE existing.source_id = dts.source_id
     AND existing.stream_name = dts.stream_name
     AND COALESCE(existing.asset_pair, '') = COALESCE(dts.asset_pair, '')
@@ -341,7 +341,7 @@ WITH live_streams AS (
     ssc.payload_ts_unit,
     ssc.poll_interval_ms,
     ssc.enabled
-  FROM source_stream_configs ssc
+  FROM catalog.source_stream_configs ssc
   WHERE ssc.operating_mode_profile = 'live'
 ),
 desired_test_streams AS (
@@ -374,7 +374,7 @@ desired_test_streams AS (
     'bootstrap:test-mode'::text AS created_by
   FROM live_streams ls
 )
-UPDATE source_stream_configs existing
+UPDATE catalog.source_stream_configs existing
 SET connector_mode = dts.connector_mode,
     operating_mode_profile = dts.operating_mode_profile,
     event_type = dts.event_type,
@@ -443,7 +443,7 @@ SELECT
   'glider',
   TRUE,
   'glider'
-FROM source_stream_configs ssc
+FROM catalog.source_stream_configs ssc
 JOIN desired_stream_refs ds
   ON ds.source_id = ssc.source_id
  AND ds.stream_name = ssc.stream_name
@@ -459,7 +459,7 @@ WITH live_targets AS (
     ssc.subscription_key,
     ssc.asset_pair
   FROM source_stream_tenant_targets stt
-  JOIN source_stream_configs ssc
+  JOIN catalog.source_stream_configs ssc
     ON ssc.stream_config_id = stt.stream_config_id
   WHERE ssc.operating_mode_profile = 'live'
 ),
@@ -468,7 +468,7 @@ mapped_test_targets AS (
     lt.tenant_id,
     ssc_test.stream_config_id
   FROM live_targets lt
-  JOIN source_stream_configs ssc_test
+  JOIN catalog.source_stream_configs ssc_test
     ON ssc_test.source_id = lt.source_id
    AND ssc_test.operating_mode_profile = 'test'
    AND ssc_test.stream_name = CONCAT(lt.stream_name, '__simlab_test')
@@ -518,7 +518,7 @@ SET enabled = CASE
     END,
     updated_by = 'bootstrap:test-mode',
     updated_at = NOW()
-FROM source_stream_configs ssc
+FROM catalog.source_stream_configs ssc
 WHERE stt.stream_config_id = ssc.stream_config_id
   AND stt.tenant_id = 'glider'
   AND EXISTS (

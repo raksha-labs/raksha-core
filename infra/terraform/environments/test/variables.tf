@@ -47,9 +47,9 @@ variable "service_desired_counts" {
 }
 
 variable "streams_enabled" {
-  description = "Enable stream-processing services (indexer, detector, orchestrator, finality, history-worker). Off by default in test — flip to true when testing the ingestion/detection pipeline."
+  description = "Enable stream-processing services (indexer, detector, orchestrator, finality, history-worker). Acceptance test environments run the real ingestion/detection pipeline by default."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "service_cpu_memory" {

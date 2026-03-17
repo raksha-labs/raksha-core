@@ -41,6 +41,7 @@ const REDIS_STARTUP_RETRY_ATTEMPTS: usize = 3;
 const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 const INGESTION_CHAIN_LOCK_NAMESPACE: i32 = 42_017;
 const ZERO_BLOCK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+const INDEXER_ALLOW_MOCK_FALLBACK_ENV: &str = "INDEXER_ALLOW_MOCK_FALLBACK";
 
 #[derive(Debug)]
 struct DiscoveredChainConfig {
@@ -1152,6 +1153,10 @@ async fn build_chain_adapter_from_rules(
 
     let ws_urls = resolve_chain_ws_urls(&chain);
     if ws_urls.is_empty() {
+        require_mock_fallback_allowed(
+            &chain_slug,
+            "no chain websocket endpoints configured from rules",
+        )?;
         info!(
             chain_slug = %chain_slug,
             ws_env_names = ?chain.ws_env_names(),
@@ -1201,7 +1206,7 @@ async fn build_chain_adapter_from_rules(
                 adapter: Box::new(adapter),
             }))
         }
-        Err(err) => {
+        Err(err) if mock_fallback_allowed() => {
             common::log_error!(
                 warn,
                 err,
@@ -1221,6 +1226,11 @@ async fn build_chain_adapter_from_rules(
                 ),
             }))
         }
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to init EVM live adapter for {chain_slug} and mock fallback is disabled"
+            )
+        }),
     }
 }
 
@@ -1267,7 +1277,7 @@ async fn build_legacy_env_fallback_adapters(
                     .with_filter_chunk_size(DEFAULT_FILTER_CHUNK_SIZE)
                     .with_confirmation_depth(eth_confirmation_depth),
             ),
-            Err(err) => {
+            Err(err) if mock_fallback_allowed() => {
                 common::log_error!(
                     warn,
                     err,
@@ -1285,8 +1295,16 @@ async fn build_legacy_env_fallback_adapters(
                     .with_confirmation_depth(eth_confirmation_depth),
                 )
             }
+            Err(err) => {
+                return Err(err)
+                    .context("failed to init ETH live adapter and mock fallback is disabled");
+            }
         }
     } else {
+        require_mock_fallback_allowed(
+            "ethereum",
+            "ETH_WS_URLS/ETH_WS_URL are not configured for the legacy adapter path",
+        )?;
         Box::new(
             EvmMockAdapter::single_protocol(
                 "ethereum",
@@ -1320,6 +1338,10 @@ async fn build_legacy_env_fallback_adapters(
         };
 
         if oracle_addresses.is_empty() {
+            require_mock_fallback_allowed(
+                "base",
+                "BASE_ORACLE_ADDRESSES is empty for the legacy adapter path",
+            )?;
             Box::new(
                 EvmMockAdapter::single_protocol(
                     "base",
@@ -1358,7 +1380,7 @@ async fn build_legacy_env_fallback_adapters(
                         .with_filter_chunk_size(DEFAULT_FILTER_CHUNK_SIZE)
                         .with_confirmation_depth(base_confirmation_depth),
                 ),
-                Err(err) => {
+                Err(err) if mock_fallback_allowed() => {
                     common::log_error!(
                         warn,
                         err,
@@ -1376,9 +1398,17 @@ async fn build_legacy_env_fallback_adapters(
                         .with_confirmation_depth(base_confirmation_depth),
                     )
                 }
+                Err(err) => {
+                    return Err(err)
+                        .context("failed to init Base live adapter and mock fallback is disabled");
+                }
             }
         }
     } else {
+        require_mock_fallback_allowed(
+            "base",
+            "BASE_WS_URLS/BASE_WS_URL are not configured for the legacy adapter path",
+        )?;
         Box::new(
             EvmMockAdapter::single_protocol(
                 "base",
@@ -1410,6 +1440,58 @@ fn default_mock_prices(chain_slug: &str) -> (f64, f64) {
         "base" => (3010.0, 3000.0),
         _ => (100.0, 99.0),
     }
+}
+
+fn mock_fallback_allowed() -> bool {
+    match std::env::var(INDEXER_ALLOW_MOCK_FALLBACK_ENV) {
+        Ok(value) => match parse_bool_env(&value) {
+            Some(parsed) => parsed,
+            None => {
+                warn!(
+                    env_var = INDEXER_ALLOW_MOCK_FALLBACK_ENV,
+                    env_value = %value,
+                    default_allow = default_mock_fallback_allowed(),
+                    "invalid bool value for mock fallback setting; using environment default",
+                );
+                default_mock_fallback_allowed()
+            }
+        },
+        Err(_) => default_mock_fallback_allowed(),
+    }
+}
+
+fn default_mock_fallback_allowed() -> bool {
+    match std::env::var("ENVIRONMENT")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+    {
+        Some(environment) => matches!(environment.as_str(), "local" | "dev" | "development"),
+        None => true,
+    }
+}
+
+fn parse_bool_env(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn require_mock_fallback_allowed(chain_slug: &str, reason: &str) -> Result<()> {
+    if mock_fallback_allowed() {
+        warn!(
+            chain_slug = %chain_slug,
+            reason,
+            env_var = INDEXER_ALLOW_MOCK_FALLBACK_ENV,
+            "using mock adapter fallback",
+        );
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "{reason}; set {INDEXER_ALLOW_MOCK_FALLBACK_ENV}=true to permit synthetic fallback for {chain_slug}"
+    ))
 }
 
 fn resolve_chain_ws_urls(chain: &EvmChainConfig) -> Vec<String> {

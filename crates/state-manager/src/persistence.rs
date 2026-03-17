@@ -175,44 +175,45 @@ impl PostgresRepository {
 
     async fn init_schema(&self) -> Result<()> {
         let required_tables = [
-            "detections",
-            "alerts",
-            "alert_lifecycle_events",
-            "incidents",
-            "incident_events",
-            "incident_context_snapshots",
-            "alert_delivery_attempts",
-            "usage_events",
-            "data_sources",
-            "tenant_data_sources",
-            "source_stream_configs",
-            "source_stream_tenant_targets",
-            "patterns",
-            "pattern_configs",
-            "tenant_pattern_configs",
-            "tenant_pattern_source_bindings",
-            "tenant_pattern_required_assets",
-            "source_required_pairs",
-            "tenant_pattern_alert_policies",
-            "tenant_pattern_notification_channels",
-            "pattern_state",
-            "pattern_snapshots",
-            "data_source_health",
-            "ingest_operational_events",
+            "detection.detections",
+            "detection.alerts",
+            "detection.alert_lifecycle_events",
+            "detection.incidents",
+            "detection.incident_events",
+            "detection.incident_context_snapshots",
+            "detection.alert_delivery_attempts",
+            "detection.usage_events",
+            "catalog.data_sources",
+            "catalog.tenant_data_sources",
+            "catalog.source_stream_configs",
+            "catalog.source_stream_tenant_targets",
+            "pattern.patterns",
+            "pattern.pattern_configs",
+            "pattern.tenant_pattern_configs",
+            "pattern.tenant_pattern_source_bindings",
+            "pattern.tenant_pattern_required_assets",
+            "catalog.source_required_pairs",
+            "pattern.tenant_pattern_alert_policies",
+            "pattern.tenant_pattern_notification_channels",
+            "pattern.pattern_state",
+            "pattern.pattern_snapshots",
+            "catalog.data_source_health",
+            "catalog.ingest_operational_events",
         ];
 
         let mut missing_tables = Vec::new();
         for table in required_tables {
+            let (table_schema, table_name) = table.split_once('.').unwrap_or(("public", table));
             let exists = self
                 .client
                 .query_opt(
                     r#"
                     SELECT 1
                     FROM information_schema.tables
-                    WHERE table_schema = 'public'
-                      AND table_name = $1
+                    WHERE table_schema = $1
+                      AND table_name = $2
                     "#,
-                    &[&table],
+                    &[&table_schema, &table_name],
                 )
                 .await?;
             if exists.is_none() {
@@ -349,8 +350,8 @@ impl PostgresRepository {
                 SELECT tds.tenant_id, ds.source_id, ds.source_type, ds.source_name,
                        COALESCE(tds.override_config, ds.connection_config) AS connection_config,
                        ds.filters, ds.enabled AND tds.enabled AS enabled
-                FROM tenant_data_sources tds
-                JOIN data_sources ds ON ds.source_id = tds.source_id
+                FROM catalog.tenant_data_sources tds
+                JOIN catalog.data_sources ds ON ds.source_id = tds.source_id
                 WHERE ds.enabled = TRUE AND tds.enabled = TRUE
                 ORDER BY tds.tenant_id, ds.source_id
                 "#,
@@ -384,8 +385,8 @@ impl PostgresRepository {
             .query(
                 r#"
                 SELECT tpc.tenant_id, tpc.pattern_id, tpc.config
-                FROM tenant_pattern_configs tpc
-                JOIN patterns p ON p.pattern_id = tpc.pattern_id
+                FROM pattern.tenant_pattern_configs tpc
+                JOIN pattern.patterns p ON p.pattern_id = tpc.pattern_id
                 WHERE p.enabled = TRUE AND tpc.enabled = TRUE
                 ORDER BY tpc.tenant_id, tpc.pattern_id
                 "#,
@@ -458,8 +459,8 @@ impl PostgresRepository {
                     ssc.payload_ts_path,
                     ssc.payload_ts_unit,
                     ssc.poll_interval_ms
-                FROM source_stream_configs ssc
-                JOIN data_sources ds
+                FROM catalog.source_stream_configs ssc
+                JOIN catalog.data_sources ds
                   ON ds.source_id = ssc.source_id
                 WHERE ds.enabled = TRUE
                   AND ssc.enabled = TRUE
@@ -514,7 +515,7 @@ impl PostgresRepository {
             .query(
                 r#"
                 SELECT tenant_id
-                FROM source_stream_tenant_targets
+                FROM catalog.source_stream_tenant_targets
                 WHERE stream_config_id::text = $1
                   AND enabled = TRUE
                 ORDER BY tenant_id
@@ -550,7 +551,7 @@ impl PostgresRepository {
             .client
             .execute(
                 r#"
-                INSERT INTO ingest_operational_events (
+                INSERT INTO catalog.ingest_operational_events (
                     stream_id,
                     source_id,
                     source_type,
@@ -640,7 +641,7 @@ impl PostgresRepository {
             .client
             .execute(
                 r#"
-                INSERT INTO ingest_operational_events (
+                INSERT INTO catalog.ingest_operational_events (
                     stream_id,
                     source_id,
                     source_type,
@@ -733,7 +734,7 @@ impl PostgresRepository {
             .client
             .execute(
                 r#"
-                DELETE FROM ingest_operational_events
+                DELETE FROM catalog.ingest_operational_events
                 WHERE event_type = ANY($1)
                   AND observed_at < NOW() - ($2::BIGINT * INTERVAL '1 second')
                 "#,
@@ -764,7 +765,7 @@ impl PostgresRepository {
             .query_opt(
                 r#"
                 SELECT price
-                FROM ingest_operational_events
+                FROM catalog.ingest_operational_events
                 WHERE market_key = $1
                   AND price IS NOT NULL
                   AND parse_status IN ('parsed', 'partial')
@@ -793,7 +794,7 @@ impl PostgresRepository {
                     source_id,
                     price,
                     observed_at
-                FROM ingest_operational_events
+                FROM catalog.ingest_operational_events
                 WHERE market_key = $1
                   AND price IS NOT NULL
                   AND parse_status IN ('parsed', 'partial')
@@ -860,7 +861,7 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO ingest_operational_events (
+                INSERT INTO catalog.ingest_operational_events (
                     stream_id,
                     source_id,
                     source_type,
@@ -947,7 +948,7 @@ impl PostgresRepository {
             .query_opt(
                 r#"
                 SELECT 1
-                FROM source_required_pairs
+                FROM catalog.source_required_pairs
                 WHERE source_id = $1
                   AND market_key = $2
                 LIMIT 1
@@ -959,7 +960,9 @@ impl PostgresRepository {
             Ok(value) => value,
             Err(error) => {
                 if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
-                    warn!("source_required_pairs table not found; skipping market-key filtering");
+                    warn!(
+                        "catalog.source_required_pairs table not found; skipping market-key filtering"
+                    );
                     return Ok(true);
                 }
                 return Err(error.into());
@@ -975,11 +978,11 @@ impl PostgresRepository {
             .query_opt(
                 r#"
                 SELECT 1
-                FROM data_sources ds
-                JOIN source_stream_configs ssc
+                FROM catalog.data_sources ds
+                JOIN catalog.source_stream_configs ssc
                   ON ssc.source_id = ds.source_id
                  AND ssc.enabled = TRUE
-                JOIN source_stream_tenant_targets stt
+                JOIN catalog.source_stream_tenant_targets stt
                   ON stt.stream_config_id = ssc.stream_config_id
                  AND stt.enabled = TRUE
                 WHERE ds.source_id = $1
@@ -1050,7 +1053,7 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO pattern_snapshots
+                INSERT INTO pattern.pattern_snapshots
                     (tenant_id, pattern_id, snapshot_key, data, score, severity, observed_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                 "#,
