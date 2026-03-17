@@ -358,7 +358,7 @@ impl TvlDropPattern {
         evaluation: &TvlEvaluation,
         sample: &TvlStateEvent,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id, simulation_operating_mode) =
+        let (is_simulated, simulation_run_id, simulation_operating_mode, simulation_sink_mode) =
             simulation_metadata_from_event(event);
         let confidence_breakdown = HashMap::from([
             ("fast_drop_pct".to_string(), evaluation.fast_drop_pct),
@@ -465,6 +465,7 @@ impl TvlDropPattern {
             is_simulated,
             simulation_run_id,
             simulation_operating_mode,
+            simulation_sink_mode,
             created_at: context.now,
         }
     }
@@ -475,7 +476,7 @@ impl TvlDropPattern {
         context: &PauseDetectionContext<'_>,
         pause: &TvlPauseEvent,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id, simulation_operating_mode) =
+        let (is_simulated, simulation_run_id, simulation_operating_mode, simulation_sink_mode) =
             simulation_metadata_from_event(event);
         let state_label = if pause.paused { "paused" } else { "unpaused" };
         let mut oracle_context = HashMap::new();
@@ -541,6 +542,7 @@ impl TvlDropPattern {
             is_simulated,
             simulation_run_id,
             simulation_operating_mode,
+            simulation_sink_mode,
             created_at: context.now,
         }
     }
@@ -575,7 +577,7 @@ impl DetectionPattern for TvlDropPattern {
         now: DateTime<Utc>,
         repo: &PostgresRepository,
     ) -> Result<Option<DetectionResult>> {
-        let (_, simulation_run_id, _) = simulation_metadata_from_event(event);
+        let (_, simulation_run_id, _, _) = simulation_metadata_from_event(event);
         let Some(rules) = self
             .effective_rules(&event.tenant_id, simulation_run_id.as_deref(), repo)
             .await?

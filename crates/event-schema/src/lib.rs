@@ -272,6 +272,8 @@ pub struct DetectionResult {
     pub simulation_run_id: Option<String>,
     #[serde(default)]
     pub simulation_operating_mode: Option<String>,
+    #[serde(default)]
+    pub simulation_sink_mode: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -312,6 +314,8 @@ pub struct AlertEvent {
     pub simulation_run_id: Option<String>,
     #[serde(default)]
     pub simulation_operating_mode: Option<String>,
+    #[serde(default)]
+    pub simulation_sink_mode: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

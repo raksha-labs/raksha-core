@@ -587,7 +587,7 @@ impl UtilizationHighPattern {
         sample: &UtilizationStateEvent,
         state: &UtilizationRuleState,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id, simulation_operating_mode) =
+        let (is_simulated, simulation_run_id, simulation_operating_mode, simulation_sink_mode) =
             simulation_metadata_from_event(event);
 
         let rate_10min = rate_of_change(&state.samples, context.observed_at, 10).unwrap_or(0.0);
@@ -685,6 +685,7 @@ impl UtilizationHighPattern {
             is_simulated,
             simulation_run_id,
             simulation_operating_mode,
+            simulation_sink_mode,
             created_at: context.observed_at,
         }
     }
@@ -698,7 +699,7 @@ impl UtilizationHighPattern {
         sample: &UtilizationStateEvent,
         now: DateTime<Utc>,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id, simulation_operating_mode) =
+        let (is_simulated, simulation_run_id, simulation_operating_mode, simulation_sink_mode) =
             simulation_metadata_from_event(event);
 
         let mut oracle_context = HashMap::new();
@@ -771,6 +772,7 @@ impl UtilizationHighPattern {
             is_simulated,
             simulation_run_id,
             simulation_operating_mode,
+            simulation_sink_mode,
             created_at: now,
         }
     }
@@ -784,7 +786,7 @@ impl UtilizationHighPattern {
         pause: &UtilizationPauseEvent,
         now: DateTime<Utc>,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id, simulation_operating_mode) =
+        let (is_simulated, simulation_run_id, simulation_operating_mode, simulation_sink_mode) =
             simulation_metadata_from_event(event);
 
         let state_label = if pause.paused { "paused" } else { "unpaused" };
@@ -855,6 +857,7 @@ impl UtilizationHighPattern {
             is_simulated,
             simulation_run_id,
             simulation_operating_mode,
+            simulation_sink_mode,
             created_at: now,
         }
     }
@@ -891,7 +894,7 @@ impl DetectionPattern for UtilizationHighPattern {
         now: DateTime<Utc>,
         repo: &PostgresRepository,
     ) -> Result<Option<DetectionResult>> {
-        let (_, simulation_run_id, _) = simulation_metadata_from_event(event);
+        let (_, simulation_run_id, _, _) = simulation_metadata_from_event(event);
         let Some(rules) = self
             .effective_rules(&event.tenant_id, simulation_run_id.as_deref(), repo)
             .await?

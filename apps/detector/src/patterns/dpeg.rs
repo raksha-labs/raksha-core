@@ -562,7 +562,7 @@ impl DetectionPattern for DpegPattern {
         repo: &PostgresRepository,
     ) -> Result<Option<DetectionResult>> {
         let evaluation_time = event.timestamp;
-        let (is_simulated, simulation_run_id, _) = simulation_metadata_from_event(event);
+        let (is_simulated, simulation_run_id, _, _) = simulation_metadata_from_event(event);
         self.prepare_quote_cache_scope(
             &event.tenant_id,
             is_simulated,
@@ -1119,7 +1119,7 @@ fn build_detection(
     transition: Option<IncidentTransition>,
     now: DateTime<Utc>,
 ) -> DetectionResult {
-    let (is_simulated, simulation_run_id, simulation_operating_mode) =
+    let (is_simulated, simulation_run_id, simulation_operating_mode, simulation_sink_mode) =
         simulation_metadata_from_event(event);
     let subject_key = format!("{}:{}", policy.tenant_id, policy.market_key);
     let divergence_str = format!("{:.3}%", snapshot.divergence_pct);
@@ -1209,6 +1209,7 @@ fn build_detection(
         is_simulated,
         simulation_run_id,
         simulation_operating_mode,
+        simulation_sink_mode,
         created_at: now,
     }
 }

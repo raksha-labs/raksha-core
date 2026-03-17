@@ -75,7 +75,7 @@ pub(crate) fn append_snapshot_meta(event: &UnifiedEvent, data: Value) -> Value {
 
 pub(crate) fn simulation_metadata_from_event(
     event: &UnifiedEvent,
-) -> (bool, Option<String>, Option<String>) {
+) -> (bool, Option<String>, Option<String>, Option<String>) {
     let simulation = event
         .payload
         .get("simulation")
@@ -96,6 +96,13 @@ pub(crate) fn simulation_metadata_from_event(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let sink_mode = simulation
+        .and_then(|meta| meta.get("sink_mode"))
+        .or_else(|| event.payload.get("simulation_sink_mode"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let is_simulated = simulation
         .and_then(|meta| meta.get("is_simulated"))
         .and_then(|value| value.as_bool())
@@ -106,7 +113,7 @@ pub(crate) fn simulation_metadata_from_event(
             .and_then(|value| value.as_bool())
             .unwrap_or(false)
         || run_id.is_some();
-    (is_simulated, run_id, operating_mode)
+    (is_simulated, run_id, operating_mode, sink_mode)
 }
 
 /// Owns all registered patterns and dispatches events to each in turn.
