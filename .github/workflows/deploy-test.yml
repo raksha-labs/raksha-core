@@ -4,10 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Image tag to deploy (leave empty to build fresh images)'
+        description: 'Image tag to deploy (leave empty to reuse latest unless build_images is enabled)'
         required: false
         default: ''
         type: string
+      build_images:
+        description: Build fresh images before deploy
+        required: true
+        default: false
+        type: boolean
       force_build:
         description: Force image build even when only CI/infrastructure files changed
         required: true
@@ -59,15 +64,24 @@ jobs:
   guard-rails:
     needs: detect-changes
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && needs.detect-changes.outputs.ci_scripts_changed == 'true' && needs.detect-changes.outputs.build_required != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.build_images != 'true' && needs.detect-changes.outputs.ci_scripts_changed == 'true' && needs.detect-changes.outputs.build_required != 'true' }}
     steps:
       - name: Warn when build is skipped for CI script-only change
         run: |
-          echo "::warning title=Image build skipped::Only scripts/ci changed, so image build was skipped. If CI scripts now affect image contents, include those paths in detect-changes.build_required or run workflow_dispatch with force_build=true."
+          echo "::warning title=Image build skipped::Only scripts/ci changed, so image build was skipped. If CI scripts now affect image contents, include those paths in detect-changes.build_required or run workflow_dispatch with build_images=true."
+
+  guard-build-required:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.build_images != 'true' && github.event.inputs.image_tag == '' && needs.detect-changes.outputs.build_required == 'true' }}
+    steps:
+      - name: Warn when deploy reuses latest despite code changes
+        run: |
+          echo "::warning title=Deploying without image build::Image-impacting files changed, but build_images=false and image_tag is empty. Deploy will reuse the existing 'latest' image."
 
   build-images:
     needs: detect-changes
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.force_build == 'true' || (github.event.inputs.image_tag == '' && needs.detect-changes.outputs.build_required == 'true')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.force_build == 'true' || github.event.inputs.build_images == 'true') }}
     uses: ./.github/workflows/reusable-image-build.yml
     with:
       aws_region: eu-west-1
