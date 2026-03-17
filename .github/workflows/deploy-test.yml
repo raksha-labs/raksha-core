@@ -73,7 +73,7 @@ jobs:
       aws_region: eu-west-1
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
       image_tag: ${{ format('sha-{0}', github.sha) }}
-      push_latest: ${{ github.ref == 'refs/heads/master' }}
+      push_latest: false
     secrets:
       aws_role_arn: ${{ secrets.AWS_IMAGES_ROLE_ARN }}
 

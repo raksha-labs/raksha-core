@@ -1,11 +1,7 @@
 name: Build and Push Core Images
 
-# Deployments are manual-only. This workflow remains for tag-based releases and
-# manual image builds only.
+# Deployments and image publication are manual-only.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       service_filter:
@@ -25,6 +21,6 @@ jobs:
       aws_region: eu-west-1
       service_filter: ${{ github.event.inputs.service_filter || '' }}
       image_tag: ${{ format('sha-{0}', github.sha) }}
-      push_latest: ${{ github.ref == 'refs/heads/master' }}
+      push_latest: false
     secrets:
       aws_role_arn: ${{ secrets.AWS_IMAGES_ROLE_ARN }}

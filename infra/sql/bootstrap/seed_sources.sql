@@ -432,7 +432,7 @@ WITH desired_stream_refs AS (
       ('sushi-v2-eth-mainnet','logs','sushi-v2-dai-usdt','DAIUSDT')
   ) AS t(source_id, stream_name, subscription_key, asset_pair)
 )
-INSERT INTO source_stream_tenant_targets (
+INSERT INTO catalog.source_stream_tenant_targets (
   stream_config_id,
   tenant_id,
   enabled,
@@ -458,7 +458,7 @@ WITH live_targets AS (
     ssc.stream_name,
     ssc.subscription_key,
     ssc.asset_pair
-  FROM source_stream_tenant_targets stt
+  FROM catalog.source_stream_tenant_targets stt
   JOIN catalog.source_stream_configs ssc
     ON ssc.stream_config_id = stt.stream_config_id
   WHERE ssc.operating_mode_profile = 'live'
@@ -475,7 +475,7 @@ mapped_test_targets AS (
    AND COALESCE(ssc_test.subscription_key, '') = COALESCE(lt.subscription_key, '')
    AND COALESCE(ssc_test.asset_pair, '') = COALESCE(lt.asset_pair, '')
 )
-INSERT INTO source_stream_tenant_targets (
+INSERT INTO catalog.source_stream_tenant_targets (
   stream_config_id,
   tenant_id,
   enabled,
@@ -492,7 +492,7 @@ ON CONFLICT (stream_config_id, tenant_id) DO NOTHING;
 -- ─── Default Tenant Operating Mode (local/dev bootstrap) ───────────────────
 -- Local bootstrap defaults to TEST mode so seeded Simlab mock stream targets
 -- are active by default for tenant 'glider'.
-INSERT INTO tenant_operating_mode (
+INSERT INTO catalog.tenant_operating_mode (
   tenant_id,
   mode,
   mode_note,
@@ -510,7 +510,7 @@ VALUES (
 )
 ON CONFLICT (tenant_id) DO NOTHING;
 
-UPDATE source_stream_tenant_targets stt
+UPDATE catalog.source_stream_tenant_targets stt
 SET enabled = CASE
       WHEN ssc.operating_mode_profile = 'test' THEN TRUE
       WHEN ssc.operating_mode_profile = 'live' THEN FALSE
@@ -523,7 +523,7 @@ WHERE stt.stream_config_id = ssc.stream_config_id
   AND stt.tenant_id = 'glider'
   AND EXISTS (
     SELECT 1
-    FROM tenant_operating_mode tom
+    FROM catalog.tenant_operating_mode tom
     WHERE tom.tenant_id = stt.tenant_id
       AND tom.mode = 'test'
   )
