@@ -294,6 +294,12 @@ variable "rpc_ws_url_secret_arns" {
   default     = {}
 }
 
+variable "indexer_secret_env_arns" {
+  description = "Additional Secrets Manager valueFrom entries for the indexer, keyed by env var name (for example BASE_ORACLE_ADDRESSES)."
+  type        = map(string)
+  default     = {}
+}
+
 variable "tags" {
   description = "Additional tags"
   type        = map(string)

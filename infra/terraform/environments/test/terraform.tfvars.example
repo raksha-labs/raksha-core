@@ -54,6 +54,11 @@ streams_enabled = true
 #   ETH_WS_URL  = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:raksha/test/rpc-AbCdEf:ETH_WS_URL::"
 #   BASE_WS_URL = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:raksha/test/rpc-AbCdEf:BASE_WS_URL::"
 # }
+#
+# 3. Optional extra indexer secrets for legacy live-adapter paths:
+# indexer_secret_env_arns = {
+#   BASE_ORACLE_ADDRESSES = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:raksha/test/rpc-AbCdEf:BASE_ORACLE_ADDRESSES::"
+# }
 
 # service_desired_counts lets you override individual service counts on top of
 # streams_enabled. Example — run only the indexer:
