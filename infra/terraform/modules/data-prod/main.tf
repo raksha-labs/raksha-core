@@ -1,6 +1,8 @@
 resource "random_password" "db_password" {
-  length  = 32
-  special = true
+  length           = 32
+  special          = true
+  # RDS rejects passwords containing / @ " or spaces
+  override_special = "!#$%^&*()-_=+[]{}|;:,.<>?"
 }
 
 resource "random_password" "redis_auth_token" {
