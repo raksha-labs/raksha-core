@@ -28,7 +28,46 @@ ON CONFLICT (pattern_id) DO NOTHING;
 
 INSERT INTO pattern.pattern_configs (pattern_id, config)
 VALUES
-    ('dpeg', '{}'::jsonb),
+    ('dpeg', '{
+        "policies": [
+          {
+            "market_key": "USDT/USD",
+            "peg_target": 1.0,
+            "min_sources": 3,
+            "quorum_pct": 0.6,
+            "sustained_window_ms": 60000,
+            "cooldown_sec": 300,
+            "stale_timeout_ms": 30000,
+            "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 3.0},
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.5},
+            "toggles": {"contagion_detection": true}
+          },
+          {
+            "market_key": "USDC/USD",
+            "peg_target": 1.0,
+            "min_sources": 3,
+            "quorum_pct": 0.6,
+            "sustained_window_ms": 60000,
+            "cooldown_sec": 300,
+            "stale_timeout_ms": 30000,
+            "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 3.0},
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.5},
+            "toggles": {"contagion_detection": true}
+          },
+          {
+            "market_key": "DAI/USD",
+            "peg_target": 1.0,
+            "min_sources": 2,
+            "quorum_pct": 0.5,
+            "sustained_window_ms": 60000,
+            "cooldown_sec": 300,
+            "stale_timeout_ms": 30000,
+            "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 3.0},
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.5},
+            "toggles": {"contagion_detection": true}
+          }
+        ]
+    }'::jsonb),
     ('flash_loan', '{
         "rules": [
           {

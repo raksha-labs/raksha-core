@@ -373,12 +373,42 @@ pub struct DpegPattern {
 }
 
 impl DpegPattern {
+    fn normalized_policy_config(config: &Value) -> Value {
+        let Some(object) = config.as_object() else {
+            return config.clone();
+        };
+
+        if let Some(policies) = object.get("policies") {
+            return policies.clone();
+        }
+
+        if !object.contains_key("market_key") {
+            return config.clone();
+        }
+
+        let mut policy = object.clone();
+        if !policy.contains_key("sustained_window_ms") {
+            if let Some(window_sec) = policy.remove("window_sec") {
+                if let Some(seconds) = window_sec.as_i64() {
+                    policy.insert(
+                        "sustained_window_ms".to_string(),
+                        Value::from(seconds.saturating_mul(1000)),
+                    );
+                }
+            }
+        }
+        policy
+            .entry("quorum_pct".to_string())
+            .or_insert_with(|| Value::from(0.5));
+        policy
+            .entry("stale_timeout_ms".to_string())
+            .or_insert_with(|| Value::from(30_000));
+
+        Value::Array(vec![Value::Object(policy)])
+    }
+
     fn parse_policies(tenant_id: &str, config: &Value) -> Vec<DpegPolicy> {
-        let config_value = config
-            .as_object()
-            .and_then(|object| object.get("policies"))
-            .cloned()
-            .unwrap_or_else(|| config.clone());
+        let config_value = Self::normalized_policy_config(config);
 
         let entries: Vec<DpegPolicy> = match serde_json::from_value(config_value) {
             Ok(value) => value,
@@ -1438,6 +1468,27 @@ mod tests {
         assert_eq!(tenant_a.min_sources, 1);
         assert_eq!(tenant_b.peg_target, 0.98);
         assert_eq!(tenant_b.min_sources, 3);
+    }
+
+    #[test]
+    fn parse_policies_accepts_legacy_single_policy_object() {
+        let config = serde_json::json!({
+            "market_key": "USDC/USD",
+            "peg_target": 1.0,
+            "min_sources": 2,
+            "window_sec": 60,
+            "cooldown_sec": 300,
+            "severity_bands": { "medium": 1.0, "high": 3.0, "critical": 5.0 }
+        });
+
+        let policies = DpegPattern::parse_policies("tenant-a", &config);
+
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].tenant_id, "tenant-a");
+        assert_eq!(policies[0].market_key, "USDC/USD");
+        assert_eq!(policies[0].sustained_window_ms, 60_000);
+        assert_eq!(policies[0].quorum_pct, 0.5);
+        assert_eq!(policies[0].stale_timeout_ms, 30_000);
     }
 
     #[test]
