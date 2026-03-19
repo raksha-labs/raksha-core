@@ -20,6 +20,8 @@ IMAGE_VALIDATION_RETRY_SLEEP_SECONDS="${IMAGE_VALIDATION_RETRY_SLEEP_SECONDS:-5}
 SERVICE_FILTER_NORMALIZED=$(normalize_csv_filter "${SERVICE_FILTER:-}")
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
+log "validating image tag ${IMAGE_TAG} in ECR account ${AWS_ACCOUNT_ID}, region ${AWS_REGION}, apply_infra=${APPLY_INFRA}, service_filter=${SERVICE_FILTER_NORMALIZED:-<all>}"
+
 required_repositories() {
   local service
   while IFS= read -r service; do
@@ -33,12 +35,23 @@ required_repositories() {
 
 image_exists_in_repo() {
   local repository="$1"
-  aws ecr describe-images \
+  local output=""
+
+  if output=$(aws ecr describe-images \
+    --registry-id "${AWS_ACCOUNT_ID}" \
     --repository-name "${repository}" \
     --image-ids "imageTag=${IMAGE_TAG}" \
     --region "${AWS_REGION}" \
     --query 'imageDetails[0].imageDigest' \
-    --output text >/dev/null 2>&1
+    --output text 2>&1); then
+    return 0
+  fi
+
+  if grep -q 'ImageNotFoundException' <<< "${output}"; then
+    return 1
+  fi
+
+  fail "failed to query ECR for ${repository}:${IMAGE_TAG} in account ${AWS_ACCOUNT_ID}, region ${AWS_REGION}: ${output}"
 }
 
 collect_missing_repositories() {
