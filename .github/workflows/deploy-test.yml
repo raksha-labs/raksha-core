@@ -99,7 +99,7 @@ jobs:
       image_tag: ${{ format('sha-{0}', github.sha) }}
       push_latest: false
     secrets:
-      aws_role_arn: ${{ secrets.AWS_IMAGES_ROLE_ARN }}
+      aws_role_arn: ${{ secrets.AWS_INFRA_ROLE_ARN }}
 
   deploy:
     needs: [build-images, guard-build-required, guard-image-source]

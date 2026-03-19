@@ -380,11 +380,53 @@ impl PostgresRepository {
     pub async fn load_tenant_pattern_configs(
         &self,
     ) -> Result<std::collections::HashMap<(String, String), serde_json::Value>> {
+        // Composite query: joins all four per-tenant pattern config tables into one
+        // JSONB blob per (tenant_id, pattern_id).  Each pattern's reload_config()
+        // extracts "detection_config" for its thresholds; the outer wrapper
+        // also carries source_bindings, alert_policy, and notification_channels
+        // so the detector can gate events and alert delivery per-tenant.
+        //
+        // Backward compat: individual patterns do `config.get("detection_config").unwrap_or(config)`
+        // so older code that stored flat configs still works.
         let rows = self
             .client
             .query(
                 r#"
-                SELECT tpc.tenant_id, tpc.pattern_id, tpc.config
+                SELECT
+                    tpc.tenant_id,
+                    tpc.pattern_id,
+                    jsonb_build_object(
+                        'enabled',          tpc.enabled,
+                        'detection_config', tpc.config,
+                        'source_bindings',  (
+                            SELECT jsonb_agg(jsonb_build_object(
+                                'source_id',      b.source_id,
+                                'enabled',        b.enabled,
+                                'binding_config', b.binding_config
+                            ))
+                            FROM pattern.tenant_pattern_source_bindings b
+                            WHERE b.tenant_id   = tpc.tenant_id
+                              AND b.pattern_id  = tpc.pattern_id
+                              AND b.enabled     = TRUE
+                        ),
+                        'alert_policy',     (
+                            SELECT row_to_json(ap)::jsonb
+                            FROM pattern.tenant_pattern_alert_policies ap
+                            WHERE ap.tenant_id  = tpc.tenant_id
+                              AND ap.pattern_id = tpc.pattern_id
+                        ),
+                        'notification_channels', (
+                            SELECT jsonb_agg(jsonb_build_object(
+                                'channel',    nc.channel,
+                                'enabled',    nc.enabled,
+                                'config_json', nc.config_json
+                            ))
+                            FROM pattern.tenant_pattern_notification_channels nc
+                            WHERE nc.tenant_id  = tpc.tenant_id
+                              AND nc.pattern_id = tpc.pattern_id
+                              AND nc.enabled    = TRUE
+                        )
+                    ) AS full_config
                 FROM pattern.tenant_pattern_configs tpc
                 JOIN pattern.patterns p ON p.pattern_id = tpc.pattern_id
                 WHERE p.enabled = TRUE AND tpc.enabled = TRUE
@@ -398,8 +440,8 @@ impl PostgresRepository {
         for row in rows {
             let tenant_id: String = row.get(0);
             let pattern_id: String = row.get(1);
-            let config: serde_json::Value = row.get(2);
-            map.insert((tenant_id, pattern_id), config);
+            let full_config: serde_json::Value = row.get(2);
+            map.insert((tenant_id, pattern_id), full_config);
         }
         Ok(map)
     }
