@@ -110,6 +110,7 @@ jobs:
       image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || needs.build-images.result == 'success' && format('sha-{0}', github.sha) || '' }}
       apply_infra: ${{ github.event.inputs.apply_infra == 'true' }}
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
+      expected_aws_account_id: ${{ needs.build-images.result == 'success' && needs.build-images.outputs.aws_account_id || '' }}
       aws_region: eu-west-1
     secrets:
       aws_role_arn: ${{ secrets.AWS_TEST_DEPLOY_ROLE_ARN }}

@@ -15,6 +15,7 @@ IMAGE_TAG="${2:-${IMAGE_TAG:-}}"
 AWS_REGION="${AWS_REGION:-eu-west-1}"
 APPLY_INFRA="${APPLY_INFRA:-false}"
 SERVICE_FILTER_NORMALIZED=$(normalize_csv_filter "${SERVICE_FILTER:-}")
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 required_repositories() {
   local service
@@ -50,7 +51,7 @@ done < <(required_repositories)
 (( checked_count > 0 )) || fail "no repositories selected for image tag validation"
 
 if (( ${#missing_repositories[@]} > 0 )); then
-  fail "image tag ${IMAGE_TAG} is missing from ${#missing_repositories[@]} required repositories in ${AWS_REGION}: ${missing_repositories[*]}. Build images for this tag before rollout or rerun with build_images=true."
+  fail "image tag ${IMAGE_TAG} is missing from ${#missing_repositories[@]} required repositories in ${AWS_REGION} for account ${AWS_ACCOUNT_ID}: ${missing_repositories[*]}. Build images for this tag in the same account before rollout or rerun with build_images=true."
 fi
 
-log "validated image tag ${IMAGE_TAG} across ${checked_count} required repositories"
+log "validated image tag ${IMAGE_TAG} across ${checked_count} required repositories in account ${AWS_ACCOUNT_ID}"
