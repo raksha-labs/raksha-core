@@ -125,33 +125,81 @@ cluster_capacity_providers=$(aws ecs describe-clusters \
   --query 'clusters[0].capacityProviders' \
   --output json)
 
-tmp_input=$(mktemp)
-tmp_task_definition_input=""
-trap 'rm -f "${tmp_input}" "${tmp_task_definition_input:-}"' EXIT
-
-if [[ -n "${BOOTSTRAP_IMAGE_TAG}" ]]; then
-  tmp_task_definition_input=$(mktemp)
-  python3 - "${task_definition_json}" "${BOOTSTRAP_SERVICE_NAME}" "${BOOTSTRAP_IMAGE_TAG}" > "${tmp_task_definition_input}" <<'PY'
+account_id=$(aws sts get-caller-identity --query Account --output text)
+bootstrap_repository="raksha-${BOOTSTRAP_SERVICE_NAME}"
+bootstrap_image_repo="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com/${bootstrap_repository}"
+reference_image_tag=$(python3 - "${task_definition_json}" "${BOOTSTRAP_SERVICE_NAME}" <<'PY'
 import json
 import sys
 
 task_definition = json.loads(sys.argv[1])
 container_name = sys.argv[2]
-image_tag = sys.argv[3]
+container = next(
+    (entry for entry in (task_definition.get("containerDefinitions") or []) if entry.get("name") == container_name),
+    None,
+)
+image = (container or {}).get("image") or ""
+base = image.split("@", 1)[0]
+last_slash = base.rfind("/")
+last_colon = base.rfind(":")
+if last_colon > last_slash:
+    print(base[last_colon + 1 :])
+else:
+    print("")
+PY
+)
 
-def retag_image(image: str, new_tag: str) -> str:
-    base = image.split("@", 1)[0]
-    last_slash = base.rfind("/")
-    last_colon = base.rfind(":")
-    if last_colon > last_slash:
-        base = base[:last_colon]
-    return f"{base}:{new_tag}"
+ecr_image_tag_exists() {
+  local repository="$1"
+  local image_tag="$2"
+  aws ecr describe-images \
+    --repository-name "${repository}" \
+    --image-ids "imageTag=${image_tag}" \
+    --region "${AWS_REGION}" \
+    --query 'imageDetails[0].imageDigest' \
+    --output text >/dev/null 2>&1
+}
+
+resolve_bootstrap_image_tag() {
+  local requested_tag="$1"
+  if [[ -n "${requested_tag}" ]] && ecr_image_tag_exists "${bootstrap_repository}" "${requested_tag}"; then
+    printf '%s\n' "${requested_tag}"
+    return 0
+  fi
+
+  if [[ -n "${requested_tag}" ]]; then
+    log "bootstrap image tag ${requested_tag} not found in ${bootstrap_repository}; checking reference service tag"
+  fi
+
+  if [[ -n "${reference_image_tag}" ]] && ecr_image_tag_exists "${bootstrap_repository}" "${reference_image_tag}"; then
+    log "using ${bootstrap_repository} image tag ${reference_image_tag} derived from ${SERVICE_NAME}"
+    printf '%s\n' "${reference_image_tag}"
+    return 0
+  fi
+
+  fail "no runnable bootstrap image found (requested_tag=${requested_tag:-<empty>}, reference_tag=${reference_image_tag:-<empty>}, repo=${bootstrap_repository})"
+}
+
+tmp_input=$(mktemp)
+tmp_task_definition_input=""
+trap 'rm -f "${tmp_input}" "${tmp_task_definition_input:-}"' EXIT
+
+if [[ -n "${BOOTSTRAP_IMAGE_TAG}" ]]; then
+  BOOTSTRAP_IMAGE_TAG=$(resolve_bootstrap_image_tag "${BOOTSTRAP_IMAGE_TAG}")
+  tmp_task_definition_input=$(mktemp)
+  python3 - "${task_definition_json}" "${BOOTSTRAP_SERVICE_NAME}" "${bootstrap_image_repo}:${BOOTSTRAP_IMAGE_TAG}" > "${tmp_task_definition_input}" <<'PY'
+import json
+import sys
+
+task_definition = json.loads(sys.argv[1])
+container_name = sys.argv[2]
+image = sys.argv[3]
 
 container_definitions = task_definition.get("containerDefinitions") or []
 updated = False
 for container in container_definitions:
     if container.get("name") == container_name:
-        container["image"] = retag_image(container["image"], image_tag)
+        container["image"] = image
         updated = True
 
 if not updated:
@@ -207,21 +255,21 @@ PY
     --query 'taskDefinition' \
     --output json)
 
-  log "registered bootstrap task definition ${task_definition_arn} using image tag ${BOOTSTRAP_IMAGE_TAG}"
+  log "registered bootstrap task definition ${task_definition_arn} using image ${bootstrap_image_repo}:${BOOTSTRAP_IMAGE_TAG}"
 fi
 
-python3 - "${service_json}" "${cluster_capacity_providers}" "${CLUSTER_NAME}" "${TASK_COMMAND}" "${BOOTSTRAP_SERVICE_NAME}" "${DESIRED_LAUNCH_MODE}" > "${tmp_input}" <<'PY'
+python3 - "${service_json}" "${task_definition_arn}" "${cluster_capacity_providers}" "${CLUSTER_NAME}" "${TASK_COMMAND}" "${BOOTSTRAP_SERVICE_NAME}" "${DESIRED_LAUNCH_MODE}" > "${tmp_input}" <<'PY'
 import json
 import sys
 
 service = json.loads(sys.argv[1])
-cluster_capacity_providers = set(json.loads(sys.argv[2]) or [])
-cluster = sys.argv[3]
-command = sys.argv[4]
-container_name = sys.argv[5]
-desired_launch_mode = sys.argv[6]
+task_definition = sys.argv[2]
+cluster_capacity_providers = set(json.loads(sys.argv[3]) or [])
+cluster = sys.argv[4]
+command = sys.argv[5]
+container_name = sys.argv[6]
+desired_launch_mode = sys.argv[7]
 
-task_definition = service.get("taskDefinition")
 if not task_definition:
     raise SystemExit("service task definition is missing")
 
