@@ -66,14 +66,14 @@ missing_services_csv() {
 }
 
 auto_build_missing_images() {
-  [[ "${AUTO_BUILD_MISSING_IMAGES}" == "true" ]] || return 1
-  (( ${#missing_repositories[@]} > 0 )) || return 1
+  [[ "${AUTO_BUILD_MISSING_IMAGES}" == "true" ]] || return 0
+  (( ${#missing_repositories[@]} > 0 )) || return 0
 
   require_cmd docker
 
   local missing_services
   missing_services=$(missing_services_csv)
-  [[ -n "${missing_services}" ]] || return 1
+  [[ -n "${missing_services}" ]] || return 0
 
   log "image tag ${IMAGE_TAG} missing in account ${AWS_ACCOUNT_ID}; rebuilding services inline: ${missing_services}"
   SERVICE_FILTER="${missing_services}" IMAGE_TAG="${IMAGE_TAG}" AWS_REGION="${AWS_REGION}" "${SCRIPT_DIR}/build_push_images.sh"
@@ -105,7 +105,7 @@ collect_missing_repositories
 (( checked_count > 0 )) || fail "no repositories selected for image tag validation"
 
 if (( ${#missing_repositories[@]} > 0 )); then
-  auto_build_missing_images || true
+  auto_build_missing_images
   wait_for_images_to_become_visible || true
 fi
 

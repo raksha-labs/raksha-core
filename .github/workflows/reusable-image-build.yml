@@ -11,6 +11,10 @@ on:
         required: false
         type: string
         default: ''
+      build_all:
+        required: false
+        type: boolean
+        default: false
       image_tag:
         required: false
         type: string
@@ -57,10 +61,24 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Resolve image build scope
+        id: scope
+        env:
+          BUILD_ALL: ${{ inputs.build_all }}
+          INPUT_SERVICE_FILTER: ${{ inputs.service_filter }}
+        run: |
+          if [[ "${BUILD_ALL}" == "true" ]]; then
+            echo "service_filter=" >> "$GITHUB_OUTPUT"
+            echo "[ci] image build scope=all services"
+          else
+            echo "service_filter=${INPUT_SERVICE_FILTER}" >> "$GITHUB_OUTPUT"
+            echo "[ci] image build scope filter=${INPUT_SERVICE_FILTER:-<all>}"
+          fi
+
       - name: Build and push images
         env:
           AWS_REGION: ${{ inputs.aws_region }}
-          SERVICE_FILTER: ${{ inputs.service_filter }}
+          SERVICE_FILTER: ${{ steps.scope.outputs.service_filter }}
           IMAGE_TAG: ${{ inputs.image_tag != '' && inputs.image_tag || format('sha-{0}', github.sha) }}
           PUSH_LATEST: ${{ inputs.push_latest }}
           SKIP_DOCKER_LOGIN: 'true'
