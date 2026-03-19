@@ -13,11 +13,6 @@ on:
         required: true
         default: true
         type: boolean
-      force_build:
-        description: Force image build even when only CI/infrastructure files changed
-        required: true
-        default: false
-        type: boolean
       apply_infra:
         description: Apply Terraform before deploy
         required: true
@@ -64,7 +59,7 @@ jobs:
   guard-rails:
     needs: detect-changes
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.build_images != 'true' && needs.detect-changes.outputs.ci_scripts_changed == 'true' && needs.detect-changes.outputs.build_required != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_images != 'true' && needs.detect-changes.outputs.ci_scripts_changed == 'true' && needs.detect-changes.outputs.build_required != 'true' }}
     steps:
       - name: Warn when build is skipped for CI script-only change
         run: |
@@ -73,7 +68,7 @@ jobs:
   guard-build-required:
     needs: detect-changes
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.build_images != 'true' && github.event.inputs.image_tag == '' && needs.detect-changes.outputs.build_required == 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_images != 'true' && github.event.inputs.image_tag == '' && needs.detect-changes.outputs.build_required == 'true' }}
     steps:
       - name: Fail when deploy skips build without explicit image tag
         run: |
@@ -91,7 +86,7 @@ jobs:
 
   build-images:
     needs: detect-changes
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.force_build == 'true' || github.event.inputs.build_images == 'true') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_images == 'true' }}
     uses: ./.github/workflows/reusable-image-build.yml
     with:
       aws_region: eu-west-1
@@ -107,7 +102,7 @@ jobs:
     uses: ./.github/workflows/reusable-ecs-rollout.yml
     with:
       environment: test
-      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || needs.build-images.result == 'success' && format('sha-{0}', github.sha) || '' }}
+      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || needs.build-images.result == 'success' && format('sha-{0}', github.sha) || '' }}
       apply_infra: ${{ github.event.inputs.apply_infra == 'true' }}
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
       expected_aws_account_id: ${{ needs.build-images.result == 'success' && needs.build-images.outputs.aws_account_id || '' }}
