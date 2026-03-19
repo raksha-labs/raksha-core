@@ -86,6 +86,7 @@ resource "aws_iam_role_policy" "images" {
           "ecr:PutImage",
           "ecr:BatchGetImage",
           "ecr:GetDownloadUrlForLayer",
+          "ecr:DescribeImages",
           "ecr:DescribeRepositories",
           "ecr:CreateRepository"
         ]
@@ -170,6 +171,7 @@ resource "aws_iam_role_policy" "deploy" {
           "ecs:ListServices",
           "ecs:TagResource",
           "ecr:GetAuthorizationToken",
+          "ecr:DescribeImages",
           "ecr:DescribeRepositories",
           "ecr:PutImageTagMutability",
           "ecr:PutLifecyclePolicy",
