@@ -127,7 +127,6 @@ cluster_capacity_providers=$(aws ecs describe-clusters \
 
 account_id=$(aws sts get-caller-identity --query Account --output text)
 bootstrap_repository="raksha-${BOOTSTRAP_SERVICE_NAME}"
-bootstrap_image_repo="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com/${bootstrap_repository}"
 configured_image_tag=$(trim_whitespace "$(config_string_var image_tag)")
 reference_image_tag=$(python3 - "${task_definition_json}" "${BOOTSTRAP_SERVICE_NAME}" <<'PY'
 import json
@@ -161,10 +160,49 @@ ecr_image_tag_exists() {
     --output text >/dev/null 2>&1
 }
 
-resolve_bootstrap_image_tag() {
+core_image_repositories() {
+  local service
+  while IFS= read -r service; do
+    [[ -n "${service}" ]] || continue
+    printf 'raksha-%s\n' "${service}"
+  done < <(catalog_services)
+}
+
+image_ref_for_repo_and_tag() {
+  local repository="$1"
+  local image_tag="$2"
+  printf '%s.dkr.ecr.%s.amazonaws.com/%s:%s\n' "${account_id}" "${AWS_REGION}" "${repository}" "${image_tag}"
+}
+
+resolve_bootstrap_image_for_tag() {
+  local image_tag="$1"
+  [[ -n "${image_tag}" ]] || return 1
+
+  if ecr_image_tag_exists "${bootstrap_repository}" "${image_tag}"; then
+    image_ref_for_repo_and_tag "${bootstrap_repository}" "${image_tag}"
+    return 0
+  fi
+
+  local repository
+  while IFS= read -r repository; do
+    [[ -n "${repository}" ]] || continue
+    [[ "${repository}" == "${bootstrap_repository}" ]] && continue
+    if ecr_image_tag_exists "${repository}" "${image_tag}"; then
+      log "using alternate core image ${repository}:${image_tag} for bootstrap" >&2
+      image_ref_for_repo_and_tag "${repository}" "${image_tag}"
+      return 0
+    fi
+  done < <(core_image_repositories)
+
+  return 1
+}
+
+resolve_bootstrap_image() {
   local requested_tag="$1"
-  if [[ -n "${requested_tag}" ]] && ecr_image_tag_exists "${bootstrap_repository}" "${requested_tag}"; then
-    printf '%s\n' "${requested_tag}"
+  local image_ref
+
+  if image_ref=$(resolve_bootstrap_image_for_tag "${requested_tag}"); then
+    printf '%s\n' "${image_ref}"
     return 0
   fi
 
@@ -172,15 +210,15 @@ resolve_bootstrap_image_tag() {
     log "bootstrap image tag ${requested_tag} not found in ${bootstrap_repository}; checking reference service tag" >&2
   fi
 
-  if [[ -n "${reference_image_tag}" ]] && ecr_image_tag_exists "${bootstrap_repository}" "${reference_image_tag}"; then
-    log "using ${bootstrap_repository} image tag ${reference_image_tag} derived from ${SERVICE_NAME}" >&2
-    printf '%s\n' "${reference_image_tag}"
+  if image_ref=$(resolve_bootstrap_image_for_tag "${reference_image_tag}"); then
+    log "using bootstrap image derived from ${SERVICE_NAME} tag ${reference_image_tag}" >&2
+    printf '%s\n' "${image_ref}"
     return 0
   fi
 
-  if [[ -n "${configured_image_tag}" ]] && [[ "${configured_image_tag}" != "${requested_tag}" ]] && [[ "${configured_image_tag}" != "${reference_image_tag}" ]] && ecr_image_tag_exists "${bootstrap_repository}" "${configured_image_tag}"; then
-    log "using ${bootstrap_repository} image tag ${configured_image_tag} from terraform config" >&2
-    printf '%s\n' "${configured_image_tag}"
+  if [[ -n "${configured_image_tag}" ]] && [[ "${configured_image_tag}" != "${requested_tag}" ]] && [[ "${configured_image_tag}" != "${reference_image_tag}" ]] && image_ref=$(resolve_bootstrap_image_for_tag "${configured_image_tag}"); then
+    log "using bootstrap image tag ${configured_image_tag} from terraform config" >&2
+    printf '%s\n' "${image_ref}"
     return 0
   fi
 
@@ -192,9 +230,9 @@ tmp_task_definition_input=""
 trap 'rm -f "${tmp_input}" "${tmp_task_definition_input:-}"' EXIT
 
 if [[ -n "${BOOTSTRAP_IMAGE_TAG}" ]]; then
-  BOOTSTRAP_IMAGE_TAG=$(resolve_bootstrap_image_tag "${BOOTSTRAP_IMAGE_TAG}")
+  BOOTSTRAP_IMAGE=$(resolve_bootstrap_image "${BOOTSTRAP_IMAGE_TAG}")
   tmp_task_definition_input=$(mktemp)
-  python3 - "${task_definition_json}" "${BOOTSTRAP_SERVICE_NAME}" "${bootstrap_image_repo}:${BOOTSTRAP_IMAGE_TAG}" > "${tmp_task_definition_input}" <<'PY'
+  python3 - "${task_definition_json}" "${BOOTSTRAP_SERVICE_NAME}" "${BOOTSTRAP_IMAGE}" > "${tmp_task_definition_input}" <<'PY'
 import json
 import sys
 
@@ -262,7 +300,7 @@ PY
     --query 'taskDefinition' \
     --output json)
 
-  log "registered bootstrap task definition ${task_definition_arn} using image ${bootstrap_image_repo}:${BOOTSTRAP_IMAGE_TAG}"
+  log "registered bootstrap task definition ${task_definition_arn} using image ${BOOTSTRAP_IMAGE}"
 fi
 
 python3 - "${service_json}" "${task_definition_arn}" "${cluster_capacity_providers}" "${CLUSTER_NAME}" "${TASK_COMMAND}" "${BOOTSTRAP_SERVICE_NAME}" "${DESIRED_LAUNCH_MODE}" > "${tmp_input}" <<'PY'
