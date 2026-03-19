@@ -128,6 +128,7 @@ cluster_capacity_providers=$(aws ecs describe-clusters \
 account_id=$(aws sts get-caller-identity --query Account --output text)
 bootstrap_repository="raksha-${BOOTSTRAP_SERVICE_NAME}"
 bootstrap_image_repo="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com/${bootstrap_repository}"
+configured_image_tag=$(trim_whitespace "$(config_string_var image_tag)")
 reference_image_tag=$(python3 - "${task_definition_json}" "${BOOTSTRAP_SERVICE_NAME}" <<'PY'
 import json
 import sys
@@ -177,7 +178,13 @@ resolve_bootstrap_image_tag() {
     return 0
   fi
 
-  fail "no runnable bootstrap image found (requested_tag=${requested_tag:-<empty>}, reference_tag=${reference_image_tag:-<empty>}, repo=${bootstrap_repository})"
+  if [[ -n "${configured_image_tag}" ]] && [[ "${configured_image_tag}" != "${requested_tag}" ]] && [[ "${configured_image_tag}" != "${reference_image_tag}" ]] && ecr_image_tag_exists "${bootstrap_repository}" "${configured_image_tag}"; then
+    log "using ${bootstrap_repository} image tag ${configured_image_tag} from terraform config" >&2
+    printf '%s\n' "${configured_image_tag}"
+    return 0
+  fi
+
+  fail "no runnable bootstrap image found (requested_tag=${requested_tag:-<empty>}, reference_tag=${reference_image_tag:-<empty>}, configured_tag=${configured_image_tag:-<empty>}, repo=${bootstrap_repository})"
 }
 
 tmp_input=$(mktemp)
