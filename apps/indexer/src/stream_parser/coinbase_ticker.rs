@@ -47,7 +47,8 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
 
     let payload_event_ts =
         parse_ts_from_path(payload, input.payload_ts_path, input.payload_ts_unit)
-            .or_else(|| super::parse_ts_from_path(payload, Some("$.timestamp"), "iso8601"));
+            .or_else(|| super::parse_ts_from_path(payload, Some("$.timestamp"), "iso8601"))
+            .or_else(|| super::parse_ts_from_path(payload, Some("$.time"), "iso8601"));
     let observed_at = observed_at(payload_event_ts);
 
     let market_key = input
@@ -75,4 +76,39 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
             "quote_asset": quote_asset
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn parse_uses_top_level_time_when_timestamp_is_missing() {
+        let input = ParserInput {
+            parser_name: "coinbase_ticker_v1",
+            event_type: "quote",
+            market_key_hint: Some("USDC/USD"),
+            asset_pair_hint: Some("USDC-USD"),
+            payload_ts_path: None,
+            payload_ts_unit: "iso8601",
+            filter_config: &json!({}),
+        };
+        let payload = json!({
+            "product_id": "USDC-USD",
+            "price": "1.000000",
+            "time": "2023-03-11T08:00:01Z",
+        });
+
+        let parsed = parse(&input, &payload).expect("parsed coinbase ticker");
+
+        assert_eq!(
+            parsed
+                .payload_event_ts
+                .expect("payload event ts")
+                .to_rfc3339(),
+            "2023-03-11T08:00:01+00:00"
+        );
+    }
 }

@@ -58,7 +58,7 @@ pub fn parse_payload(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedF
         "gemini_marketdata_v1" => gemini_marketdata_v1::parse(input, payload),
         "evm_log_v1" => evm_log::parse(input, payload),
         "chainlink_answer_updated_v1" => chainlink_answer_updated::parse(input, payload),
-        "pyth_hermes_v2" => pyth_hermes_v2::parse(input, payload),
+        "pyth_hermes_v2" | "pyth_price_update_v1" => pyth_hermes_v2::parse(input, payload),
         "uniswap_v2_swap_v1" => uniswap_v2_swap::parse(input, payload),
         "uniswap_v2_swap_price_v1" => uniswap_v2_swap_price::parse(input, payload),
         "uniswap_v3_swap_price_v1" => uniswap_v3_swap_price::parse(input, payload),

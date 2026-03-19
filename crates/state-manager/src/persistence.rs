@@ -125,6 +125,8 @@ pub struct IngestOperationalEventRecord {
     pub raw_ref_type: Option<String>,
     pub raw_ref_id: Option<String>,
     pub raw_s3_uri: Option<String>,
+    pub is_simulated: bool,
+    pub simulation_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +134,29 @@ pub struct OperationalSourcePrice {
     pub source_id: String,
     pub price: f64,
     pub observed_at: DateTime<Utc>,
+}
+
+fn simulation_metadata_from_payload(payload: &Value) -> (bool, Option<String>) {
+    let simulation = payload.get("simulation").and_then(Value::as_object);
+    let run_id = simulation
+        .and_then(|meta| {
+            meta.get("run_id")
+                .or_else(|| meta.get("simulation_run_id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let is_simulated = simulation
+        .and_then(|meta| meta.get("is_simulated"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || payload
+            .get("is_simulated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || run_id.is_some();
+    (is_simulated, run_id)
 }
 
 #[derive(Debug, Clone)]
@@ -629,7 +654,9 @@ impl PostgresRepository {
                     dedup_key,
                     raw_ref_type,
                     raw_ref_id,
-                    raw_s3_uri
+                    raw_s3_uri,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     ($1)::text::uuid,
@@ -655,6 +682,8 @@ impl PostgresRepository {
                     $20,
                     NULL,
                     NULL,
+                    NULL,
+                    FALSE,
                     NULL
                 )
                 ON CONFLICT DO NOTHING
@@ -719,7 +748,9 @@ impl PostgresRepository {
                     dedup_key,
                     raw_ref_type,
                     raw_ref_id,
-                    raw_s3_uri
+                    raw_s3_uri,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     ($1)::text::uuid,
@@ -745,7 +776,9 @@ impl PostgresRepository {
                     $21,
                     $22,
                     $23,
-                    $24
+                    $24,
+                    $25,
+                    $26
                 )
                 ON CONFLICT DO NOTHING
                 "#,
@@ -774,6 +807,8 @@ impl PostgresRepository {
                     &record.raw_ref_type,
                     &record.raw_ref_id,
                     &record.raw_s3_uri,
+                    &record.is_simulated,
+                    &record.simulation_run_id,
                 ],
             )
             .await?;
@@ -891,6 +926,7 @@ impl PostgresRepository {
         }
 
         let payload = serde_json::to_value(event)?;
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_payload(&payload);
         let asset_pair = event
             .payload
             .get("s")
@@ -939,13 +975,14 @@ impl PostgresRepository {
                     dedup_key,
                     raw_ref_type,
                     raw_ref_id,
-                    raw_s3_uri
+                    raw_s3_uri,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     NULL,
                     $1,
                     $2,
-                    NULL,
                     $3,
                     $4,
                     $5,
@@ -957,21 +994,25 @@ impl PostgresRepository {
                     $11,
                     $12,
                     $13,
-                    $13,
+                    $14,
+                    $14,
                     'parsed',
                     NULL,
-                    $14,
                     $15,
                     $16,
+                    $17,
                     NULL,
                     NULL,
-                    NULL
+                    NULL,
+                    $18,
+                    $19
                 )
                 ON CONFLICT DO NOTHING
                 "#,
                 &[
                     &event.source_id,
                     &format!("{:?}", event.source_type).to_lowercase(),
+                    &Some(event.tenant_id.clone()),
                     &event.event_type,
                     &event.event_id,
                     &event.market_key,
@@ -986,6 +1027,8 @@ impl PostgresRepository {
                     &payload,
                     &normalized_fields,
                     &event.event_id,
+                    &is_simulated,
+                    &simulation_run_id,
                 ],
             )
             .await?;

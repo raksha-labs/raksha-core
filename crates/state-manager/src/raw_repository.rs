@@ -26,6 +26,8 @@ pub struct SourceEnvelopeV1 {
     pub topic0: Option<String>,
     pub market_key: Option<String>,
     pub price: Option<f64>,
+    pub is_simulated: bool,
+    pub simulation_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,15 +227,20 @@ impl PostgresRawRepository {
                     provider,
                     request_window,
                     schema_version,
-                    idempotency_key
+                    idempotency_key,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16
+                    $11, $12, $13, $14, $15, $16,
+                    $17, $18
                 )
                 ON CONFLICT (idempotency_key) DO UPDATE
-                SET observed_at = EXCLUDED.observed_at
+                SET observed_at = EXCLUDED.observed_at,
+                    is_simulated = EXCLUDED.is_simulated,
+                    simulation_run_id = EXCLUDED.simulation_run_id
                 RETURNING event_id::text
                 "#,
                 &[
@@ -253,6 +260,8 @@ impl PostgresRawRepository {
                     &Some(envelope.partition_key.clone()),
                     &envelope.schema_version,
                     &envelope.idempotency_key,
+                    &envelope.is_simulated,
+                    &envelope.simulation_run_id,
                 ],
             )
             .await;
@@ -290,14 +299,19 @@ impl PostgresRawRepository {
                     decoded_json,
                     raw_payload,
                     schema_version,
-                    idempotency_key
+                    idempotency_key,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     $1, $2, $3, $4, $5,
-                    $6, $7, $8, $9, $10, $11, $12
+                    $6, $7, $8, $9, $10, $11, $12,
+                    $13, $14
                 )
                 ON CONFLICT (idempotency_key) DO UPDATE
-                SET observed_at = EXCLUDED.observed_at
+                SET observed_at = EXCLUDED.observed_at,
+                    is_simulated = EXCLUDED.is_simulated,
+                    simulation_run_id = EXCLUDED.simulation_run_id
                 RETURNING event_id::text
                 "#,
                 &[
@@ -313,6 +327,8 @@ impl PostgresRawRepository {
                     &envelope.payload,
                     &envelope.schema_version,
                     &envelope.idempotency_key,
+                    &envelope.is_simulated,
+                    &envelope.simulation_run_id,
                 ],
             )
             .await;
@@ -349,14 +365,19 @@ impl PostgresRawRepository {
                     sequence,
                     payload,
                     schema_version,
-                    idempotency_key
+                    idempotency_key,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     $1, $2, $3, $4, $5,
-                    $6, $7, $8, $9, $10, $11
+                    $6, $7, $8, $9, $10, $11,
+                    $12, $13
                 )
                 ON CONFLICT (idempotency_key) DO UPDATE
-                SET observed_at = EXCLUDED.observed_at
+                SET observed_at = EXCLUDED.observed_at,
+                    is_simulated = EXCLUDED.is_simulated,
+                    simulation_run_id = EXCLUDED.simulation_run_id
                 RETURNING tick_id::text
                 "#,
                 &[
@@ -371,6 +392,8 @@ impl PostgresRawRepository {
                     &envelope.payload,
                     &envelope.schema_version,
                     &envelope.idempotency_key,
+                    &envelope.is_simulated,
+                    &envelope.simulation_run_id,
                 ],
             )
             .await;

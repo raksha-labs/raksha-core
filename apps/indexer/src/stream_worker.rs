@@ -27,6 +27,8 @@ const MARKET_TRUTH_PEG_TARGET: f64 = 1.0;
 const DEFAULT_RPC_LOGS_POLL_INTERVAL_MS: u64 = 2_000;
 const DEFAULT_RPC_STATE_POLL_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_HTTP_POLL_INTERVAL_MS: u64 = 5_000;
+const MAX_MOCK_HTTP_POLL_INTERVAL_MS: u64 = 200;
+const MOCK_STREAM_BATCH_SIZE: usize = 1;
 const DEFAULT_RAW_LANDING_TIMEOUT_MS: u64 = 150;
 const MIN_POLL_INTERVAL_MS: u64 = 200;
 const MAX_POLL_INTERVAL_MS: u64 = 60_000;
@@ -109,6 +111,51 @@ fn resolve_poll_interval_duration(configured_ms: Option<u64>, default_ms: u64) -
         .unwrap_or(default_ms)
         .clamp(MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS);
     Duration::from_millis(resolved_ms)
+}
+
+fn is_tenant_scoped_mock_http_endpoint(endpoint: &str) -> bool {
+    endpoint.contains("/api/mock/streams/")
+}
+
+fn tenant_scoped_mock_endpoint(endpoint: &str, tenant_id: &str) -> String {
+    let separator = if endpoint.contains('?') { '&' } else { '?' };
+    format!("{endpoint}{separator}tenant_id={tenant_id}&batch_size={MOCK_STREAM_BATCH_SIZE}")
+}
+
+fn single_tenant_runtime_config(
+    config: &RuntimeStreamConfig,
+    tenant_id: &str,
+) -> RuntimeStreamConfig {
+    let mut scoped = config.clone();
+    scoped.tenant_targets = vec![tenant_id.to_string()];
+    scoped
+}
+
+fn simulation_metadata_from_payload(payload: &Value) -> (bool, Option<String>) {
+    let simulation = payload.get("simulation").and_then(Value::as_object);
+    let run_id = simulation
+        .and_then(|meta| {
+            meta.get("run_id")
+                .or_else(|| meta.get("simulation_run_id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let is_simulated = simulation
+        .and_then(|meta| meta.get("is_simulated"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || payload
+            .get("is_simulated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || run_id.is_some();
+    (is_simulated, run_id)
+}
+
+fn simulation_run_id_from_value(payload: &Value) -> Option<String> {
+    simulation_metadata_from_payload(payload).1
 }
 
 pub async fn run_stream_worker(
@@ -293,8 +340,12 @@ async fn run_http_poll_loop(
     fx_cache: &mut FxRateCache,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
-    let poll_interval =
+    let tenant_scoped_mock = is_tenant_scoped_mock_http_endpoint(&endpoint);
+    let mut poll_interval =
         resolve_poll_interval_duration(config.poll_interval_ms, DEFAULT_HTTP_POLL_INTERVAL_MS);
+    if tenant_scoped_mock {
+        poll_interval = poll_interval.min(Duration::from_millis(MAX_MOCK_HTTP_POLL_INTERVAL_MS));
+    }
     let mut connector = HttpPollConnector::new(endpoint, poll_interval);
     connector.connect().await?;
 
@@ -305,17 +356,71 @@ async fn run_http_poll_loop(
                     return Ok(());
                 }
             }
-            raw = connector.next_payload() => {
-                match raw {
-                    Ok(payload) => process_payload(config, repo, raw_repo, stream, payload, None, fx_cache).await?,
-                    Err(error) => {
-                        common::log_error!(
-                            warn,
-                            error,
-                            "http_poll connector returned error",
-                            stream_config_id = %config.stream_config_id,
-                            source_id = %config.source_id
-                        );
+            _ = tokio::time::sleep(poll_interval) => {
+                if tenant_scoped_mock {
+                    for tenant_id in &config.tenant_targets {
+                        let tenant_endpoint = tenant_scoped_mock_endpoint(connector.endpoint(), tenant_id);
+                        match connector.fetch_payload(&tenant_endpoint).await {
+                            Ok(Some(payload)) => {
+                                let tenant_config = single_tenant_runtime_config(config, tenant_id);
+                                if let Some(run_id) = simulation_run_id_from_value(&payload) {
+                                    let payload_count = payload.as_array().map(|items| items.len()).unwrap_or(1);
+                                    info!(
+                                        stream_config_id = %config.stream_config_id,
+                                        source_id = %config.source_id,
+                                        tenant_id = %tenant_id,
+                                        stream_name = %config.stream_name,
+                                        simulation_run_id = %run_id,
+                                        payload_count,
+                                        "tenant-scoped http_poll fetched simulated payloads",
+                                    );
+                                }
+                                process_http_poll_payload(
+                                    &tenant_config,
+                                    repo,
+                                    raw_repo,
+                                    stream,
+                                    payload,
+                                    fx_cache,
+                                ).await?;
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                common::log_error!(
+                                    warn,
+                                    error,
+                                    "tenant-scoped http_poll connector returned error",
+                                    stream_config_id = %config.stream_config_id,
+                                    source_id = %config.source_id,
+                                    tenant_id = %tenant_id,
+                                    endpoint = %tenant_endpoint
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    match connector.fetch_payload(connector.endpoint()).await {
+                        Ok(Some(payload)) => {
+                            process_http_poll_payload(
+                                config,
+                                repo,
+                                raw_repo,
+                                stream,
+                                payload,
+                                fx_cache,
+                            ).await?;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            common::log_error!(
+                                warn,
+                                error,
+                                "http_poll connector returned error",
+                                stream_config_id = %config.stream_config_id,
+                                source_id = %config.source_id,
+                                endpoint = %connector.endpoint()
+                            );
+                        }
                     }
                 }
             }
@@ -420,6 +525,26 @@ async fn persist_raw_envelope(
     }
 }
 
+async fn process_http_poll_payload(
+    config: &RuntimeStreamConfig,
+    repo: &PostgresRepository,
+    raw_repo: Option<&PostgresRawRepository>,
+    stream: &RedisStreamPublisher,
+    payload: Value,
+    fx_cache: &mut FxRateCache,
+) -> Result<()> {
+    match payload {
+        Value::Array(items) => {
+            for item in items {
+                process_payload(config, repo, raw_repo, stream, item, None, fx_cache).await?;
+            }
+            Ok(())
+        }
+        Value::Null => Ok(()),
+        other => process_payload(config, repo, raw_repo, stream, other, None, fx_cache).await,
+    }
+}
+
 async fn process_payload(
     config: &RuntimeStreamConfig,
     repo: &PostgresRepository,
@@ -444,10 +569,18 @@ async fn process_payload(
             if parsed.chain_id.is_none() {
                 parsed.chain_id = chain_id_hint;
             }
+            let (is_simulated, simulation_run_id) = simulation_metadata_from_payload(&payload);
+            let operational_observed_at = simulation_operational_observed_at(is_simulated, &parsed);
             let mut payload_for_storage = payload.clone();
             let (parse_status, parse_error, should_fanout) =
                 apply_usdt_normalization(repo, &mut parsed, &mut payload_for_storage, fx_cache)
                     .await?;
+            annotate_simulation_ingest_clock(
+                &mut parsed.normalized_fields,
+                is_simulated,
+                operational_observed_at,
+                parsed.payload_event_ts,
+            );
             apply_market_truth_context(repo, config, &mut parsed, &mut payload_for_storage).await?;
 
             let dedup_key = build_dedup_key(config, &parsed, &payload);
@@ -456,6 +589,9 @@ async fn process_payload(
                 &parsed,
                 payload_for_storage.clone(),
                 dedup_key.as_deref(),
+                operational_observed_at,
+                is_simulated,
+                simulation_run_id.clone(),
             );
             let raw_landing = persist_raw_envelope(raw_repo, &envelope).await;
             if raw_landing_required() && !raw_landing.status.persisted() {
@@ -481,13 +617,26 @@ async fn process_payload(
                 parse_status,
                 parse_error,
                 raw_landing.pointer.clone(),
+                operational_observed_at,
+                is_simulated,
+                simulation_run_id.clone(),
             );
             let inserted = repo.insert_ingest_operational_event(&record).await?;
             if !inserted {
                 debug!(
                     stream_config_id = %config.stream_config_id,
                     source_id = %config.source_id,
-                    "duplicate source feed event skipped by dedup key",
+                    tenant_id = (config.tenant_targets.len() == 1).then(|| config.tenant_targets[0].as_str()),
+                    simulation_run_id = simulation_run_id.as_deref(),
+                    source_pk = payload_for_storage
+                        .get("simulation")
+                        .and_then(|value| value.get("source_pk"))
+                        .and_then(|value| value.as_str()),
+                    event_id = parsed.event_id.as_deref(),
+                    dedup_key = dedup_key.as_deref(),
+                    payload_event_ts = ?parsed.payload_event_ts,
+                    observed_at = ?parsed.observed_at,
+                    "source feed event skipped due to ingest uniqueness conflict",
                 );
                 return Ok(());
             }
@@ -508,6 +657,7 @@ async fn process_payload(
         Err(parse_error) => {
             let observed_at = Utc::now();
             let dedup_key = hash_payload_only(config, &payload, observed_at);
+            let (is_simulated, simulation_run_id) = simulation_metadata_from_payload(&payload);
             let envelope = SourceEnvelopeV1 {
                 envelope_id: Uuid::new_v4().to_string(),
                 source_id: config.source_id.clone(),
@@ -527,6 +677,8 @@ async fn process_payload(
                 topic0: None,
                 market_key: config.market_key.clone(),
                 price: None,
+                is_simulated,
+                simulation_run_id: simulation_run_id.clone(),
             };
             let raw_landing = persist_raw_envelope(raw_repo, &envelope).await;
             if raw_landing_required() && !raw_landing.status.persisted() {
@@ -549,7 +701,8 @@ async fn process_payload(
                 stream_id: Some(config.stream_config_id.clone()),
                 source_id: config.source_id.clone(),
                 source_type: config.source_type.clone(),
-                tenant_id: None,
+                tenant_id: (config.tenant_targets.len() == 1)
+                    .then(|| config.tenant_targets[0].clone()),
                 event_type: config.event_type.clone(),
                 event_id: None,
                 market_key: config.market_key.clone(),
@@ -570,6 +723,8 @@ async fn process_payload(
                 raw_ref_type: raw_landing.pointer.as_ref().map(|p| p.raw_ref_type.clone()),
                 raw_ref_id: raw_landing.pointer.as_ref().map(|p| p.raw_ref_id.clone()),
                 raw_s3_uri: None,
+                is_simulated,
+                simulation_run_id,
             };
             let _ = repo.insert_ingest_operational_event(&record).await?;
             if let Some(writer) = raw_repo {
@@ -591,6 +746,47 @@ async fn process_payload(
                     .await;
             }
             Ok(())
+        }
+    }
+}
+
+fn simulation_operational_observed_at(
+    is_simulated: bool,
+    parsed: &ParsedFeedEvent,
+) -> chrono::DateTime<Utc> {
+    if is_simulated {
+        Utc::now()
+    } else {
+        parsed.observed_at
+    }
+}
+
+fn annotate_simulation_ingest_clock(
+    normalized_fields: &mut Value,
+    is_simulated: bool,
+    operational_observed_at: chrono::DateTime<Utc>,
+    source_event_ts: Option<chrono::DateTime<Utc>>,
+) {
+    if !is_simulated {
+        return;
+    }
+    if !normalized_fields.is_object() {
+        *normalized_fields = json!({});
+    }
+    if let Some(obj) = normalized_fields.as_object_mut() {
+        obj.insert(
+            "simulation_processing_clock".to_string(),
+            Value::String("replay_ingest_now".to_string()),
+        );
+        obj.insert(
+            "simulation_ingest_observed_at".to_string(),
+            Value::String(operational_observed_at.to_rfc3339()),
+        );
+        if let Some(source_event_ts) = source_event_ts {
+            obj.insert(
+                "simulation_source_event_ts".to_string(),
+                Value::String(source_event_ts.to_rfc3339()),
+            );
         }
     }
 }
@@ -968,12 +1164,15 @@ fn to_operational_record(
     parse_status: &str,
     parse_error: Option<String>,
     raw_pointer: Option<RawRecordPointer>,
+    observed_at: chrono::DateTime<Utc>,
+    is_simulated: bool,
+    simulation_run_id: Option<String>,
 ) -> IngestOperationalEventRecord {
     IngestOperationalEventRecord {
         stream_id: Some(config.stream_config_id.clone()),
         source_id: config.source_id.clone(),
         source_type: config.source_type.clone(),
-        tenant_id: None,
+        tenant_id: (config.tenant_targets.len() == 1).then(|| config.tenant_targets[0].clone()),
         event_type: parsed.event_type.clone(),
         event_id: parsed.event_id.clone(),
         market_key: parsed.market_key.clone(),
@@ -985,7 +1184,7 @@ fn to_operational_record(
         topic0: parsed.topic0.clone(),
         price: parsed.price,
         payload_event_ts: parsed.payload_event_ts,
-        observed_at: parsed.observed_at,
+        observed_at,
         parse_status: parse_status.to_string(),
         parse_error,
         payload,
@@ -998,6 +1197,8 @@ fn to_operational_record(
             .as_ref()
             .map(|pointer| pointer.raw_ref_id.clone()),
         raw_s3_uri: None,
+        is_simulated,
+        simulation_run_id,
     }
 }
 
@@ -1041,8 +1242,10 @@ fn to_source_envelope(
     parsed: &ParsedFeedEvent,
     payload: Value,
     dedup_key: Option<&str>,
+    observed_at: chrono::DateTime<Utc>,
+    is_simulated: bool,
+    simulation_run_id: Option<String>,
 ) -> SourceEnvelopeV1 {
-    let observed_at = parsed.observed_at;
     SourceEnvelopeV1 {
         envelope_id: Uuid::new_v4().to_string(),
         source_id: config.source_id.clone(),
@@ -1064,6 +1267,8 @@ fn to_source_envelope(
         topic0: parsed.topic0.clone(),
         market_key: parsed.market_key.clone(),
         price: parsed.price,
+        is_simulated,
+        simulation_run_id,
     }
 }
 
@@ -1359,11 +1564,39 @@ fn build_dedup_key(
     parsed: &ParsedFeedEvent,
     payload: &Value,
 ) -> Option<String> {
+    let (_, simulation_run_id) = simulation_metadata_from_payload(payload);
+    if let Some(tx_hash) = parsed.tx_hash.as_deref().filter(|value| !value.is_empty()) {
+        let mut provider_key = format!(
+            "provider:{}:{}:{}:{}",
+            config.source_id,
+            config.stream_config_id,
+            tx_hash,
+            parsed.log_index.unwrap_or_default()
+        );
+        if let Some(payload_event_ts) = parsed.payload_event_ts {
+            provider_key.push_str(":ts:");
+            provider_key.push_str(&payload_event_ts.timestamp_millis().to_string());
+        }
+        if let Some(run_id) = simulation_run_id.as_deref() {
+            provider_key.push_str(":sim:");
+            provider_key.push_str(run_id);
+        }
+        return Some(provider_key);
+    }
     if let Some(event_id) = parsed.event_id.as_ref() {
-        return Some(format!(
+        let mut provider_key = format!(
             "provider:{}:{}:{}",
             config.source_id, config.stream_config_id, event_id
-        ));
+        );
+        if let Some(payload_event_ts) = parsed.payload_event_ts {
+            provider_key.push_str(":ts:");
+            provider_key.push_str(&payload_event_ts.timestamp_millis().to_string());
+        }
+        if let Some(run_id) = simulation_run_id.as_deref() {
+            provider_key.push_str(":sim:");
+            provider_key.push_str(run_id);
+        }
+        return Some(provider_key);
     }
 
     let mut hasher = Sha256::new();
@@ -1386,6 +1619,10 @@ fn build_dedup_key(
     hasher.update(parsed.topic0.as_deref().unwrap_or_default().as_bytes());
     hasher.update(b"|");
     hasher.update(payload.to_string().as_bytes());
+    if let Some(run_id) = simulation_run_id.as_deref() {
+        hasher.update(b"|");
+        hasher.update(run_id.as_bytes());
+    }
     Some(hex::encode(hasher.finalize()))
 }
 
@@ -1394,6 +1631,7 @@ fn hash_payload_only(
     payload: &Value,
     observed_at: chrono::DateTime<Utc>,
 ) -> String {
+    let (_, simulation_run_id) = simulation_metadata_from_payload(payload);
     let mut hasher = Sha256::new();
     hasher.update(config.source_id.as_bytes());
     hasher.update(b"|");
@@ -1404,11 +1642,17 @@ fn hash_payload_only(
     hasher.update(observed_at.timestamp_millis().to_string().as_bytes());
     hasher.update(b"|");
     hasher.update(payload.to_string().as_bytes());
+    if let Some(run_id) = simulation_run_id.as_deref() {
+        hasher.update(b"|");
+        hasher.update(run_id.as_bytes());
+    }
     hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
+
     use super::*;
 
     #[test]
@@ -1456,5 +1700,110 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("alchemy_api_key"));
         assert!(message.contains("auth_secret_ref=vault://alchemy/prod"));
+    }
+
+    #[test]
+    fn build_dedup_key_is_scoped_by_simulation_run() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "binance-global".to_string(),
+            source_type: "cex_api".to_string(),
+            source_name: "Binance".to_string(),
+            connection_config: json!({"endpoint": "http://example.invalid"}),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "http_poll".to_string(),
+            stream_name: "ticker-usdc-usd".to_string(),
+            subscription_key: None,
+            event_type: "quote".to_string(),
+            parser_name: "binance_miniticker_v1".to_string(),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSDT".to_string()),
+            filter_config: json!({}),
+            poll_interval_ms: Some(5000),
+            payload_ts_path: Some("$.E".to_string()),
+            payload_ts_unit: "ms".to_string(),
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+        let parsed = ParsedFeedEvent {
+            event_type: "quote".to_string(),
+            event_id: None,
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSDT".to_string()),
+            price: Some(0.88),
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: None,
+            observed_at: Utc.timestamp_opt(1_678_521_640, 0).single().unwrap(),
+            normalized_fields: json!({}),
+        };
+        let payload_a = json!({
+            "s": "USDCUSDT",
+            "c": "0.880000",
+            "E": 1678521640000_i64,
+            "simulation": {
+                "is_simulated": true,
+                "run_id": "run-a"
+            }
+        });
+        let payload_b = json!({
+            "s": "USDCUSDT",
+            "c": "0.880000",
+            "E": 1678521640000_i64,
+            "simulation": {
+                "is_simulated": true,
+                "run_id": "run-b"
+            }
+        });
+
+        let key_a = build_dedup_key(&config, &parsed, &payload_a).expect("key");
+        let key_b = build_dedup_key(&config, &parsed, &payload_b).expect("key");
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn simulated_operational_clock_preserves_source_event_ts() {
+        let source_event_ts = Utc
+            .timestamp_millis_opt(1_678_521_600_000)
+            .single()
+            .expect("source event timestamp");
+        let parsed = ParsedFeedEvent {
+            event_type: "quote".to_string(),
+            event_id: None,
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSDT".to_string()),
+            price: Some(1.0),
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: Some(source_event_ts),
+            observed_at: source_event_ts,
+            normalized_fields: json!({}),
+        };
+
+        let operational_observed_at = simulation_operational_observed_at(true, &parsed);
+        let mut normalized_fields = json!({});
+        annotate_simulation_ingest_clock(
+            &mut normalized_fields,
+            true,
+            operational_observed_at,
+            parsed.payload_event_ts,
+        );
+
+        assert_eq!(parsed.payload_event_ts, Some(source_event_ts));
+        assert!(operational_observed_at > source_event_ts);
+        assert_eq!(
+            normalized_fields["simulation_processing_clock"],
+            Value::String("replay_ingest_now".to_string())
+        );
+        assert_eq!(
+            normalized_fields["simulation_source_event_ts"],
+            Value::String(source_event_ts.to_rfc3339())
+        );
     }
 }
