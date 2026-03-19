@@ -111,6 +111,7 @@ jobs:
       apply_infra: ${{ github.event.inputs.apply_infra == 'true' }}
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
       expected_aws_account_id: ${{ needs.build-images.result == 'success' && needs.build-images.outputs.aws_account_id || '' }}
+      auto_build_missing_images: ${{ needs.build-images.result == 'success' }}
       aws_region: eu-west-1
     secrets:
       aws_role_arn: ${{ secrets.AWS_TEST_DEPLOY_ROLE_ARN }}

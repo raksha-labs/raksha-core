@@ -21,6 +21,10 @@ on:
         required: false
         type: string
         default: ''
+      auto_build_missing_images:
+        required: false
+        type: boolean
+        default: false
       aws_region:
         required: false
         type: string
@@ -107,6 +111,7 @@ jobs:
         env:
           AWS_REGION: ${{ inputs.aws_region }}
           APPLY_INFRA: ${{ inputs.apply_infra }}
+          AUTO_BUILD_MISSING_IMAGES: ${{ inputs.auto_build_missing_images }}
           IMAGE_TAG: ${{ inputs.image_tag }}
           SERVICE_FILTER: ${{ inputs.service_filter }}
         run: |

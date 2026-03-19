@@ -14,6 +14,7 @@ IMAGE_TAG="${2:-${IMAGE_TAG:-}}"
 
 AWS_REGION="${AWS_REGION:-eu-west-1}"
 APPLY_INFRA="${APPLY_INFRA:-false}"
+AUTO_BUILD_MISSING_IMAGES="${AUTO_BUILD_MISSING_IMAGES:-false}"
 SERVICE_FILTER_NORMALIZED=$(normalize_csv_filter "${SERVICE_FILTER:-}")
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
@@ -38,17 +39,52 @@ image_exists_in_repo() {
     --output text >/dev/null 2>&1
 }
 
-missing_repositories=()
-checked_count=0
-while IFS= read -r repository; do
-  [[ -n "${repository}" ]] || continue
-  checked_count=$((checked_count + 1))
-  if ! image_exists_in_repo "${repository}"; then
-    missing_repositories+=("${repository}")
-  fi
-done < <(required_repositories)
+collect_missing_repositories() {
+  missing_repositories=()
+  checked_count=0
+  while IFS= read -r repository; do
+    [[ -n "${repository}" ]] || continue
+    checked_count=$((checked_count + 1))
+    if ! image_exists_in_repo "${repository}"; then
+      missing_repositories+=("${repository}")
+    fi
+  done < <(required_repositories)
+}
+
+missing_services_csv() {
+  local repository service csv=""
+  for repository in "${missing_repositories[@]}"; do
+    service="${repository#raksha-}"
+    if [[ -n "${csv}" ]]; then
+      csv+=","
+    fi
+    csv+="${service}"
+  done
+  printf '%s\n' "${csv}"
+}
+
+auto_build_missing_images() {
+  [[ "${AUTO_BUILD_MISSING_IMAGES}" == "true" ]] || return 1
+  (( ${#missing_repositories[@]} > 0 )) || return 1
+
+  require_cmd docker
+
+  local missing_services
+  missing_services=$(missing_services_csv)
+  [[ -n "${missing_services}" ]] || return 1
+
+  log "image tag ${IMAGE_TAG} missing in account ${AWS_ACCOUNT_ID}; rebuilding services inline: ${missing_services}"
+  SERVICE_FILTER="${missing_services}" IMAGE_TAG="${IMAGE_TAG}" AWS_REGION="${AWS_REGION}" "${SCRIPT_DIR}/build_push_images.sh"
+}
+
+collect_missing_repositories
 
 (( checked_count > 0 )) || fail "no repositories selected for image tag validation"
+
+if (( ${#missing_repositories[@]} > 0 )); then
+  auto_build_missing_images || true
+  collect_missing_repositories
+fi
 
 if (( ${#missing_repositories[@]} > 0 )); then
   fail "image tag ${IMAGE_TAG} is missing from ${#missing_repositories[@]} required repositories in ${AWS_REGION} for account ${AWS_ACCOUNT_ID}: ${missing_repositories[*]}. Build images for this tag in the same account before rollout or rerun with build_images=true."
