@@ -54,9 +54,7 @@ pub trait DetectionPattern: Send {
 /// `policies`).  Falls back to the whole blob for backward compatibility with
 /// tests and older flat configs.
 pub(crate) fn extract_detection_config(config: &Value) -> &Value {
-    config
-        .get("detection_config")
-        .unwrap_or(config)
+    config.get("detection_config").unwrap_or(config)
 }
 
 /// Collect the set of enabled source_ids from a composite full_config blob.
@@ -65,12 +63,18 @@ pub(crate) fn extract_detection_config(config: &Value) -> &Value {
 /// binding restriction — accept events from any source).  Returns `Some(set)`
 /// when bindings are explicitly configured; an empty set means all sources
 /// were disabled and events from every source should be skipped.
-pub(crate) fn extract_bound_source_ids(config: &Value) -> Option<std::collections::HashSet<String>> {
+pub(crate) fn extract_bound_source_ids(
+    config: &Value,
+) -> Option<std::collections::HashSet<String>> {
     let arr = config.get("source_bindings")?.as_array()?;
     let set = arr
         .iter()
         .filter(|b| b.get("enabled").and_then(Value::as_bool).unwrap_or(true))
-        .filter_map(|b| b.get("source_id").and_then(Value::as_str).map(str::to_owned))
+        .filter_map(|b| {
+            b.get("source_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
         .collect();
     Some(set)
 }
