@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Image tag to deploy (leave empty to reuse latest unless build_images is enabled)'
+        description: 'Image tag to deploy (required when build_images is false)'
         required: false
         default: ''
         type: string
@@ -75,9 +75,19 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.build_images != 'true' && github.event.inputs.image_tag == '' && needs.detect-changes.outputs.build_required == 'true' }}
     steps:
-      - name: Warn when deploy reuses latest despite code changes
+      - name: Fail when deploy skips build without explicit image tag
         run: |
-          echo "::warning title=Deploying without image build::Image-impacting files changed, but build_images=false and image_tag is empty. Deploy will reuse the existing 'latest' image."
+          echo "::error title=Missing image tag::Image-impacting files changed, but build_images=false and image_tag is empty. Run with build_images=true or provide an explicit image_tag." >&2
+          exit 1
+
+  guard-image-source:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_images != 'true' && github.event.inputs.image_tag == '' }}
+    steps:
+      - name: Fail when deploy has no image source
+        run: |
+          echo "::error title=Missing image source::Set build_images=true or provide image_tag. Empty image_tag is not a safe default for core deploys." >&2
+          exit 1
 
   build-images:
     needs: detect-changes
@@ -92,12 +102,12 @@ jobs:
       aws_role_arn: ${{ secrets.AWS_IMAGES_ROLE_ARN }}
 
   deploy:
-    needs: build-images
-    if: ${{ !cancelled() && (needs.build-images.result == 'success' || needs.build-images.result == 'skipped') }}
+    needs: [build-images, guard-build-required, guard-image-source]
+    if: ${{ !cancelled() && (needs.build-images.result == 'success' || needs.build-images.result == 'skipped') && (needs.guard-build-required.result == 'success' || needs.guard-build-required.result == 'skipped') && (needs.guard-image-source.result == 'success' || needs.guard-image-source.result == 'skipped') }}
     uses: ./.github/workflows/reusable-ecs-rollout.yml
     with:
       environment: test
-      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || needs.build-images.result == 'success' && format('sha-{0}', github.sha) || 'latest' }}
+      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || needs.build-images.result == 'success' && format('sha-{0}', github.sha) || '' }}
       apply_infra: ${{ github.event.inputs.apply_infra == 'true' }}
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
       aws_region: eu-west-1
