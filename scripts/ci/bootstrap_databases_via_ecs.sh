@@ -168,11 +168,11 @@ resolve_bootstrap_image_tag() {
   fi
 
   if [[ -n "${requested_tag}" ]]; then
-    log "bootstrap image tag ${requested_tag} not found in ${bootstrap_repository}; checking reference service tag"
+    log "bootstrap image tag ${requested_tag} not found in ${bootstrap_repository}; checking reference service tag" >&2
   fi
 
   if [[ -n "${reference_image_tag}" ]] && ecr_image_tag_exists "${bootstrap_repository}" "${reference_image_tag}"; then
-    log "using ${bootstrap_repository} image tag ${reference_image_tag} derived from ${SERVICE_NAME}"
+    log "using ${bootstrap_repository} image tag ${reference_image_tag} derived from ${SERVICE_NAME}" >&2
     printf '%s\n' "${reference_image_tag}"
     return 0
   fi

@@ -41,7 +41,7 @@ resolve_image_tag_input() {
   configured_tag=$(trim_whitespace "$(tfvars_image_tag)")
 
   if [[ "${requested_tag}" == "latest" && -n "${configured_tag}" && "${configured_tag}" != "latest" ]]; then
-    log "terraform plan: replacing image_tag=latest with terraform.tfvars image_tag=${configured_tag}"
+    log "terraform plan: replacing image_tag=latest with terraform.tfvars image_tag=${configured_tag}" >&2
     printf '%s\n' "${configured_tag}"
     return 0
   fi
