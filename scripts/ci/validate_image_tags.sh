@@ -15,6 +15,8 @@ IMAGE_TAG="${2:-${IMAGE_TAG:-}}"
 AWS_REGION="${AWS_REGION:-eu-west-1}"
 APPLY_INFRA="${APPLY_INFRA:-false}"
 AUTO_BUILD_MISSING_IMAGES="${AUTO_BUILD_MISSING_IMAGES:-false}"
+IMAGE_VALIDATION_MAX_ATTEMPTS="${IMAGE_VALIDATION_MAX_ATTEMPTS:-12}"
+IMAGE_VALIDATION_RETRY_SLEEP_SECONDS="${IMAGE_VALIDATION_RETRY_SLEEP_SECONDS:-5}"
 SERVICE_FILTER_NORMALIZED=$(normalize_csv_filter "${SERVICE_FILTER:-}")
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
@@ -77,13 +79,34 @@ auto_build_missing_images() {
   SERVICE_FILTER="${missing_services}" IMAGE_TAG="${IMAGE_TAG}" AWS_REGION="${AWS_REGION}" "${SCRIPT_DIR}/build_push_images.sh"
 }
 
+wait_for_images_to_become_visible() {
+  local attempt=1
+
+  while (( attempt <= IMAGE_VALIDATION_MAX_ATTEMPTS )); do
+    collect_missing_repositories
+    if (( ${#missing_repositories[@]} == 0 )); then
+      return 0
+    fi
+
+    if (( attempt == IMAGE_VALIDATION_MAX_ATTEMPTS )); then
+      return 1
+    fi
+
+    log "waiting for image tag ${IMAGE_TAG} to become visible in ECR (attempt ${attempt}/${IMAGE_VALIDATION_MAX_ATTEMPTS}); still missing: ${missing_repositories[*]}"
+    sleep "${IMAGE_VALIDATION_RETRY_SLEEP_SECONDS}"
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
 collect_missing_repositories
 
 (( checked_count > 0 )) || fail "no repositories selected for image tag validation"
 
 if (( ${#missing_repositories[@]} > 0 )); then
   auto_build_missing_images || true
-  collect_missing_repositories
+  wait_for_images_to_become_visible || true
 fi
 
 if (( ${#missing_repositories[@]} > 0 )); then
