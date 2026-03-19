@@ -46,6 +46,35 @@ pub trait DetectionPattern: Send {
     ) -> Result<Option<DetectionResult>>;
 }
 
+/// Extract the detection config from a composite full_config blob.
+///
+/// The `load_tenant_pattern_configs()` query wraps each pattern's stored JSONB
+/// under `detection_config`.  This helper extracts that key so individual parse
+/// functions still work when they look for their top-level fields (e.g. `rules`,
+/// `policies`).  Falls back to the whole blob for backward compatibility with
+/// tests and older flat configs.
+pub(crate) fn extract_detection_config(config: &Value) -> &Value {
+    config
+        .get("detection_config")
+        .unwrap_or(config)
+}
+
+/// Collect the set of enabled source_ids from a composite full_config blob.
+///
+/// Returns `None` when no `source_bindings` key is present (meaning: no
+/// binding restriction — accept events from any source).  Returns `Some(set)`
+/// when bindings are explicitly configured; an empty set means all sources
+/// were disabled and events from every source should be skipped.
+pub(crate) fn extract_bound_source_ids(config: &Value) -> Option<std::collections::HashSet<String>> {
+    let arr = config.get("source_bindings")?.as_array()?;
+    let set = arr
+        .iter()
+        .filter(|b| b.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+        .filter_map(|b| b.get("source_id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    Some(set)
+}
+
 pub(crate) fn append_snapshot_meta(event: &UnifiedEvent, data: Value) -> Value {
     let mut snapshot = match data {
         Value::Object(map) => map,

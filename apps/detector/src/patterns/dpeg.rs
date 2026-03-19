@@ -5,7 +5,7 @@
 //! Fires a `DetectionResult` when a sustained depeg breach is detected based on the
 //! per-tenant `DpegPolicy` stored in `tenant_pattern_configs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -370,6 +370,8 @@ pub struct DpegPattern {
     /// Active simulated replay run per tenant, used to prevent cached quotes
     /// from one historical replay contaminating another.
     active_simulation_run_by_tenant: HashMap<String, String>,
+    /// tenant_id → set of enabled source_ids (None = unrestricted)
+    source_bindings: HashMap<String, HashSet<String>>,
 }
 
 impl DpegPattern {
@@ -572,15 +574,21 @@ impl DetectionPattern for DpegPattern {
 
     async fn reload_config(&mut self, config_map: &HashMap<(String, String), Value>) -> Result<()> {
         let mut new_policies = HashMap::new();
+        let mut next_bindings = HashMap::new();
         for ((tenant_id, pattern_id), config) in config_map {
             if pattern_id != PATTERN_ID {
                 continue;
             }
-            for policy in Self::parse_policies(tenant_id, config) {
+            let detection_config = super::extract_detection_config(config);
+            for policy in Self::parse_policies(tenant_id, detection_config) {
                 new_policies.insert((tenant_id.clone(), policy.market_key.clone()), policy);
+            }
+            if let Some(bound) = super::extract_bound_source_ids(config) {
+                next_bindings.insert(tenant_id.clone(), bound);
             }
         }
         self.policies = new_policies;
+        self.source_bindings = next_bindings;
         tracing::info!(policy_count = self.policies.len(), "dpeg policies reloaded");
         Ok(())
     }
@@ -593,6 +601,17 @@ impl DetectionPattern for DpegPattern {
     ) -> Result<Option<DetectionResult>> {
         let evaluation_time = event.timestamp;
         let (is_simulated, simulation_run_id, _, _) = simulation_metadata_from_event(event);
+
+        // Enforce source bindings: only process events from sources the tenant has bound to
+        // this pattern in the Gateway tab.  Mode switching (live ↔ test) is handled at the
+        // indexer level — live tenants receive live-profile streams, test tenants receive
+        // test-profile streams.  No simulation bypass needed here.
+        if let Some(bound) = self.source_bindings.get(&event.tenant_id) {
+            if !bound.is_empty() && !bound.contains(&event.source_id) {
+                return Ok(None);
+            }
+        }
+
         self.prepare_quote_cache_scope(
             &event.tenant_id,
             is_simulated,

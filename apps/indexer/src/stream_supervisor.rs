@@ -99,7 +99,7 @@ async fn reconcile(
 
     for cfg in effective {
         let targets = repo
-            .list_stream_tenant_targets(&cfg.stream_config_id)
+            .list_stream_tenant_targets(&cfg.stream_config_id, &cfg.operating_mode_profile)
             .await?
             .into_iter()
             .map(|target| target.tenant_id)

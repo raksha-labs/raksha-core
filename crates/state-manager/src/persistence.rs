@@ -17,6 +17,7 @@ pub struct EffectiveStreamConfig {
     pub source_name: String,
     pub connection_config: Value,
     pub connector_mode: String,
+    pub operating_mode_profile: String, // "live" | "test"
     pub stream_name: String,
     pub subscription_key: Option<String>,
     pub event_type: String,
@@ -489,6 +490,7 @@ impl PostgresRepository {
                     ds.source_name,
                     COALESCE(ssc.connection_config_override, ds.connection_config) AS connection_config,
                     ssc.connector_mode,
+                    ssc.operating_mode_profile,
                     ssc.stream_name,
                     ssc.subscription_key,
                     ssc.event_type,
@@ -506,7 +508,7 @@ impl PostgresRepository {
                   ON ds.source_id = ssc.source_id
                 WHERE ds.enabled = TRUE
                   AND ssc.enabled = TRUE
-                ORDER BY ssc.source_id, ssc.stream_name, ssc.asset_pair NULLS FIRST
+                ORDER BY ssc.source_id, ssc.operating_mode_profile, ssc.stream_name, ssc.asset_pair NULLS FIRST
                 "#,
                 &[],
             )
@@ -531,38 +533,48 @@ impl PostgresRepository {
                 source_name: row.get(3),
                 connection_config: row.get(4),
                 connector_mode: row.get(5),
-                stream_name: row.get(6),
-                subscription_key: row.get(7),
-                event_type: row.get(8),
-                parser_name: row.get(9),
-                market_key: row.get(10),
-                asset_pair: row.get(11),
-                filter_config: row.get(12),
-                auth_secret_ref: row.get(13),
-                auth_config: row.get(14),
-                payload_ts_path: row.get(15),
-                payload_ts_unit: row.get(16),
-                poll_interval_ms: row.get(17),
+                operating_mode_profile: row.get(6),
+                stream_name: row.get(7),
+                subscription_key: row.get(8),
+                event_type: row.get(9),
+                parser_name: row.get(10),
+                market_key: row.get(11),
+                asset_pair: row.get(12),
+                filter_config: row.get(13),
+                auth_secret_ref: row.get(14),
+                auth_config: row.get(15),
+                payload_ts_path: row.get(16),
+                payload_ts_unit: row.get(17),
+                poll_interval_ms: row.get(18),
             });
         }
         Ok(configs)
     }
 
+    /// Returns tenant targets for a stream config, filtered by operating mode.
+    ///
+    /// Only tenants whose operating mode matches the stream's `operating_mode_profile`
+    /// receive events from that stream.  Tenants with no row in
+    /// `catalog.tenant_operating_mode` default to `'live'`.
     pub async fn list_stream_tenant_targets(
         &self,
         stream_config_id: &str,
+        operating_mode_profile: &str,
     ) -> Result<Vec<StreamTenantTarget>> {
         let rows = match self
             .client
             .query(
                 r#"
-                SELECT tenant_id
-                FROM catalog.source_stream_tenant_targets
-                WHERE stream_config_id::text = $1
-                  AND enabled = TRUE
-                ORDER BY tenant_id
+                SELECT sstt.tenant_id
+                FROM catalog.source_stream_tenant_targets sstt
+                LEFT JOIN catalog.tenant_operating_mode tom
+                  ON tom.tenant_id = sstt.tenant_id
+                WHERE sstt.stream_config_id::text = $1
+                  AND sstt.enabled = TRUE
+                  AND COALESCE(tom.mode, 'live') = $2
+                ORDER BY sstt.tenant_id
                 "#,
-                &[&stream_config_id],
+                &[&stream_config_id, &operating_mode_profile],
             )
             .await
         {

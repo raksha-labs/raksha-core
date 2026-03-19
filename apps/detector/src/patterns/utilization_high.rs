@@ -12,7 +12,7 @@
 //!
 //! Protocol-pause events suspend auto-resolution and emit an Update signal.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -532,6 +532,8 @@ pub struct UtilizationHighPattern {
     simulation_configs: HashMap<String, Vec<UtilizationHighRule>>,
     /// `{tenant_id}:{rule_id}:{subject_key}` → state
     state_cache: HashMap<String, UtilizationRuleState>,
+    /// tenant_id → set of enabled source_ids (None = unrestricted)
+    source_bindings: HashMap<String, HashSet<String>>,
 }
 
 struct UtilizationDetectionContext<'a> {
@@ -873,14 +875,20 @@ impl DetectionPattern for UtilizationHighPattern {
 
     async fn reload_config(&mut self, config_map: &HashMap<(String, String), Value>) -> Result<()> {
         let mut next = HashMap::new();
+        let mut next_bindings = HashMap::new();
         for ((tenant_id, pattern_id), config) in config_map {
             if pattern_id != PATTERN_ID {
                 continue;
             }
-            let rules = parse_utilization_rules(config, tenant_id);
+            let detection_config = super::extract_detection_config(config);
+            let rules = parse_utilization_rules(detection_config, tenant_id);
             next.insert(tenant_id.clone(), rules);
+            if let Some(bound) = super::extract_bound_source_ids(config) {
+                next_bindings.insert(tenant_id.clone(), bound);
+            }
         }
         self.configs = next;
+        self.source_bindings = next_bindings;
         tracing::info!(
             tenant_count = self.configs.len(),
             "utilization_high configs reloaded"
@@ -895,6 +903,15 @@ impl DetectionPattern for UtilizationHighPattern {
         repo: &PostgresRepository,
     ) -> Result<Option<DetectionResult>> {
         let (_, simulation_run_id, _, _) = simulation_metadata_from_event(event);
+        // Enforce source bindings: only process events from sources the tenant has bound to
+        // this pattern in the Gateway tab.  Mode switching (live ↔ test) is handled at the
+        // indexer level — live tenants receive live-profile streams, test tenants receive
+        // test-profile streams.  No simulation bypass needed here.
+        if let Some(bound) = self.source_bindings.get(&event.tenant_id) {
+            if !bound.is_empty() && !bound.contains(&event.source_id) {
+                return Ok(None);
+            }
+        }
         let Some(rules) = self
             .effective_rules(&event.tenant_id, simulation_run_id.as_deref(), repo)
             .await?

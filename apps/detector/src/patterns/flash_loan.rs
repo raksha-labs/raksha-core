@@ -22,7 +22,7 @@
 //!
 //! Legacy single-object configs are also accepted for backward compatibility.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -80,6 +80,8 @@ pub struct FlashLoanPattern {
     configs: HashMap<String, Vec<FlashLoanRule>>,
     /// tenant_id → in-memory state (cooldowns)
     state_cache: HashMap<String, FlashLoanState>,
+    /// tenant_id → set of enabled source_ids (None = unrestricted)
+    source_bindings: HashMap<String, HashSet<String>>,
 }
 
 #[async_trait]
@@ -90,14 +92,20 @@ impl DetectionPattern for FlashLoanPattern {
 
     async fn reload_config(&mut self, config_map: &HashMap<(String, String), Value>) -> Result<()> {
         let mut new_configs = HashMap::new();
+        let mut next_bindings = HashMap::new();
         for ((tenant_id, pattern_id), config) in config_map {
             if pattern_id != PATTERN_ID {
                 continue;
             }
-            let rules = parse_flash_loan_rules(config, tenant_id);
+            let detection_config = super::extract_detection_config(config);
+            let rules = parse_flash_loan_rules(detection_config, tenant_id);
             new_configs.insert(tenant_id.clone(), rules);
+            if let Some(bound) = super::extract_bound_source_ids(config) {
+                next_bindings.insert(tenant_id.clone(), bound);
+            }
         }
         self.configs = new_configs;
+        self.source_bindings = next_bindings;
         tracing::info!(
             config_count = self.configs.len(),
             "flash_loan configs reloaded"
@@ -114,6 +122,16 @@ impl DetectionPattern for FlashLoanPattern {
         // Only process EVM chain events.
         if !matches!(event.source_type, SourceType::EvmChain) {
             return Ok(None);
+        }
+
+        // Enforce source bindings: only process events from sources the tenant has bound to
+        // this pattern in the Gateway tab.  Mode switching (live ↔ test) is handled at the
+        // indexer level — live tenants receive live-profile streams, test tenants receive
+        // test-profile streams.  No simulation bypass needed here.
+        if let Some(bound) = self.source_bindings.get(&event.tenant_id) {
+            if !bound.is_empty() && !bound.contains(&event.source_id) {
+                return Ok(None);
+            }
         }
 
         // Look up config set for this tenant.
