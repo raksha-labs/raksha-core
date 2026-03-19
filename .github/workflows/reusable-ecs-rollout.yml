@@ -81,6 +81,15 @@ jobs:
           role-to-assume: ${{ secrets.aws_role_arn }}
           aws-region: ${{ inputs.aws_region }}
 
+      - name: Validate image tag availability in ECR
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          APPLY_INFRA: ${{ inputs.apply_infra }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          SERVICE_FILTER: ${{ inputs.service_filter }}
+        run: |
+          bash scripts/ci/validate_image_tags.sh "${{ inputs.environment }}" "${{ inputs.image_tag }}"
+
       - name: Terraform apply
         if: ${{ inputs.apply_infra }}
         env:

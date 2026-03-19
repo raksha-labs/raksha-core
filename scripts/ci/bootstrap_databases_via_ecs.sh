@@ -128,6 +128,19 @@ cluster_capacity_providers=$(aws ecs describe-clusters \
 account_id=$(aws sts get-caller-identity --query Account --output text)
 bootstrap_repository="raksha-${BOOTSTRAP_SERVICE_NAME}"
 configured_image_tag=$(trim_whitespace "$(config_string_var image_tag)")
+reference_image=$(python3 - "${task_definition_json}" "${BOOTSTRAP_SERVICE_NAME}" <<'PY'
+import json
+import sys
+
+task_definition = json.loads(sys.argv[1])
+container_name = sys.argv[2]
+container = next(
+    (entry for entry in (task_definition.get("containerDefinitions") or []) if entry.get("name") == container_name),
+    None,
+)
+print((container or {}).get("image") or "")
+PY
+)
 reference_image_tag=$(python3 - "${task_definition_json}" "${BOOTSTRAP_SERVICE_NAME}" <<'PY'
 import json
 import sys
@@ -222,7 +235,13 @@ resolve_bootstrap_image() {
     return 0
   fi
 
-  fail "no runnable bootstrap image found (requested_tag=${requested_tag:-<empty>}, reference_tag=${reference_image_tag:-<empty>}, configured_tag=${configured_image_tag:-<empty>}, repo=${bootstrap_repository})"
+  if [[ -n "${reference_image}" ]] && [[ -n "${reference_image_tag}" ]] && [[ "${requested_tag}" == "${reference_image_tag}" ]]; then
+    log "reusing deployed bootstrap image ${reference_image} from ${SERVICE_NAME}; tag ${requested_tag} is not currently resolvable in ECR" >&2
+    printf '%s\n' "${reference_image}"
+    return 0
+  fi
+
+  fail "no runnable bootstrap image found (requested_tag=${requested_tag:-<empty>}, reference_tag=${reference_image_tag:-<empty>}, configured_tag=${configured_image_tag:-<empty>}, current_image=${reference_image:-<empty>}, repo=${bootstrap_repository})"
 }
 
 tmp_input=$(mktemp)

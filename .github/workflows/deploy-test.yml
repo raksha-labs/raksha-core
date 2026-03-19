@@ -9,9 +9,9 @@ on:
         default: ''
         type: string
       build_images:
-        description: Build fresh images before deploy
+        description: Build fresh images before deploy (recommended for recreated test envs)
         required: true
-        default: false
+        default: true
         type: boolean
       force_build:
         description: Force image build even when only CI/infrastructure files changed
