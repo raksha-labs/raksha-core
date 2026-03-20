@@ -221,180 +221,9 @@ AND NOT EXISTS (
     AND COALESCE(ssc.subscription_key, '') = COALESCE(ds.subscription_key, '')
 );
 
--- ─── Test Mode Stream Clones (Simlab mock source URLs) ─────────────────────
--- Creates test-profile clones of each live stream config with per-stream
--- endpoint overrides. Clone targets start disabled and become active only when
--- tenant operating mode switches to test.
-WITH live_streams AS (
-  SELECT
-    ssc.source_id,
-    ssc.connector_mode,
-    ssc.stream_name,
-    ssc.subscription_key,
-    ssc.event_type,
-    ssc.parser_name,
-    ssc.market_key,
-    ssc.asset_pair,
-    ssc.filter_config,
-    ssc.auth_secret_ref,
-    ssc.auth_config,
-    ssc.payload_ts_path,
-    ssc.payload_ts_unit,
-    ssc.poll_interval_ms,
-    ssc.enabled
-  FROM catalog.source_stream_configs ssc
-  WHERE ssc.operating_mode_profile = 'live'
-),
-desired_test_streams AS (
-  SELECT
-    ls.source_id,
-    ls.connector_mode,
-    'test'::text AS operating_mode_profile,
-    CONCAT(ls.stream_name, '__simlab_test') AS stream_name,
-    ls.subscription_key,
-    ls.event_type,
-    ls.parser_name,
-    ls.market_key,
-    ls.asset_pair,
-    ls.filter_config,
-    CASE
-      WHEN ls.connector_mode = 'websocket' THEN
-        jsonb_build_object('ws_endpoint', format('{simlab_mock_ws_base_url}/%s', ls.source_id))
-      WHEN ls.connector_mode IN ('rpc_logs', 'rpc_state') THEN
-        jsonb_build_object('rpc_url', format('{simlab_mock_rpc_base_url}/%s', ls.source_id))
-      WHEN ls.connector_mode = 'http_poll' THEN
-        jsonb_build_object('http_url', format('{simlab_mock_http_base_url}/%s', ls.source_id))
-      ELSE '{}'::jsonb
-    END AS connection_config_override,
-    ls.auth_secret_ref,
-    ls.auth_config,
-    ls.payload_ts_path,
-    ls.payload_ts_unit,
-    ls.poll_interval_ms,
-    ls.enabled,
-    'bootstrap:test-mode'::text AS created_by
-  FROM live_streams ls
-)
-INSERT INTO catalog.source_stream_configs (
-  source_id,
-  connector_mode,
-  operating_mode_profile,
-  stream_name,
-  subscription_key,
-  event_type,
-  parser_name,
-  market_key,
-  asset_pair,
-  filter_config,
-  connection_config_override,
-  auth_secret_ref,
-  auth_config,
-  payload_ts_path,
-  payload_ts_unit,
-  poll_interval_ms,
-  enabled,
-  created_by
-)
-SELECT
-  dts.source_id,
-  dts.connector_mode,
-  dts.operating_mode_profile,
-  dts.stream_name,
-  dts.subscription_key,
-  dts.event_type,
-  dts.parser_name,
-  dts.market_key,
-  dts.asset_pair,
-  dts.filter_config,
-  dts.connection_config_override,
-  dts.auth_secret_ref,
-  dts.auth_config,
-  dts.payload_ts_path,
-  dts.payload_ts_unit,
-  dts.poll_interval_ms,
-  dts.enabled,
-  dts.created_by
-FROM desired_test_streams dts
-WHERE NOT EXISTS (
-  SELECT 1
-  FROM catalog.source_stream_configs existing
-  WHERE existing.source_id = dts.source_id
-    AND existing.stream_name = dts.stream_name
-    AND COALESCE(existing.asset_pair, '') = COALESCE(dts.asset_pair, '')
-    AND COALESCE(existing.subscription_key, '') = COALESCE(dts.subscription_key, '')
-);
-
-WITH live_streams AS (
-  SELECT
-    ssc.source_id,
-    ssc.connector_mode,
-    ssc.stream_name,
-    ssc.subscription_key,
-    ssc.event_type,
-    ssc.parser_name,
-    ssc.market_key,
-    ssc.asset_pair,
-    ssc.filter_config,
-    ssc.auth_secret_ref,
-    ssc.auth_config,
-    ssc.payload_ts_path,
-    ssc.payload_ts_unit,
-    ssc.poll_interval_ms,
-    ssc.enabled
-  FROM catalog.source_stream_configs ssc
-  WHERE ssc.operating_mode_profile = 'live'
-),
-desired_test_streams AS (
-  SELECT
-    ls.source_id,
-    ls.connector_mode,
-    'test'::text AS operating_mode_profile,
-    CONCAT(ls.stream_name, '__simlab_test') AS stream_name,
-    ls.subscription_key,
-    ls.event_type,
-    ls.parser_name,
-    ls.market_key,
-    ls.asset_pair,
-    ls.filter_config,
-    CASE
-      WHEN ls.connector_mode = 'websocket' THEN
-        jsonb_build_object('ws_endpoint', format('{simlab_mock_ws_base_url}/%s', ls.source_id))
-      WHEN ls.connector_mode IN ('rpc_logs', 'rpc_state') THEN
-        jsonb_build_object('rpc_url', format('{simlab_mock_rpc_base_url}/%s', ls.source_id))
-      WHEN ls.connector_mode = 'http_poll' THEN
-        jsonb_build_object('http_url', format('{simlab_mock_http_base_url}/%s', ls.source_id))
-      ELSE '{}'::jsonb
-    END AS connection_config_override,
-    ls.auth_secret_ref,
-    ls.auth_config,
-    ls.payload_ts_path,
-    ls.payload_ts_unit,
-    ls.poll_interval_ms,
-    ls.enabled,
-    'bootstrap:test-mode'::text AS created_by
-  FROM live_streams ls
-)
-UPDATE catalog.source_stream_configs existing
-SET connector_mode = dts.connector_mode,
-    operating_mode_profile = dts.operating_mode_profile,
-    event_type = dts.event_type,
-    parser_name = dts.parser_name,
-    market_key = dts.market_key,
-    filter_config = dts.filter_config,
-    connection_config_override = dts.connection_config_override,
-    auth_secret_ref = dts.auth_secret_ref,
-    auth_config = dts.auth_config,
-    payload_ts_path = dts.payload_ts_path,
-    payload_ts_unit = dts.payload_ts_unit,
-    poll_interval_ms = dts.poll_interval_ms,
-    enabled = dts.enabled,
-    created_by = dts.created_by
-FROM desired_test_streams dts
-WHERE existing.source_id = dts.source_id
-  AND existing.operating_mode_profile = 'test'
-  AND existing.stream_name = dts.stream_name
-  AND COALESCE(existing.asset_pair, '') = COALESCE(dts.asset_pair, '')
-  AND COALESCE(existing.subscription_key, '') = COALESCE(dts.subscription_key, '');
+-- Grant the glider tenant access to the baseline live market/oracle streams
+-- used by local development and demo scenarios. Replay test streams are
+-- provisioned dynamically per tenant/run by workbench-services.
 
 WITH desired_stream_refs AS (
   SELECT source_id, stream_name, subscription_key, asset_pair
@@ -451,47 +280,9 @@ JOIN desired_stream_refs ds
  AND COALESCE(ds.asset_pair, '') = COALESCE(ssc.asset_pair, '')
 ON CONFLICT (stream_config_id, tenant_id) DO NOTHING;
 
-WITH live_targets AS (
-  SELECT
-    stt.tenant_id,
-    ssc.source_id,
-    ssc.stream_name,
-    ssc.subscription_key,
-    ssc.asset_pair
-  FROM catalog.source_stream_tenant_targets stt
-  JOIN catalog.source_stream_configs ssc
-    ON ssc.stream_config_id = stt.stream_config_id
-  WHERE ssc.operating_mode_profile = 'live'
-),
-mapped_test_targets AS (
-  SELECT
-    lt.tenant_id,
-    ssc_test.stream_config_id
-  FROM live_targets lt
-  JOIN catalog.source_stream_configs ssc_test
-    ON ssc_test.source_id = lt.source_id
-   AND ssc_test.operating_mode_profile = 'test'
-   AND ssc_test.stream_name = CONCAT(lt.stream_name, '__simlab_test')
-   AND COALESCE(ssc_test.subscription_key, '') = COALESCE(lt.subscription_key, '')
-   AND COALESCE(ssc_test.asset_pair, '') = COALESCE(lt.asset_pair, '')
-)
-INSERT INTO catalog.source_stream_tenant_targets (
-  stream_config_id,
-  tenant_id,
-  enabled,
-  created_by
-)
-SELECT
-  mtt.stream_config_id,
-  mtt.tenant_id,
-  FALSE,
-  'bootstrap:test-mode'
-FROM mapped_test_targets mtt
-ON CONFLICT (stream_config_id, tenant_id) DO NOTHING;
-
 -- ─── Default Tenant Operating Mode (local/dev bootstrap) ───────────────────
--- Local bootstrap defaults to TEST mode so seeded Simlab mock stream targets
--- are active by default for tenant 'glider'.
+-- Local bootstrap defaults to LIVE mode. Replay test streams are created
+-- dynamically for simulation runs and should not exist as static seeds.
 INSERT INTO catalog.tenant_operating_mode (
   tenant_id,
   mode,
@@ -502,29 +293,10 @@ INSERT INTO catalog.tenant_operating_mode (
 )
 VALUES (
   'glider',
-  'test',
-  'Bootstrap default: local/dev uses Simlab mock feeds.',
-  'bootstrap:test-mode',
+  'live',
+  'Bootstrap default: local/dev uses live stream targets.',
+  'bootstrap:live-mode',
   NOW(),
   NOW()
 )
 ON CONFLICT (tenant_id) DO NOTHING;
-
-UPDATE catalog.source_stream_tenant_targets stt
-SET enabled = CASE
-      WHEN ssc.operating_mode_profile = 'test' THEN TRUE
-      WHEN ssc.operating_mode_profile = 'live' THEN FALSE
-      ELSE stt.enabled
-    END,
-    updated_by = 'bootstrap:test-mode',
-    updated_at = NOW()
-FROM catalog.source_stream_configs ssc
-WHERE stt.stream_config_id = ssc.stream_config_id
-  AND stt.tenant_id = 'glider'
-  AND EXISTS (
-    SELECT 1
-    FROM catalog.tenant_operating_mode tom
-    WHERE tom.tenant_id = stt.tenant_id
-      AND tom.mode = 'test'
-  )
-  AND ssc.operating_mode_profile IN ('live', 'test');

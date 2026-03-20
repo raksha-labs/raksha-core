@@ -15,6 +15,7 @@ use tokio::{
 };
 use tokio_postgres::AsyncMessage;
 use tracing::{info, warn};
+use url::Url;
 
 use crate::stream_worker::{run_stream_worker, RuntimeStreamConfig};
 
@@ -186,8 +187,94 @@ async fn stop_worker(handle: WorkerHandle) {
 }
 
 fn skipped_test_stream_reason(cfg: &EffectiveStreamConfig) -> Option<&'static str> {
-    let _ = cfg;
+    if cfg.operating_mode_profile != "test" {
+        return None;
+    }
+
+    for key in ["ws_endpoint", "rpc_url", "http_url", "endpoint"] {
+        let Some(endpoint) = cfg
+            .connection_config
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+        else {
+            continue;
+        };
+        if endpoint.is_empty() {
+            continue;
+        }
+
+        let Ok(parsed) = Url::parse(endpoint) else {
+            continue;
+        };
+        let path = parsed.path();
+        if path.contains("/api/simulation/mock/") {
+            let mut has_tenant_id = false;
+            let mut has_stream_name = false;
+            for (key, value) in parsed.query_pairs() {
+                match key.as_ref() {
+                    "tenant_id" if !value.trim().is_empty() => has_tenant_id = true,
+                    "stream_name" if !value.trim().is_empty() => has_stream_name = true,
+                    _ => {}
+                }
+            }
+            if !has_tenant_id || !has_stream_name {
+                return Some("deprecated simulation replay endpoint");
+            }
+        }
+    }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skipped_test_stream_reason;
+    use state_manager::EffectiveStreamConfig;
+
+    fn config_for(endpoint_key: &str, endpoint: &str) -> EffectiveStreamConfig {
+        EffectiveStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "source-1".to_string(),
+            source_type: "cex".to_string(),
+            source_name: "source".to_string(),
+            connection_config: serde_json::json!({ endpoint_key: endpoint }),
+            connector_mode: "websocket".to_string(),
+            operating_mode_profile: "test".to_string(),
+            stream_name: "ticker-usdc-usd".to_string(),
+            subscription_key: None,
+            event_type: "quote".to_string(),
+            parser_name: "parser".to_string(),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDC/USD".to_string()),
+            filter_config: serde_json::json!({}),
+            auth_secret_ref: None,
+            auth_config: serde_json::json!({}),
+            payload_ts_path: None,
+            payload_ts_unit: "ms".to_string(),
+            poll_interval_ms: None,
+        }
+    }
+
+    #[test]
+    fn skips_bare_simulation_mock_routes() {
+        let cfg = config_for(
+            "rpc_url",
+            "ws://workbench-services:8010/api/simulation/mock/rpc/chainlink-eth-mainnet",
+        );
+        assert_eq!(
+            skipped_test_stream_reason(&cfg),
+            Some("deprecated simulation replay endpoint")
+        );
+    }
+
+    #[test]
+    fn keeps_run_scoped_simulation_routes() {
+        let cfg = config_for(
+            "rpc_url",
+            "ws://workbench-services:8010/api/simulation/mock/rpc/chainlink-eth-mainnet?tenant_id=raksha-demo&stream_name=usdc-usd-feed&simulation_run_id=run_123",
+        );
+        assert_eq!(skipped_test_stream_reason(&cfg), None);
+    }
 }
 
 fn to_runtime_config(

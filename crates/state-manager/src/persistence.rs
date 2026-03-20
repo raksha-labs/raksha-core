@@ -794,7 +794,7 @@ impl PostgresRepository {
                 r#"
                 DELETE FROM catalog.ingest_operational_events
                 WHERE event_type = ANY($1)
-                  AND observed_at < NOW() - ($2::BIGINT * INTERVAL '1 second')
+                  AND created_at < NOW() - ($2::BIGINT * INTERVAL '1 second')
                 "#,
                 &[&event_types, &seconds],
             )
