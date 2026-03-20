@@ -363,13 +363,20 @@ struct DpegAlertState {
 pub struct DpegPattern {
     /// (tenant_id, market_key) → DpegPolicy
     policies: HashMap<(String, String), DpegPolicy>,
-    /// (tenant_id, market_key) → latest quote per source_id
-    quote_cache: HashMap<(String, String), HashMap<String, QuoteInput>>,
+    /// (tenant_id, market_key) → recent quotes per source_id.
+    ///
+    /// Replay streams can arrive slightly out of payload timestamp order across
+    /// sources. Keeping a short history lets us evaluate each event against the
+    /// latest quote that existed at that event timestamp instead of letting a
+    /// future quote temporarily collapse quorum.
+    quote_cache: HashMap<(String, String), HashMap<String, Vec<QuoteInput>>>,
     /// tenant_id → set of enabled source_ids (None = unrestricted)
     source_bindings: HashMap<String, HashSet<String>>,
 }
 
 impl DpegPattern {
+    const MAX_QUOTE_HISTORY_PER_SOURCE: usize = 16;
+
     fn normalized_policy_config(config: &Value) -> Value {
         let Some(object) = config.as_object() else {
             return config.clone();
@@ -472,7 +479,7 @@ impl DpegPattern {
             else {
                 continue;
             };
-            let quote_values = quotes.values().cloned().collect::<Vec<_>>();
+            let quote_values = latest_quotes_for_time(quotes, now);
             if let Some(divergence_pct) =
                 market_divergence_pct(&candidate_policy, &quote_values, now)
             {
@@ -552,8 +559,8 @@ impl DetectionPattern for DpegPattern {
 
         // Update quote cache for this source.
         let market_quotes = self.quote_cache.entry(policy_key.clone()).or_default();
-        market_quotes.insert(
-            event.source_id.clone(),
+        remember_quote(
+            market_quotes,
             QuoteInput {
                 source_id: event.source_id.clone(),
                 source_kind,
@@ -569,7 +576,7 @@ impl DetectionPattern for DpegPattern {
             .await?
             .and_then(|v| serde_json::from_value::<DpegAlertState>(v).ok())
             .unwrap_or_default();
-        let quotes: Vec<QuoteInput> = market_quotes.values().cloned().collect();
+        let quotes = latest_quotes_for_time(market_quotes, evaluation_time);
         let classification = self.classify_context(&policy, &event.tenant_id, evaluation_time);
         let outcome = evaluate_policy(
             &policy,
@@ -1013,6 +1020,38 @@ fn weighted_median(points: &[(f64, f64)]) -> Option<f64> {
     None
 }
 
+fn remember_quote(market_quotes: &mut HashMap<String, Vec<QuoteInput>>, quote: QuoteInput) {
+    let history = market_quotes.entry(quote.source_id.clone()).or_default();
+    history.push(quote);
+    history.sort_by(|a, b| a.observed_at.cmp(&b.observed_at));
+    history.dedup_by(|a, b| {
+        a.observed_at == b.observed_at
+            && a.price == b.price
+            && a.source_kind == b.source_kind
+            && a.source_id == b.source_id
+    });
+    if history.len() > DpegPattern::MAX_QUOTE_HISTORY_PER_SOURCE {
+        let excess = history.len() - DpegPattern::MAX_QUOTE_HISTORY_PER_SOURCE;
+        history.drain(0..excess);
+    }
+}
+
+fn latest_quotes_for_time(
+    market_quotes: &HashMap<String, Vec<QuoteInput>>,
+    now: DateTime<Utc>,
+) -> Vec<QuoteInput> {
+    market_quotes
+        .values()
+        .filter_map(|history| {
+            history
+                .iter()
+                .rev()
+                .find(|quote| quote.observed_at <= now)
+                .cloned()
+        })
+        .collect()
+}
+
 fn severity_for_divergence(pct: f64, bands: &DpegSeverityBands) -> Option<Severity> {
     if pct >= bands.critical {
         return Some(Severity::Critical);
@@ -1265,6 +1304,35 @@ mod tests {
     }
 
     #[test]
+    fn latest_quotes_for_time_uses_last_quote_at_or_before_event_time() {
+        let base = Utc::now();
+        let mut market_quotes = HashMap::new();
+        remember_quote(&mut market_quotes, quote("oracle-a", "oracle", 1.0, base));
+        remember_quote(
+            &mut market_quotes,
+            quote("oracle-a", "oracle", 0.88, base + Duration::seconds(24)),
+        );
+        remember_quote(
+            &mut market_quotes,
+            quote("cex-a", "cex", 0.8785, base + Duration::seconds(21)),
+        );
+        remember_quote(
+            &mut market_quotes,
+            quote("cex-b", "cex", 0.8769, base + Duration::seconds(22)),
+        );
+
+        let quotes = latest_quotes_for_time(&market_quotes, base + Duration::seconds(22));
+        let oracle = quotes
+            .iter()
+            .find(|quote| quote.source_id == "oracle-a")
+            .expect("oracle quote selected");
+
+        assert_eq!(quotes.len(), 3);
+        assert_eq!(oracle.price, 1.0);
+        assert_eq!(oracle.observed_at, base);
+    }
+
+    #[test]
     fn oracle_confirmation_gate_blocks_alert_without_oracle_quote() {
         let now = Utc::now();
         let mut policy = base_policy();
@@ -1296,7 +1364,7 @@ mod tests {
             policy.clone(),
         );
 
-        let classification = pattern.classify_context(&policy, &policy.tenant_id, None, now);
+        let classification = pattern.classify_context(&policy, &policy.tenant_id, now);
         assert!(matches!(classification, ContextClassification::Isolated));
     }
 
@@ -1426,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn simulation_policy_scope_does_not_fall_back_to_tenant_default() {
+    fn effective_policy_is_scoped_by_tenant_and_market() {
         let mut pattern = DpegPattern::default();
         let usdt_default = DpegPolicy {
             market_key: "USDT/USD".to_string(),
@@ -1440,19 +1508,22 @@ mod tests {
             usdt_default,
         );
 
-        let simulation_policies = HashMap::from([(
-            "USDC/USD".to_string(),
-            DpegPolicy {
-                market_key: "USDC/USD".to_string(),
-                ..base_policy()
-            },
-        )]);
+        let usdc_policy = DpegPolicy {
+            market_key: "USDC/USD".to_string(),
+            ..base_policy()
+        };
+        pattern.policies.insert(
+            (
+                usdc_policy.tenant_id.clone(),
+                usdc_policy.market_key.clone(),
+            ),
+            usdc_policy,
+        );
 
+        assert!(pattern.effective_policy("tenant-a", "USDC/USD").is_some());
+        assert!(pattern.effective_policy("tenant-a", "USDT/USD").is_some());
         assert!(pattern
-            .effective_policy("glider", "USDC/USD", Some(&simulation_policies))
-            .is_some());
-        assert!(pattern
-            .effective_policy("glider", "USDT/USD", Some(&simulation_policies))
+            .effective_policy("other-tenant", "USDC/USD")
             .is_none());
     }
 
