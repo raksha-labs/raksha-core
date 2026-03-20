@@ -281,7 +281,8 @@ JOIN desired_stream_refs ds
 ON CONFLICT (stream_config_id, tenant_id) DO NOTHING;
 
 -- ─── Default Tenant Operating Mode (local/dev bootstrap) ───────────────────
--- Local bootstrap defaults to LIVE mode. Replay test streams are created
+-- Local bootstrap defaults Glider to TEST mode so replay workflows can start
+-- without manual tenant mode changes. Replay test streams are still created
 -- dynamically for simulation runs and should not exist as static seeds.
 INSERT INTO catalog.tenant_operating_mode (
   tenant_id,
@@ -293,9 +294,9 @@ INSERT INTO catalog.tenant_operating_mode (
 )
 VALUES (
   'glider',
-  'live',
-  'Bootstrap default: local/dev uses live stream targets.',
-  'bootstrap:live-mode',
+  'test',
+  'Bootstrap default: local/dev uses replay test mode.',
+  'bootstrap:test-mode',
   NOW(),
   NOW()
 )
