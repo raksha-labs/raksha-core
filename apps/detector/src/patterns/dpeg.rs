@@ -811,33 +811,37 @@ fn evaluate_policy(
                 }
             }
         } else if current_rank > previous_rank {
-            if let Some(curr_severity) = severity.clone() {
-                should_emit_alert = true;
-                transition = Some(IncidentTransition::Escalate);
-                emitted_severity = Some(curr_severity.clone());
-                next_state.last_alerted_at = Some(now);
-                next_state.last_divergence_pct = Some(divergence_pct);
-                next_state.last_severity = Some(format!("{:?}", curr_severity).to_lowercase());
-                next_state.last_classification =
-                    Some(context_classification_str(&classification).to_string());
-                next_state.below_severity_blocks = 0;
-                if next_state.trigger_floor_pct.is_none() {
-                    next_state.trigger_floor_pct = Some(trigger_floor_pct);
+            next_state.below_severity_blocks = 0;
+            next_state.last_divergence_pct = Some(divergence_pct);
+            next_state.last_classification =
+                Some(context_classification_str(&classification).to_string());
+            if !cooldown_active {
+                if let Some(curr_severity) = severity.clone() {
+                    should_emit_alert = true;
+                    transition = Some(IncidentTransition::Escalate);
+                    emitted_severity = Some(curr_severity.clone());
+                    next_state.last_alerted_at = Some(now);
+                    next_state.last_severity = Some(format!("{:?}", curr_severity).to_lowercase());
+                    next_state.cooldown_until = Some(now + Duration::seconds(policy.cooldown_sec));
+                    if next_state.trigger_floor_pct.is_none() {
+                        next_state.trigger_floor_pct = Some(trigger_floor_pct);
+                    }
                 }
             }
         } else if current_rank < previous_rank {
             next_state.below_severity_blocks += 1;
-            if next_state.below_severity_blocks >= policy.deescalation_blocks {
+            next_state.last_divergence_pct = Some(divergence_pct);
+            next_state.last_classification =
+                Some(context_classification_str(&classification).to_string());
+            if next_state.below_severity_blocks >= policy.deescalation_blocks && !cooldown_active {
                 if let Some(curr_severity) = severity.clone() {
                     should_emit_alert = true;
                     transition = Some(IncidentTransition::Deescalate);
                     emitted_severity = Some(curr_severity.clone());
                     next_state.last_alerted_at = Some(now);
-                    next_state.last_divergence_pct = Some(divergence_pct);
                     next_state.last_severity = Some(format!("{:?}", curr_severity).to_lowercase());
-                    next_state.last_classification =
-                        Some(context_classification_str(&classification).to_string());
                     next_state.below_severity_blocks = 0;
+                    next_state.cooldown_until = Some(now + Duration::seconds(policy.cooldown_sec));
                 }
             }
         } else {
@@ -1605,5 +1609,107 @@ mod tests {
             }
             state = outcome.next_state;
         }
+    }
+
+    #[test]
+    fn escalation_respects_cooldown_before_emitting() {
+        let now = Utc::now();
+        let mut policy = base_policy();
+        policy.cooldown_sec = 300;
+        policy.min_confidence_to_fire = 0.0;
+        policy.stale_timeout_ms = 300_000;
+        let quotes = vec![quote("cex-a", "cex", 0.989, now)];
+        let state = DpegAlertState {
+            breach_started_at: Some(now - Duration::seconds(120)),
+            cooldown_until: Some(now + Duration::seconds(120)),
+            last_alerted_at: Some(now - Duration::seconds(10)),
+            last_divergence_pct: Some(0.6),
+            last_severity: Some("medium".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let suppressed = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        assert!(!suppressed.should_emit_alert);
+        assert!(suppressed.transition.is_none());
+        assert_eq!(
+            suppressed.next_state.last_severity.as_deref(),
+            Some("medium")
+        );
+
+        let emitted = evaluate_policy(
+            &policy,
+            &quotes,
+            &suppressed.next_state,
+            now + Duration::seconds(121),
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        assert!(emitted.should_emit_alert);
+        assert!(matches!(
+            emitted.transition,
+            Some(IncidentTransition::Escalate)
+        ));
+        assert_eq!(emitted.next_state.last_severity.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn deescalation_waits_for_cooldown_expiry() {
+        let now = Utc::now();
+        let mut policy = base_policy();
+        policy.cooldown_sec = 300;
+        policy.deescalation_blocks = 2;
+        policy.min_confidence_to_fire = 0.0;
+        policy.stale_timeout_ms = 300_000;
+        let quotes = vec![quote("cex-a", "cex", 0.994, now)];
+        let state = DpegAlertState {
+            breach_started_at: Some(now - Duration::seconds(120)),
+            cooldown_until: Some(now + Duration::seconds(60)),
+            last_alerted_at: Some(now - Duration::seconds(10)),
+            last_divergence_pct: Some(1.2),
+            last_severity: Some("high".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 1,
+            below_trigger_blocks: 0,
+        };
+
+        let suppressed = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        assert!(!suppressed.should_emit_alert);
+        assert!(suppressed.transition.is_none());
+        assert_eq!(suppressed.next_state.last_severity.as_deref(), Some("high"));
+        assert_eq!(suppressed.next_state.below_severity_blocks, 2);
+
+        let emitted = evaluate_policy(
+            &policy,
+            &quotes,
+            &suppressed.next_state,
+            now + Duration::seconds(61),
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        assert!(emitted.should_emit_alert);
+        assert!(matches!(
+            emitted.transition,
+            Some(IncidentTransition::Deescalate)
+        ));
+        assert_eq!(emitted.next_state.last_severity.as_deref(), Some("medium"));
+        assert_eq!(emitted.next_state.below_severity_blocks, 0);
     }
 }
