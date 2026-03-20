@@ -528,8 +528,6 @@ fn rate_of_change(
 pub struct UtilizationHighPattern {
     /// tenant_id → rules
     configs: HashMap<String, Vec<UtilizationHighRule>>,
-    /// simulation_run_id → rules
-    simulation_configs: HashMap<String, Vec<UtilizationHighRule>>,
     /// `{tenant_id}:{rule_id}:{subject_key}` → state
     state_cache: HashMap<String, UtilizationRuleState>,
     /// tenant_id → set of enabled source_ids (None = unrestricted)
@@ -556,27 +554,8 @@ impl UtilizationHighPattern {
     async fn effective_rules(
         &mut self,
         tenant_id: &str,
-        simulation_run_id: Option<&str>,
-        repo: &PostgresRepository,
+        _repo: &PostgresRepository,
     ) -> Result<Option<Vec<UtilizationHighRule>>> {
-        let Some(run_id) = simulation_run_id.filter(|v| !v.trim().is_empty()) else {
-            return Ok(self.configs.get(tenant_id).cloned());
-        };
-
-        if let Some(cached) = self.simulation_configs.get(run_id) {
-            return Ok(Some(cached.clone()));
-        }
-
-        if let Some(config) = repo
-            .load_simulation_run_pattern_config(run_id, PATTERN_ID)
-            .await?
-        {
-            let rules = parse_utilization_rules(&config, tenant_id);
-            self.simulation_configs
-                .insert(run_id.to_string(), rules.clone());
-            return Ok(Some(rules));
-        }
-
         Ok(self.configs.get(tenant_id).cloned())
     }
 
@@ -589,8 +568,7 @@ impl UtilizationHighPattern {
         sample: &UtilizationStateEvent,
         state: &UtilizationRuleState,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id, simulation_operating_mode, simulation_sink_mode) =
-            simulation_metadata_from_event(event);
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
 
         let rate_10min = rate_of_change(&state.samples, context.observed_at, 10).unwrap_or(0.0);
         let rate_60min = rate_of_change(&state.samples, context.observed_at, 60).unwrap_or(0.0);
@@ -686,8 +664,6 @@ impl UtilizationHighPattern {
             actions_recommended: actions_for_severity(context.severity, state.paused_status),
             is_simulated,
             simulation_run_id,
-            simulation_operating_mode,
-            simulation_sink_mode,
             created_at: context.observed_at,
         }
     }
@@ -701,8 +677,7 @@ impl UtilizationHighPattern {
         sample: &UtilizationStateEvent,
         now: DateTime<Utc>,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id, simulation_operating_mode, simulation_sink_mode) =
-            simulation_metadata_from_event(event);
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
 
         let mut oracle_context = HashMap::new();
         oracle_context.insert("protocol_id".to_string(), json!(sample.protocol_id));
@@ -773,8 +748,6 @@ impl UtilizationHighPattern {
             ],
             is_simulated,
             simulation_run_id,
-            simulation_operating_mode,
-            simulation_sink_mode,
             created_at: now,
         }
     }
@@ -788,8 +761,7 @@ impl UtilizationHighPattern {
         pause: &UtilizationPauseEvent,
         now: DateTime<Utc>,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id, simulation_operating_mode, simulation_sink_mode) =
-            simulation_metadata_from_event(event);
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
 
         let state_label = if pause.paused { "paused" } else { "unpaused" };
         let mut oracle_context = HashMap::new();
@@ -858,8 +830,6 @@ impl UtilizationHighPattern {
             },
             is_simulated,
             simulation_run_id,
-            simulation_operating_mode,
-            simulation_sink_mode,
             created_at: now,
         }
     }
@@ -902,7 +872,6 @@ impl DetectionPattern for UtilizationHighPattern {
         now: DateTime<Utc>,
         repo: &PostgresRepository,
     ) -> Result<Option<DetectionResult>> {
-        let (_, simulation_run_id, _, _) = simulation_metadata_from_event(event);
         // Enforce source bindings: only process events from sources the tenant has bound to
         // this pattern in the Gateway tab.  Mode switching (live ↔ test) is handled at the
         // indexer level — live tenants receive live-profile streams, test tenants receive
@@ -912,10 +881,7 @@ impl DetectionPattern for UtilizationHighPattern {
                 return Ok(None);
             }
         }
-        let Some(rules) = self
-            .effective_rules(&event.tenant_id, simulation_run_id.as_deref(), repo)
-            .await?
-        else {
+        let Some(rules) = self.effective_rules(&event.tenant_id, repo).await? else {
             return Ok(None);
         };
 

@@ -7,11 +7,13 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use common::{init_logging, start_health_check_server};
+use common::{init_logging, make_postgres_tls_connector, start_health_check_server};
 use dotenvy::dotenv;
+use futures_util::future::poll_fn;
 use state_manager::{describe_redis_url, PostgresRepository, RedisStreamPublisher};
-use tokio::{signal, time::interval};
-use tracing::info;
+use tokio::{signal, sync::mpsc, time::interval};
+use tokio_postgres::AsyncMessage;
+use tracing::{info, warn};
 
 mod patterns;
 
@@ -82,6 +84,7 @@ async fn main() -> Result<()> {
     }
 
     let mut reload_ticker = interval(Duration::from_secs(CONFIG_RELOAD_INTERVAL_SECS));
+    let mut notify_rx = spawn_pattern_config_notify_listener(database_url.clone());
 
     loop {
         tokio::select! {
@@ -93,16 +96,14 @@ async fn main() -> Result<()> {
 
             // Periodic config reload.
             _ = reload_ticker.tick() => {
-                match repo.load_tenant_pattern_configs().await {
-                    Ok(cfg) => {
-                        if let Err(err) = registry.reload_all(&cfg).await {
-                            common::log_error!(warn, err, "pattern config reload failed");
-                        } else {
-                            info!("pattern configs reloaded");
-                        }
-                    }
-                    Err(err) => common::log_error!(warn, err, "failed to reload pattern configs"),
+                reload_pattern_configs(&repo, &mut registry).await;
+            }
+
+            signal = notify_rx.recv() => {
+                if signal.is_none() {
+                    warn!("pattern config notify listener stopped; continuing with periodic reload only");
                 }
+                reload_pattern_configs(&repo, &mut registry).await;
             }
 
             // Poll the unified-events consumer group.
@@ -147,4 +148,90 @@ async fn main() -> Result<()> {
 
     info!("detector stopped");
     Ok(())
+}
+
+async fn reload_pattern_configs(
+    repo: &PostgresRepository,
+    registry: &mut patterns::PatternRegistry,
+) {
+    match repo.load_tenant_pattern_configs().await {
+        Ok(cfg) => {
+            if let Err(err) = registry.reload_all(&cfg).await {
+                common::log_error!(warn, err, "pattern config reload failed");
+            } else {
+                info!("pattern configs reloaded");
+            }
+        }
+        Err(err) => common::log_error!(warn, err, "failed to reload pattern configs"),
+    }
+}
+
+fn spawn_pattern_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
+    let (tx, rx) = mpsc::channel(32);
+    tokio::spawn(async move {
+        loop {
+            let connector = match make_postgres_tls_connector() {
+                Ok(connector) => connector,
+                Err(error) => {
+                    common::log_error!(
+                        warn,
+                        error,
+                        "failed to build postgres TLS connector for pattern config LISTEN"
+                    );
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    continue;
+                }
+            };
+
+            let (client, mut connection) = match tokio_postgres::connect(&database_url, connector)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    common::log_error!(warn, error, "failed to connect for pattern config LISTEN");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    continue;
+                }
+            };
+
+            if let Err(error) = client.batch_execute("LISTEN pattern_config_changed").await {
+                common::log_error!(
+                    warn,
+                    error,
+                    "failed to execute LISTEN pattern_config_changed"
+                );
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+
+            info!("pattern config listener connected (LISTEN pattern_config_changed)");
+
+            loop {
+                let message = poll_fn(|cx| connection.poll_message(cx)).await;
+                match message {
+                    Some(Ok(AsyncMessage::Notification(notification))) => {
+                        if notification.channel() == "pattern_config_changed"
+                            && tx.send(()).await.is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        common::log_error!(
+                            warn,
+                            error,
+                            "pattern config listener connection error; reconnecting"
+                        );
+                        break;
+                    }
+                    None => {
+                        warn!("pattern config listener connection closed; reconnecting");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    rx
 }

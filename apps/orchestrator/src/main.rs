@@ -326,8 +326,6 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
         actions_recommended: detection.actions_recommended.clone(),
         is_simulated: detection.is_simulated,
         simulation_run_id: detection.simulation_run_id.clone(),
-        simulation_operating_mode: detection.simulation_operating_mode.clone(),
-        simulation_sink_mode: detection.simulation_sink_mode.clone(),
         created_at: Utc::now(),
     }
 }

@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::Duration};
 use anyhow::Result;
 use common::make_postgres_tls_connector;
 use futures_util::future::poll_fn;
-use serde_json::{json, Value};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use state_manager::{
     EffectiveStreamConfig, PostgresRawRepository, PostgresRepository, RedisStreamPublisher,
@@ -186,43 +186,7 @@ async fn stop_worker(handle: WorkerHandle) {
 }
 
 fn skipped_test_stream_reason(cfg: &EffectiveStreamConfig) -> Option<&'static str> {
-    if cfg.operating_mode_profile != "test" {
-        return None;
-    }
-
-    if cfg.stream_name.contains("__simlab_test") {
-        return Some("legacy_simlab_test_stream");
-    }
-
-    let endpoint = endpoint_from_connection_config(&cfg.connection_config)?;
-    if !endpoint.contains("/api/mock/streams/") {
-        return None;
-    }
-
-    let route_stream_name = endpoint
-        .split("/api/mock/streams/")
-        .nth(1)
-        .and_then(|suffix| suffix.rsplit('/').next())
-        .and_then(|segment| segment.split('?').next())
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())?;
-
-    if route_stream_name != cfg.stream_name {
-        return Some("mock_endpoint_stream_name_mismatch");
-    }
-
-    None
-}
-
-fn endpoint_from_connection_config(config: &Value) -> Option<&str> {
-    for key in ["endpoint", "http_url", "ws_endpoint", "ws_url", "rpc_url"] {
-        if let Some(value) = config.get(key).and_then(Value::as_str) {
-            let endpoint = value.trim();
-            if !endpoint.is_empty() {
-                return Some(endpoint);
-            }
-        }
-    }
+    let _ = cfg;
     None
 }
 

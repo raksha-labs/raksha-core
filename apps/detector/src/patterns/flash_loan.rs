@@ -371,8 +371,7 @@ fn build_detection(
     now: DateTime<Utc>,
     rule: &FlashLoanRule,
 ) -> DetectionResult {
-    let (is_simulated, simulation_run_id, simulation_operating_mode, simulation_sink_mode) =
-        simulation_metadata_from_event(event);
+    let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
     let tx_hash = event
         .tx_hash
         .clone()
@@ -433,8 +432,6 @@ fn build_detection(
         ],
         is_simulated,
         simulation_run_id,
-        simulation_operating_mode,
-        simulation_sink_mode,
         created_at: now,
     }
 }

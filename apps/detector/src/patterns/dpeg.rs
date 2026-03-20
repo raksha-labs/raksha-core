@@ -1074,8 +1074,7 @@ fn build_detection(
     transition: Option<IncidentTransition>,
     now: DateTime<Utc>,
 ) -> DetectionResult {
-    let (is_simulated, simulation_run_id, simulation_operating_mode, simulation_sink_mode) =
-        simulation_metadata_from_event(event);
+    let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
     let subject_key = format!("{}:{}", policy.tenant_id, policy.market_key);
     let divergence_str = format!("{:.3}%", snapshot.divergence_pct);
     let description = format!(
@@ -1163,8 +1162,6 @@ fn build_detection(
         actions_recommended,
         is_simulated,
         simulation_run_id,
-        simulation_operating_mode,
-        simulation_sink_mode,
         created_at: now,
     }
 }
