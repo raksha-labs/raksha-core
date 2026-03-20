@@ -40,7 +40,10 @@ use chrono::TimeZone;
 /// Both shapes are handled transparently.
 use serde_json::{json, Value};
 
-use super::{observed_at, ParsedFeedEvent, ParserInput};
+use super::{
+    decode_hex_words, observed_at, parse_i256_word_to_f64, parse_u256_word_to_f64, ParsedFeedEvent,
+    ParserInput,
+};
 
 /// Decode a Pyth fixed-point numeric object into a `f64`.
 ///
@@ -65,6 +68,48 @@ fn decode_pyth_price(obj: &Value) -> Option<f64> {
 fn decode_pyth_ts(obj: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
     let secs = obj.get("publish_time").and_then(Value::as_i64)?;
     chrono::Utc.timestamp_opt(secs, 0).single()
+}
+
+fn decode_pyth_log(
+    payload: &Value,
+) -> Option<(
+    Option<String>,
+    f64,
+    Option<f64>,
+    i32,
+    Option<chrono::DateTime<chrono::Utc>>,
+)> {
+    let topics = payload.get("topics")?.as_array()?;
+    let data_hex = payload.get("data")?.as_str()?;
+    let data_words = decode_hex_words(data_hex);
+    if data_words.len() < 4 {
+        return None;
+    }
+
+    let price_mantissa = parse_i256_word_to_f64(&data_words[0])?;
+    let conf_mantissa = parse_u256_word_to_f64(&data_words[1]);
+    let expo = parse_i256_word_to_f64(&data_words[2])
+        .and_then(|value| i32::try_from(value as i64).ok())
+        .unwrap_or(-8);
+    let publish_time = parse_u256_word_to_f64(&data_words[3])
+        .and_then(|value| chrono::Utc.timestamp_opt(value as i64, 0).single());
+
+    let scale = 10f64.powi(expo);
+    if !scale.is_finite() {
+        return None;
+    }
+    let price = price_mantissa * scale;
+    if !price.is_finite() || price <= 0.0 {
+        return None;
+    }
+    let conf_usd = conf_mantissa
+        .map(|value| value * scale)
+        .filter(|value| value.is_finite());
+    let feed_id = topics
+        .get(1)
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    Some((feed_id, price, conf_usd, expo, publish_time))
 }
 
 /// Derive a normalised `market_key` from the Pyth symbol string.
@@ -95,6 +140,33 @@ fn market_key_from_pyth_symbol(raw_symbol: &str) -> String {
 }
 
 pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFeedEvent, String> {
+    if let Some((feed_id, price, conf_usd, expo, payload_event_ts)) = decode_pyth_log(payload) {
+        let observed_at = observed_at(payload_event_ts);
+        return Ok(ParsedFeedEvent {
+            event_type: input.event_type.to_string(),
+            event_id: feed_id.clone(),
+            market_key: input.market_key_hint.map(ToString::to_string),
+            asset_pair: input.asset_pair_hint.map(ToString::to_string),
+            price: Some(price),
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts,
+            observed_at,
+            normalized_fields: json!({
+                "decoded_by": "pyth_hermes_v2",
+                "feed_id": feed_id,
+                "price_type": "spot",
+                "ema_price_usd": Value::Null,
+                "spot_price_usd": price,
+                "conf_usd": conf_usd,
+                "expo": expo,
+            }),
+        });
+    }
+
     // Unwrap optional `price_feed` envelope.
     let feed = payload
         .get("price_feed")

@@ -7,6 +7,13 @@ use ethers::{
 };
 use serde_json::Value;
 use tokio::time::sleep;
+use url::Url;
+
+#[derive(Clone, Debug, Default)]
+struct TransportSimulationMetadata {
+    is_simulated: bool,
+    simulation_run_id: Option<String>,
+}
 
 pub struct RpcLogsConnector {
     endpoint: String,
@@ -16,10 +23,12 @@ pub struct RpcLogsConnector {
     pending: VecDeque<Value>,
     last_block: Option<U64>,
     chain_id: Option<i64>,
+    simulation_metadata: TransportSimulationMetadata,
 }
 
 impl RpcLogsConnector {
     pub fn new(endpoint: String, filter_config: Value, poll_interval: Duration) -> Self {
+        let simulation_metadata = parse_transport_simulation_metadata(&endpoint);
         Self {
             endpoint,
             filter_config,
@@ -28,6 +37,7 @@ impl RpcLogsConnector {
             pending: VecDeque::new(),
             last_block: None,
             chain_id: None,
+            simulation_metadata,
         }
     }
 
@@ -99,11 +109,56 @@ impl RpcLogsConnector {
                     object.insert("chainId".to_string(), serde_json::json!(chain_id));
                 }
             }
+            inject_simulation_metadata(&mut payload, &self.simulation_metadata);
             self.pending.push_back(payload);
         }
 
         Ok(())
     }
+}
+
+fn parse_transport_simulation_metadata(endpoint: &str) -> TransportSimulationMetadata {
+    let Ok(url) = Url::parse(endpoint) else {
+        return TransportSimulationMetadata::default();
+    };
+
+    let mut metadata = TransportSimulationMetadata::default();
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "is_simulated" => {
+                let normalized = value.trim().to_ascii_lowercase();
+                metadata.is_simulated = matches!(normalized.as_str(), "1" | "true" | "yes" | "on");
+            }
+            "simulation_run_id" => {
+                let run_id = value.trim();
+                if !run_id.is_empty() {
+                    metadata.simulation_run_id = Some(run_id.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    metadata
+}
+
+fn inject_simulation_metadata(payload: &mut Value, metadata: &TransportSimulationMetadata) {
+    if !metadata.is_simulated && metadata.simulation_run_id.is_none() {
+        return;
+    }
+
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+
+    let mut simulation = serde_json::Map::new();
+    simulation.insert(
+        "is_simulated".to_string(),
+        serde_json::json!(metadata.is_simulated || metadata.simulation_run_id.is_some()),
+    );
+    if let Some(run_id) = metadata.simulation_run_id.as_ref() {
+        simulation.insert("run_id".to_string(), serde_json::json!(run_id));
+    }
+    object.insert("simulation".to_string(), Value::Object(simulation));
 }
 
 fn build_filter(filter_config: &Value, from: U64, to: U64) -> Result<Filter> {
