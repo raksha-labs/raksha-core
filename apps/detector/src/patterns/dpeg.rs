@@ -475,14 +475,11 @@ impl DpegPattern {
             if !candidate_market.to_ascii_uppercase().ends_with("/USD") {
                 continue;
             }
-            let Some(quotes) = self
-                .quote_cache
-                .get(&(
-                    tenant_id.to_string(),
-                    candidate_market.clone(),
-                    replay_scope.to_string(),
-                ))
-            else {
+            let Some(quotes) = self.quote_cache.get(&(
+                tenant_id.to_string(),
+                candidate_market.clone(),
+                replay_scope.to_string(),
+            )) else {
                 continue;
             };
             let quote_values = latest_quotes_for_time(quotes, now);
@@ -1410,8 +1407,7 @@ mod tests {
             policy.clone(),
         );
 
-        let classification =
-            pattern.classify_context(&policy, &policy.tenant_id, "__test__", now);
+        let classification = pattern.classify_context(&policy, &policy.tenant_id, "__test__", now);
         assert!(matches!(classification, ContextClassification::Isolated));
     }
 
@@ -3016,8 +3012,14 @@ mod tests {
             12,
             now,
         );
-        let outcome = evaluate_policy(&policy, &quotes, &state, now, ContextClassification::Isolated)
-            .expect("evaluation");
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
         // Cooldown blocks any new trigger — terminal-like behavior
         assert_no_alert(&outcome);
         assert_eq!(outcome.transition, None);
@@ -3052,8 +3054,14 @@ mod tests {
             12,
             now,
         );
-        let outcome = evaluate_policy(&policy, &quotes, &state, now, ContextClassification::Isolated)
-            .expect("evaluation");
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
         assert_no_alert(&outcome);
     }
 
@@ -3080,9 +3088,21 @@ mod tests {
         };
 
         // 1 block at MEDIUM — not enough for deescalation (needs 5)
-        let quotes = make_quotes(medium_price, Some(medium_price), Some(medium_price), 12, now);
-        let step1 = evaluate_policy(&policy, &quotes, &state, now, ContextClassification::Isolated)
-            .expect("evaluation");
+        let quotes = make_quotes(
+            medium_price,
+            Some(medium_price),
+            Some(medium_price),
+            12,
+            now,
+        );
+        let step1 = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
         // Should NOT emit deescalation after only 1 block
         assert_no_alert(&step1);
         assert_eq!(step1.next_state.below_severity_blocks, 1);
@@ -3218,17 +3238,27 @@ mod tests {
         assert!(detection.subject_key.is_some());
         assert!(detection.tenant_id.is_some());
         assert!(detection.event_key.is_some());
-        assert_eq!(detection.incident_transition, Some(IncidentTransition::Trigger));
-        assert_eq!(detection.context_classification, Some(ContextClassification::Isolated));
+        assert_eq!(
+            detection.incident_transition,
+            Some(IncidentTransition::Trigger)
+        );
+        assert_eq!(
+            detection.context_classification,
+            Some(ContextClassification::Isolated)
+        );
         assert!(!detection.signals.is_empty());
         assert_eq!(detection.signals[0].signal_type, SignalType::PriceDeviation);
         assert!(detection.signals[0].value > 5.0);
         assert!(!detection.risk_score.rationale.is_empty());
         assert!(!detection.actions_recommended.is_empty());
         assert!(detection.oracle_context.contains_key("oracle_confirmed"));
-        assert!(detection.oracle_context.contains_key("weighted_median_price"));
+        assert!(detection
+            .oracle_context
+            .contains_key("weighted_median_price"));
         assert!(detection.oracle_context.contains_key("trigger_floor_pct"));
-        assert!(detection.oracle_context.contains_key("context_classification"));
+        assert!(detection
+            .oracle_context
+            .contains_key("context_classification"));
         assert!(!detection.confidence_breakdown.is_empty());
         assert!(detection.description.is_some());
     }
@@ -3242,7 +3272,13 @@ mod tests {
         let median_price = price_from_deviation(1.0, 0.60);
         let chainlink_price = price_from_deviation(1.0, 0.60);
         let pyth_price = price_from_deviation(1.0, 0.30);
-        let quotes = make_quotes(median_price, Some(chainlink_price), Some(pyth_price), 12, now);
+        let quotes = make_quotes(
+            median_price,
+            Some(chainlink_price),
+            Some(pyth_price),
+            12,
+            now,
+        );
         let policy = spec_policy();
 
         let outcome = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
@@ -3284,11 +3320,20 @@ mod tests {
             critical: 5.0,
         };
         assert_eq!(severity_for_divergence(0.5, &bands), Some(Severity::Medium));
-        assert_eq!(severity_for_divergence(0.99, &bands), Some(Severity::Medium));
+        assert_eq!(
+            severity_for_divergence(0.99, &bands),
+            Some(Severity::Medium)
+        );
         assert_eq!(severity_for_divergence(1.0, &bands), Some(Severity::High));
         assert_eq!(severity_for_divergence(4.99, &bands), Some(Severity::High));
-        assert_eq!(severity_for_divergence(5.0, &bands), Some(Severity::Critical));
-        assert_eq!(severity_for_divergence(99.0, &bands), Some(Severity::Critical));
+        assert_eq!(
+            severity_for_divergence(5.0, &bands),
+            Some(Severity::Critical)
+        );
+        assert_eq!(
+            severity_for_divergence(99.0, &bands),
+            Some(Severity::Critical)
+        );
     }
 
     /// TC-D-1404: Systemic severity bands boundary tests
@@ -3300,11 +3345,20 @@ mod tests {
             critical: 0.5,
         };
         assert_eq!(severity_for_divergence(0.009, &bands), None);
-        assert_eq!(severity_for_divergence(0.01, &bands), Some(Severity::Medium));
-        assert_eq!(severity_for_divergence(0.24, &bands), Some(Severity::Medium));
+        assert_eq!(
+            severity_for_divergence(0.01, &bands),
+            Some(Severity::Medium)
+        );
+        assert_eq!(
+            severity_for_divergence(0.24, &bands),
+            Some(Severity::Medium)
+        );
         assert_eq!(severity_for_divergence(0.25, &bands), Some(Severity::High));
         assert_eq!(severity_for_divergence(0.49, &bands), Some(Severity::High));
-        assert_eq!(severity_for_divergence(0.5, &bands), Some(Severity::Critical));
+        assert_eq!(
+            severity_for_divergence(0.5, &bands),
+            Some(Severity::Critical)
+        );
     }
 
     // ─── Contagion classification helper ─────────────────────────────────────
@@ -3312,15 +3366,27 @@ mod tests {
     /// TC-D-1405: context_classification_str returns correct strings
     #[test]
     fn tc_d_1405_context_classification_str_values() {
-        assert_eq!(context_classification_str(&ContextClassification::Isolated), "isolated");
-        assert_eq!(context_classification_str(&ContextClassification::Systemic), "systemic");
-        assert_eq!(context_classification_str(&ContextClassification::None), "none");
+        assert_eq!(
+            context_classification_str(&ContextClassification::Isolated),
+            "isolated"
+        );
+        assert_eq!(
+            context_classification_str(&ContextClassification::Systemic),
+            "systemic"
+        );
+        assert_eq!(
+            context_classification_str(&ContextClassification::None),
+            "none"
+        );
     }
 
     /// TC-D-1406: severity_from_str round-trip
     #[test]
     fn tc_d_1406_severity_from_str_roundtrip() {
-        assert_eq!(severity_from_str(Some("critical")), Some(Severity::Critical));
+        assert_eq!(
+            severity_from_str(Some("critical")),
+            Some(Severity::Critical)
+        );
         assert_eq!(severity_from_str(Some("HIGH")), Some(Severity::High));
         assert_eq!(severity_from_str(Some("Medium")), Some(Severity::Medium));
         assert_eq!(severity_from_str(Some("low")), Some(Severity::Low));
@@ -3361,7 +3427,9 @@ mod tests {
         let bad_pyth = quote("pyth", "oracle", 0.990, now); // 1.0% deviation
         let quotes = vec![good_oracle, bad_pyth];
         // Pyth at 1.0% > floor 0.5% → resolution blocked
-        assert!(!available_oracles_within_resolution_floor(&quotes, 0.5, 1.0));
+        assert!(!available_oracles_within_resolution_floor(
+            &quotes, 0.5, 1.0
+        ));
     }
 
     /// TC-D-1410: available_oracles_within_resolution_floor — no oracles → true
@@ -3615,7 +3683,12 @@ mod tests {
 
         // Normal source at 60s → stale (> 30s default)
         let quotes_normal = vec![quote("normal-source", "cex", breach_price, old_time)];
-        let out1 = eval_fresh(&policy, &quotes_normal, now, ContextClassification::Isolated);
+        let out1 = eval_fresh(
+            &policy,
+            &quotes_normal,
+            now,
+            ContextClassification::Isolated,
+        );
         assert_eq!(out1.snapshot.source_count, 0);
 
         // Overridden source at 60s → NOT stale (< 120s override)

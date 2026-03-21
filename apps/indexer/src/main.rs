@@ -149,19 +149,24 @@ impl IndexerStateStore {
     }
 
     async fn init_schema(&self) -> Result<()> {
-        let required_tables = ["indexer_state", "processed_events", "normalized_events"];
+        let required_tables = [
+            "ingest.indexer_state",
+            "ingest.processed_events",
+            "ingest.normalized_events",
+        ];
         let mut missing_tables = Vec::new();
         for table in required_tables {
+            let (table_schema, table_name) = table.split_once('.').unwrap_or(("public", table));
             let exists = self
                 .client
                 .query_opt(
                     r#"
                     SELECT 1
                     FROM information_schema.tables
-                    WHERE table_schema = 'public'
-                      AND table_name = $1
+                    WHERE table_schema = $1
+                      AND table_name = $2
                     "#,
-                    &[&table],
+                    &[&table_schema, &table_name],
                 )
                 .await?;
             if exists.is_none() {
@@ -184,7 +189,7 @@ impl IndexerStateStore {
             .query_opt(
                 r#"
                 SELECT last_indexed_block, last_block_hash
-                FROM indexer_state
+                FROM ingest.indexer_state
                 WHERE chain = $1
                 "#,
                 &[&chain_slug],
@@ -217,12 +222,12 @@ impl IndexerStateStore {
         self.client
             .execute(
                 r#"
-                INSERT INTO indexer_state (chain, last_indexed_block, last_block_hash, processed_events_count)
+                INSERT INTO ingest.indexer_state (chain, last_indexed_block, last_block_hash, processed_events_count)
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (chain) DO UPDATE
                 SET last_indexed_block = EXCLUDED.last_indexed_block,
                     last_block_hash = EXCLUDED.last_block_hash,
-                    processed_events_count = indexer_state.processed_events_count + EXCLUDED.processed_events_count,
+                    processed_events_count = ingest.indexer_state.processed_events_count + EXCLUDED.processed_events_count,
                     updated_at = NOW()
                 "#,
                 &[&chain_slug, &last_indexed_block, &last_block_hash, &processed_delta],
@@ -238,7 +243,7 @@ impl IndexerStateStore {
             .query_opt(
                 r#"
                 SELECT 1
-                FROM processed_events
+                FROM ingest.processed_events
                 WHERE event_key = $1
                   AND reverted = FALSE
                 LIMIT 1
@@ -262,7 +267,7 @@ impl IndexerStateStore {
             .query_opt(
                 r#"
                 SELECT 1
-                FROM processed_events
+                FROM ingest.processed_events
                 WHERE chain = $1
                   AND block_number = $2
                   AND reverted = FALSE
@@ -287,7 +292,7 @@ impl IndexerStateStore {
             .client
             .query(
                 r#"
-                UPDATE processed_events
+                UPDATE ingest.processed_events
                 SET reverted = TRUE
                 WHERE chain = $1
                   AND block_number >= $2
@@ -319,7 +324,7 @@ impl IndexerStateStore {
             .client
             .execute(
                 r#"
-                UPDATE normalized_events
+                UPDATE ingest.normalized_events
                 SET reverted = TRUE,
                     updated_at = NOW()
                 WHERE chain_slug = $1
@@ -359,7 +364,7 @@ impl IndexerStateStore {
         self.client
             .execute(
                 r#"
-                INSERT INTO normalized_events (
+                INSERT INTO ingest.normalized_events (
                     event_key,
                     event_id,
                     chain,
@@ -459,7 +464,7 @@ impl IndexerStateStore {
         self.client
             .execute(
                 r#"
-                INSERT INTO processed_events (
+                INSERT INTO ingest.processed_events (
                     event_id,
                     event_key,
                     tx_hash,

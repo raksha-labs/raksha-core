@@ -724,10 +724,9 @@ fn apply_dispatch_result_metadata(
         serde_json::json!(dispatch_result.delivered),
     );
     if let Some(reason) = dispatch_result.reason.as_deref() {
-        alert.oracle_context.insert(
-            "dispatch_reason".to_string(),
-            serde_json::json!(reason),
-        );
+        alert
+            .oracle_context
+            .insert("dispatch_reason".to_string(), serde_json::json!(reason));
     }
     alert
 }
@@ -1052,7 +1051,10 @@ mod tests {
             tenant_id: "tenant-a".to_string(),
             delivered,
             reason: (!delivered).then_some("all_channels_failed".to_string()),
-            resolved_channels: resolved_channels.iter().map(|item| (*item).to_string()).collect(),
+            resolved_channels: resolved_channels
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect(),
             results: Vec::new(),
         }
     }
@@ -1074,7 +1076,8 @@ mod tests {
     fn tc_d_801_high_routes_to_webhook_email() {
         let detection = mk_detection(Severity::High, IncidentTransition::Trigger);
         let alert = alert_from_detection(&detection);
-        let routed = apply_dispatch_result_metadata(alert, &dispatch_result(&["webhook", "email"], true));
+        let routed =
+            apply_dispatch_result_metadata(alert, &dispatch_result(&["webhook", "email"], true));
         assert_eq!(
             routed.channel_routes,
             vec!["webhook".to_string(), "email".to_string()]

@@ -1084,7 +1084,7 @@ impl PostgresRepository {
             .client
             .query_opt(
                 r#"
-                SELECT data FROM pattern_state
+                SELECT data FROM pattern.pattern_state
                 WHERE tenant_id = $1 AND pattern_id = $2 AND state_key = $3
                 "#,
                 &[&tenant_id, &pattern_id, &state_key],
@@ -1104,7 +1104,7 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO pattern_state (tenant_id, pattern_id, state_key, data, updated_at)
+                INSERT INTO pattern.pattern_state (tenant_id, pattern_id, state_key, data, updated_at)
                 VALUES ($1, $2, $3, $4, NOW())
                 ON CONFLICT (tenant_id, pattern_id, state_key) DO UPDATE
                 SET data = EXCLUDED.data, updated_at = NOW()
@@ -1477,7 +1477,7 @@ impl PostgresRepository {
             .query_opt(
                 r#"
                 SELECT max_alerts_per_month
-                FROM tenants
+                FROM iam.tenants
                 WHERE tenant_id = $1
                 "#,
                 &[&tenant_id],
@@ -1565,7 +1565,7 @@ impl PostgresRepository {
                 r#"
                 SELECT entity_id, entity_type, display_name, chain_slug, asset_symbol,
                        quantity::float8, valuation_usd::float8, metadata_json
-                FROM tenant_monitored_entities
+                FROM control.tenant_monitored_entities
                 WHERE tenant_id = $1
                   AND asset_symbol = $2
                   AND enabled = TRUE
