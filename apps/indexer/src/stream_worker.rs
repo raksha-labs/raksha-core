@@ -1037,6 +1037,7 @@ async fn apply_market_truth_context(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn to_operational_record(
     config: &RuntimeStreamConfig,
     parsed: &ParsedFeedEvent,

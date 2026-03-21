@@ -70,6 +70,7 @@ fn decode_pyth_ts(obj: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::Utc.timestamp_opt(secs, 0).single()
 }
 
+#[allow(clippy::type_complexity)]
 fn decode_pyth_log(
     payload: &Value,
 ) -> Option<(

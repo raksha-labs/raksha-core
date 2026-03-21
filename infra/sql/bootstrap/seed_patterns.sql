@@ -185,9 +185,27 @@ ON CONFLICT (tenant_id, pattern_id) DO NOTHING;
 
 -- ─── Default Tenant Policy ───────────────────────────────────────────────────
 
-INSERT INTO pattern.tenant_policies (tenant_id, severity_threshold, cooldown_sec, default_channels, protocol_watchlist)
+INSERT INTO pattern.tenant_policies (
+  tenant_id,
+  severity_threshold,
+  cooldown_sec,
+  default_channels,
+  protocol_watchlist,
+  route_overrides
+)
 VALUES
-    ('glider', 'medium', 300, '{webhook}', '{}')
+    (
+      'glider',
+      'medium',
+      300,
+      '{webhook}'::text[],
+      '{}'::text[],
+      '{
+        "severity:medium": ["webhook"],
+        "severity:high": ["webhook", "email"],
+        "severity:critical": ["webhook", "slack", "telegram", "discord", "email"]
+      }'::jsonb
+    )
 ON CONFLICT (tenant_id) DO NOTHING;
 
 -- ─── Pattern Ingestion Bindings (backfill from tenant_data_sources) ─────────

@@ -363,13 +363,14 @@ struct DpegAlertState {
 pub struct DpegPattern {
     /// (tenant_id, market_key) → DpegPolicy
     policies: HashMap<(String, String), DpegPolicy>,
-    /// (tenant_id, market_key) → recent quotes per source_id.
+    /// (tenant_id, market_key, replay_scope) → recent quotes per source_id.
     ///
     /// Replay streams can arrive slightly out of payload timestamp order across
     /// sources. Keeping a short history lets us evaluate each event against the
     /// latest quote that existed at that event timestamp instead of letting a
-    /// future quote temporarily collapse quorum.
-    quote_cache: HashMap<(String, String), HashMap<String, Vec<QuoteInput>>>,
+    /// future quote temporarily collapse quorum. Simulated runs can also rewind
+    /// time, so cached quotes must not bleed across different replay runs.
+    quote_cache: HashMap<(String, String, String), HashMap<String, Vec<QuoteInput>>>,
     /// tenant_id → set of enabled source_ids (None = unrestricted)
     source_bindings: HashMap<String, HashSet<String>>,
 }
@@ -455,6 +456,7 @@ impl DpegPattern {
         &self,
         policy: &DpegPolicy,
         tenant_id: &str,
+        replay_scope: &str,
         now: DateTime<Utc>,
     ) -> ContextClassification {
         if !policy.toggles.contagion_detection {
@@ -475,7 +477,11 @@ impl DpegPattern {
             }
             let Some(quotes) = self
                 .quote_cache
-                .get(&(tenant_id.to_string(), candidate_market.clone()))
+                .get(&(
+                    tenant_id.to_string(),
+                    candidate_market.clone(),
+                    replay_scope.to_string(),
+                ))
             else {
                 continue;
             };
@@ -552,7 +558,25 @@ impl DetectionPattern for DpegPattern {
         let Some(policy) = policy else {
             return Ok(None);
         };
-        let policy_key = (event.tenant_id.clone(), market_key.to_string());
+        let (_, simulation_run_id) = super::simulation_metadata_from_event(event);
+        let replay_scope = simulation_run_id
+            .clone()
+            .unwrap_or_else(|| "__live__".to_string());
+        let policy_key = (
+            event.tenant_id.clone(),
+            market_key.to_string(),
+            replay_scope.clone(),
+        );
+
+        if simulation_run_id.is_some() {
+            self.quote_cache
+                .retain(|(tenant_id, cached_market_key, cached_scope), _| {
+                    tenant_id != &event.tenant_id
+                        || cached_market_key != market_key
+                        || cached_scope == &replay_scope
+                        || cached_scope == "__live__"
+                });
+        }
 
         // Infer source_kind from source_type string.
         let source_kind = infer_source_kind(&format!("{:?}", event.source_type));
@@ -577,7 +601,8 @@ impl DetectionPattern for DpegPattern {
             .and_then(|v| serde_json::from_value::<DpegAlertState>(v).ok())
             .unwrap_or_default();
         let quotes = latest_quotes_for_time(market_quotes, evaluation_time);
-        let classification = self.classify_context(&policy, &event.tenant_id, evaluation_time);
+        let classification =
+            self.classify_context(&policy, &event.tenant_id, &replay_scope, evaluation_time);
         let outcome = evaluate_policy(
             &policy,
             &quotes,
@@ -858,7 +883,13 @@ fn evaluate_policy(
 
         if previous_active.is_some() {
             let resolution_floor = next_state.trigger_floor_pct.unwrap_or(trigger_floor_pct);
-            if divergence_pct < resolution_floor {
+            let resolution_ready = divergence_pct < resolution_floor
+                && available_oracles_within_resolution_floor(
+                    &eligible_quotes,
+                    resolution_floor,
+                    policy.peg_target,
+                );
+            if resolution_ready {
                 next_state.below_trigger_blocks += 1;
             } else {
                 next_state.below_trigger_blocks = 0;
@@ -946,6 +977,17 @@ fn oracle_confirmation_met(
         }
         ((quote.price - peg_target).abs() / peg_target) * 100.0 >= trigger_floor_pct
     })
+}
+
+fn available_oracles_within_resolution_floor(
+    eligible_quotes: &[QuoteInput],
+    resolution_floor_pct: f64,
+    peg_target: f64,
+) -> bool {
+    eligible_quotes
+        .iter()
+        .filter(|quote| quote.source_kind == "oracle")
+        .all(|quote| ((quote.price - peg_target).abs() / peg_target) * 100.0 < resolution_floor_pct)
 }
 
 fn compute_confidence_breakdown(
@@ -1368,7 +1410,8 @@ mod tests {
             policy.clone(),
         );
 
-        let classification = pattern.classify_context(&policy, &policy.tenant_id, now);
+        let classification =
+            pattern.classify_context(&policy, &policy.tenant_id, "__test__", now);
         assert!(matches!(classification, ContextClassification::Isolated));
     }
 
@@ -1711,5 +1754,1874 @@ mod tests {
         ));
         assert_eq!(emitted.next_state.last_severity.as_deref(), Some("medium"));
         assert_eq!(emitted.next_state.below_severity_blocks, 0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // BA/QA Test Suite — Test_Cases_DepegV1_0
+    // Spec Reference: RAKSHA_Depeg_Detection_Rule_Spec_V1_0
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ─── Test Harness Helpers ──────────────────────────────────────────────
+
+    /// Deviation percentage to price (e.g., 0.50 → $0.995 for peg_target=1.0).
+    fn price_from_deviation(peg_target: f64, deviation_pct: f64) -> f64 {
+        peg_target * (1.0 - deviation_pct / 100.0)
+    }
+
+    /// Build quotes matching the spec's make_snapshot() concept.
+    /// Creates `cex_count` CEX quotes at `median_price`, plus optional oracle quotes.
+    fn make_quotes(
+        median_price: f64,
+        chainlink_price: Option<f64>,
+        pyth_price: Option<f64>,
+        cex_count: usize,
+        now: DateTime<Utc>,
+    ) -> Vec<QuoteInput> {
+        let mut quotes = Vec::new();
+        for i in 0..cex_count {
+            quotes.push(quote(&format!("cex-{}", i), "cex", median_price, now));
+        }
+        if let Some(cl) = chainlink_price {
+            quotes.push(quote("chainlink", "oracle", cl, now));
+        }
+        if let Some(py) = pyth_price {
+            quotes.push(quote("pyth", "oracle", py, now));
+        }
+        quotes
+    }
+
+    /// Build a policy matching the spec's test fixture defaults.
+    /// oracle_confirmation = true, min_sources = 3, min_confidence = 0.
+    fn spec_policy() -> DpegPolicy {
+        DpegPolicy {
+            toggles: DpegToggles {
+                oracle_confirmation: true,
+                ..Default::default()
+            },
+            min_sources: 3,
+            source_filter: DpegSourceFilter {
+                min_healthy_sources: 3,
+                ..Default::default()
+            },
+            // Disable confidence gate so detection depends only on quorum+threshold+oracle
+            min_confidence_to_fire: 0.0,
+            ..base_policy()
+        }
+    }
+
+    /// Evaluate with fresh (default) state.
+    fn eval_fresh(
+        policy: &DpegPolicy,
+        quotes: &[QuoteInput],
+        now: DateTime<Utc>,
+        classification: ContextClassification,
+    ) -> EvaluationOutcome {
+        evaluate_policy(
+            policy,
+            quotes,
+            &DpegAlertState::default(),
+            now,
+            classification,
+        )
+        .expect("evaluate_policy should not fail")
+    }
+
+    /// Run N evaluation steps, threading state. Returns all outcomes.
+    #[allow(dead_code)]
+    fn eval_sequence(
+        policy: &DpegPolicy,
+        steps: &[(Vec<QuoteInput>, ContextClassification)],
+        start: DateTime<Utc>,
+        tick: Duration,
+    ) -> Vec<EvaluationOutcome> {
+        let mut state = DpegAlertState::default();
+        let mut outcomes = Vec::new();
+        for (i, (quotes, class)) in steps.iter().enumerate() {
+            let ts = start + tick * i as i32;
+            let outcome = evaluate_policy(policy, quotes, &state, ts, class.clone())
+                .expect("evaluate_policy should not fail");
+            state = outcome.next_state.clone();
+            outcomes.push(outcome);
+        }
+        outcomes
+    }
+
+    fn assert_no_alert(outcome: &EvaluationOutcome) {
+        assert!(
+            !outcome.should_emit_alert,
+            "Expected no alert, but got one (severity={:?}, transition={:?})",
+            outcome.emitted_severity, outcome.transition
+        );
+    }
+
+    fn assert_alert_with_severity(outcome: &EvaluationOutcome, expected: Severity) {
+        assert!(
+            outcome.should_emit_alert,
+            "Expected alert with severity {:?}, but no alert emitted",
+            expected
+        );
+        assert_eq!(
+            outcome.emitted_severity,
+            Some(expected.clone()),
+            "Severity mismatch"
+        );
+    }
+
+    fn assert_transition(outcome: &EvaluationOutcome, expected: IncidentTransition) {
+        assert_eq!(outcome.transition, Some(expected), "Transition mismatch");
+    }
+
+    fn assert_breach(outcome: &EvaluationOutcome, active: bool) {
+        assert_eq!(
+            outcome.snapshot.breach_active, active,
+            "breach_active mismatch"
+        );
+    }
+
+    // ─── 1. Detection Gates (TC-D-100 to TC-D-110) ────────────────────────
+
+    /// TC-D-100: No detection — normal market conditions (ISOLATED)
+    /// 0.10% is well below the isolated medium floor of 0.50%.
+    #[test]
+    fn tc_d_100_no_detection_normal_market() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.10);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_no_alert(&outcome);
+        assert_breach(&outcome, false);
+    }
+
+    /// TC-D-101: No detection — below isolated medium floor (0.40% < 0.50%)
+    #[test]
+    fn tc_d_101_no_detection_below_isolated_floor() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.40);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_no_alert(&outcome);
+        assert_breach(&outcome, false);
+    }
+
+    /// TC-D-102: No detection — insufficient healthy sources (2 < MIN_HEALTHY_SOURCES=3)
+    #[test]
+    fn tc_d_102_no_detection_insufficient_healthy_sources() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 1.50);
+        // Only 2 CEX sources, policy requires min 3
+        let mut policy = spec_policy();
+        // Use 2 sources total with oracle off so quorum fails
+        policy.toggles.oracle_confirmation = false;
+        policy.source_filter.include_oracles = false;
+        let quotes_no_oracle = vec![quote("cex-a", "cex", p, now), quote("cex-b", "cex", p, now)];
+        let outcome = eval_fresh(
+            &policy,
+            &quotes_no_oracle,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_no_alert(&outcome);
+        assert!(!outcome.snapshot.quorum_met);
+    }
+
+    /// TC-D-103: No detection — median breached but NO oracle breached
+    #[test]
+    fn tc_d_103_no_detection_median_breached_no_oracle() {
+        let now = Utc::now();
+        let cex_price = price_from_deviation(1.0, 1.50);
+        let oracle_price = price_from_deviation(1.0, 0.20); // oracles see near-peg
+        let quotes = make_quotes(cex_price, Some(oracle_price), Some(oracle_price), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_no_alert(&outcome);
+        assert!(!outcome.snapshot.oracle_confirmed);
+    }
+
+    /// TC-D-104: No detection — oracle breached but median below threshold
+    #[test]
+    fn tc_d_104_no_detection_oracle_breached_median_below() {
+        let now = Utc::now();
+        let cex_price = price_from_deviation(1.0, 0.20); // CEX near peg
+        let oracle_price = price_from_deviation(1.0, 1.50); // oracles see depeg
+        let quotes = make_quotes(cex_price, Some(oracle_price), Some(oracle_price), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_no_alert(&outcome);
+        assert_breach(&outcome, false);
+    }
+
+    /// TC-D-105: Detection fires — one oracle sufficient (Chainlink only)
+    #[test]
+    fn tc_d_105_detection_chainlink_only_confirms() {
+        let now = Utc::now();
+        let breach_price = price_from_deviation(1.0, 1.50);
+        let safe_price = price_from_deviation(1.0, 0.20);
+        let quotes = make_quotes(breach_price, Some(breach_price), Some(safe_price), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_breach(&outcome, true);
+        assert_eq!(outcome.snapshot.severity, Some(Severity::High));
+    }
+
+    /// TC-D-106: Detection fires — Pyth only breached (Chainlink below)
+    #[test]
+    fn tc_d_106_detection_pyth_only_confirms() {
+        let now = Utc::now();
+        let breach_price = price_from_deviation(1.0, 1.50);
+        let safe_price = price_from_deviation(1.0, 0.30);
+        let quotes = make_quotes(breach_price, Some(safe_price), Some(breach_price), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_breach(&outcome, true);
+        assert_eq!(outcome.snapshot.severity, Some(Severity::High));
+    }
+
+    /// TC-D-107: Detection fires — exactly at MIN_HEALTHY_SOURCES boundary (3)
+    #[test]
+    fn tc_d_107_detection_at_min_healthy_boundary() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 1.00);
+        // 3 CEX + oracle = 5 total, but min_healthy=3 met by CEX count
+        let quotes = make_quotes(p, Some(p), Some(p), 3, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert!(outcome.snapshot.quorum_met);
+        assert_breach(&outcome, true);
+        assert_eq!(outcome.snapshot.severity, Some(Severity::High));
+    }
+
+    /// TC-D-108: No detection — Chainlink absent, Pyth below threshold
+    #[test]
+    fn tc_d_108_no_detection_chainlink_absent_pyth_below() {
+        let now = Utc::now();
+        let cex_price = price_from_deviation(1.0, 1.50);
+        let pyth_price = price_from_deviation(1.0, 0.20);
+        let quotes = make_quotes(cex_price, None, Some(pyth_price), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert!(!outcome.snapshot.oracle_confirmed);
+        assert_breach(&outcome, false);
+    }
+
+    /// TC-D-109: Detection fires — Chainlink absent, Pyth breaches
+    #[test]
+    fn tc_d_109_detection_chainlink_absent_pyth_breaches() {
+        let now = Utc::now();
+        let breach_price = price_from_deviation(1.0, 1.50);
+        let quotes = make_quotes(breach_price, None, Some(breach_price), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert!(outcome.snapshot.oracle_confirmed);
+        assert_breach(&outcome, true);
+        assert_eq!(outcome.snapshot.severity, Some(Severity::High));
+    }
+
+    /// TC-D-110: No detection — both oracles absent, even at critical median
+    #[test]
+    fn tc_d_110_no_detection_both_oracles_absent() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 5.50);
+        let quotes = make_quotes(p, None, None, 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert!(!outcome.snapshot.oracle_confirmed);
+        assert_breach(&outcome, false);
+    }
+
+    // ─── 2. Severity Computation — Isolated (TC-D-200 to TC-D-206) ────────
+
+    /// TC-D-200: Isolated MEDIUM — at floor (0.50%)
+    #[test]
+    fn tc_d_200_isolated_medium_at_floor() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.50);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::Medium));
+    }
+
+    /// TC-D-201: Isolated MEDIUM — below HIGH boundary (0.99%)
+    #[test]
+    fn tc_d_201_isolated_medium_below_high() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.99);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::Medium));
+    }
+
+    /// TC-D-202: Isolated HIGH — at threshold (1.00%)
+    #[test]
+    fn tc_d_202_isolated_high_at_threshold() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 1.00);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::High));
+    }
+
+    /// TC-D-203: Isolated HIGH — moderate deviation (2.50%)
+    #[test]
+    fn tc_d_203_isolated_high_moderate() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 2.50);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::High));
+    }
+
+    /// TC-D-204: Isolated HIGH — just below CRITICAL (4.99%)
+    #[test]
+    fn tc_d_204_isolated_high_below_critical() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 4.99);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::High));
+    }
+
+    /// TC-D-205: Isolated CRITICAL — at threshold (5.00%)
+    #[test]
+    fn tc_d_205_isolated_critical_at_threshold() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 5.00);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::Critical));
+    }
+
+    /// TC-D-206: Isolated CRITICAL — catastrophic deviation (5.50%)
+    #[test]
+    fn tc_d_206_isolated_critical_catastrophic() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 5.50);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Isolated,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::Critical));
+    }
+
+    // ─── 3. Severity Computation — Systemic (TC-D-300 to TC-D-307) ────────
+
+    /// TC-D-300: Systemic MEDIUM — at floor (0.01%)
+    /// Uses 0.015% to clear floating-point boundary (0.01% exact hits fp precision).
+    #[test]
+    fn tc_d_300_systemic_medium_at_floor() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.015);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Systemic,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::Medium));
+    }
+
+    /// TC-D-301: Systemic MEDIUM — between floor and CRITICAL (0.10%)
+    #[test]
+    fn tc_d_301_systemic_medium_between_floor_and_critical() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.10);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Systemic,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::Medium));
+    }
+
+    /// TC-D-302: Systemic MEDIUM — just below CRITICAL (0.24%)
+    #[test]
+    fn tc_d_302_systemic_medium_below_critical() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.24);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Systemic,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::Medium));
+    }
+
+    /// TC-D-303: Systemic at 0.25% maps to HIGH under the approved systemic ladder
+    /// (medium=0.01, high=0.25, critical=0.5). Uses 0.26% to clear fp boundary.
+    #[test]
+    fn tc_d_303_systemic_at_025_pct() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.26);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Systemic,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::High));
+    }
+
+    /// TC-D-304: Systemic CRITICAL — large deviation (2.50%)
+    #[test]
+    fn tc_d_304_systemic_critical_large() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 2.50);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Systemic,
+        );
+        assert_eq!(outcome.snapshot.severity, Some(Severity::Critical));
+    }
+
+    /// TC-D-305: Same deviation (0.10%) produces different outcomes based on contagion
+    #[test]
+    fn tc_d_305_systemic_vs_isolated_same_deviation() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.10);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let policy = spec_policy();
+
+        // Isolated: 0.10% < 0.50% floor → no severity
+        let isolated = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+        assert_eq!(isolated.snapshot.severity, None);
+        assert_breach(&isolated, false);
+
+        // Systemic: 0.10% >= 0.01% floor → MEDIUM
+        let systemic = eval_fresh(&policy, &quotes, now, ContextClassification::Systemic);
+        assert_eq!(systemic.snapshot.severity, Some(Severity::Medium));
+        assert_breach(&systemic, true);
+    }
+
+    /// TC-D-306: No detection — systemic but below systemic floor (0.005%)
+    #[test]
+    fn tc_d_306_no_detection_systemic_below_floor() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.005);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let outcome = eval_fresh(
+            &spec_policy(),
+            &quotes,
+            now,
+            ContextClassification::Systemic,
+        );
+        assert_eq!(outcome.snapshot.severity, None);
+        assert_breach(&outcome, false);
+    }
+
+    /// TC-D-307: Contagion UNKNOWN (None) treated as ISOLATED
+    #[test]
+    fn tc_d_307_unknown_contagion_treated_as_isolated() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.10);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        // ContextClassification::None is the "Unknown" equivalent
+        let outcome = eval_fresh(&spec_policy(), &quotes, now, ContextClassification::None);
+        // Under isolated thresholds, 0.10% < 0.50% → no detection
+        assert_eq!(outcome.snapshot.severity, None);
+        assert_breach(&outcome, false);
+    }
+
+    // ─── 4. Contagion Escalation (TC-D-400 to TC-D-402) ───────────────────
+
+    /// TC-D-400: Contagion flip escalates severity (MEDIUM→CRITICAL) with same price
+    #[test]
+    fn tc_d_400_contagion_flip_escalates_severity() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.60);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let policy = spec_policy();
+
+        // Step 1: Isolated — 0.60% → MEDIUM, triggers
+        let step1 = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+        assert_eq!(step1.snapshot.severity, Some(Severity::Medium));
+        assert_transition(&step1, IncidentTransition::Trigger);
+
+        // Step 2: Same price but contagion flips to SYSTEMIC → CRITICAL (0.60% >= 0.5% critical)
+        let step2 = evaluate_policy(
+            &policy,
+            &quotes,
+            &step1.next_state,
+            now + Duration::seconds(1),
+            ContextClassification::Systemic,
+        )
+        .expect("evaluation");
+        assert_eq!(step2.snapshot.severity, Some(Severity::Critical));
+        // Severity went up: should escalate
+        assert_transition(&step2, IncidentTransition::Escalate);
+    }
+
+    /// TC-D-401: Contagion flip creates NEW alert that was previously suppressed
+    #[test]
+    fn tc_d_401_contagion_flip_creates_new_alert() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.02);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let policy = spec_policy();
+
+        // Isolated: 0.02% < 0.50% → no detection
+        let isolated = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+        assert_breach(&isolated, false);
+
+        // Systemic: 0.02% >= 0.01% → MEDIUM, triggers new incident
+        let systemic = eval_fresh(&policy, &quotes, now, ContextClassification::Systemic);
+        assert_eq!(systemic.snapshot.severity, Some(Severity::Medium));
+        assert_breach(&systemic, true);
+    }
+
+    /// TC-D-402: USDT recovers — contagion reverts but severity does NOT de-escalate immediately
+    /// Severity is a high-water mark within deescalation_blocks window.
+    #[test]
+    fn tc_d_402_contagion_reverts_no_immediate_deescalation() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 1.50);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let policy = spec_policy();
+
+        // Step 1: Systemic → CRITICAL
+        let step1 = eval_fresh(&policy, &quotes, now, ContextClassification::Systemic);
+        assert_eq!(step1.snapshot.severity, Some(Severity::Critical));
+        assert_transition(&step1, IncidentTransition::Trigger);
+
+        // Step 2: Contagion reverts to Isolated, same price → severity = HIGH (isolated bands)
+        // But current severity is CRITICAL from step1, so equal rank → no emit
+        let step2 = evaluate_policy(
+            &policy,
+            &quotes,
+            &step1.next_state,
+            now + Duration::seconds(1),
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        // Under isolated bands 1.50% → HIGH, which is lower than CRITICAL
+        // below_severity_blocks increments but no deescalation until deescalation_blocks reached
+        assert!(
+            !step2.should_emit_alert
+                || !matches!(step2.transition, Some(IncidentTransition::Deescalate))
+        );
+    }
+
+    // ─── 5. Resolution Logic (TC-D-500 to TC-D-505) ──────────────────────
+
+    /// TC-D-500: should_resolve returns true — all metrics below threshold
+    #[test]
+    fn tc_d_500_resolution_all_below_threshold() {
+        let now = Utc::now();
+        let recovery_price = price_from_deviation(1.0, 0.10);
+        let quotes = make_quotes(
+            recovery_price,
+            Some(recovery_price),
+            Some(recovery_price),
+            12,
+            now,
+        );
+        let policy = spec_policy();
+
+        // Set up state as if there was an active ISOLATED incident
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(120)),
+            last_divergence_pct: Some(1.5),
+            last_severity: Some("high".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        // Price is below trigger floor → below_trigger_blocks should increment
+        assert!(outcome.next_state.below_trigger_blocks > 0);
+    }
+
+    /// TC-D-501: should_resolve returns false — still depegged
+    #[test]
+    fn tc_d_501_no_resolution_still_depegged() {
+        let now = Utc::now();
+        let depeg_price = price_from_deviation(1.0, 1.50);
+        let quotes = make_quotes(depeg_price, Some(depeg_price), Some(depeg_price), 12, now);
+        let policy = spec_policy();
+
+        let state = DpegAlertState {
+            breach_started_at: Some(now - Duration::seconds(60)),
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(30)),
+            last_divergence_pct: Some(1.5),
+            last_severity: Some("high".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        // Still breaching → below_trigger_blocks stays 0
+        assert_eq!(outcome.next_state.below_trigger_blocks, 0);
+        assert!(outcome.transition != Some(IncidentTransition::Resolve));
+    }
+
+    /// TC-D-502: Resolution uses SYSTEMIC threshold for systemically-triggered incident
+    #[test]
+    fn tc_d_502_resolution_uses_original_systemic_threshold() {
+        let now = Utc::now();
+        // Price at 0.005% deviation — below systemic floor (0.01%)
+        let recovery_price = price_from_deviation(1.0, 0.005);
+        let quotes = make_quotes(
+            recovery_price,
+            Some(recovery_price),
+            Some(recovery_price),
+            12,
+            now,
+        );
+        let mut policy = spec_policy();
+        policy.resolution_blocks = 1; // Fast resolution for test
+
+        // Incident was triggered under SYSTEMIC (trigger_floor_pct = 0.01)
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(60)),
+            last_divergence_pct: Some(0.05),
+            last_severity: Some("medium".to_string()),
+            last_classification: Some("systemic".to_string()),
+            trigger_floor_pct: Some(0.01), // Systemic floor stored from trigger
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        // 0.005% < 0.01% (systemic trigger floor) → resolves
+        assert_transition(&outcome, IncidentTransition::Resolve);
+    }
+
+    /// TC-D-503: No resolution for systemically-triggered incident above systemic floor
+    #[test]
+    fn tc_d_503_no_resolution_above_systemic_floor() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.02);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let mut policy = spec_policy();
+        policy.resolution_blocks = 1;
+
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(60)),
+            last_divergence_pct: Some(0.05),
+            last_severity: Some("medium".to_string()),
+            last_classification: Some("systemic".to_string()),
+            trigger_floor_pct: Some(0.01),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        // 0.02% >= 0.01% trigger floor → no resolution
+        assert_eq!(outcome.next_state.below_trigger_blocks, 0);
+        assert!(outcome.transition != Some(IncidentTransition::Resolve));
+    }
+
+    #[test]
+    fn tc_d_504_resolution_blocked_by_single_oracle() {
+        let now = Utc::now();
+        let median_recovery_price = price_from_deviation(1.0, 0.10);
+        let blocking_oracle_price = price_from_deviation(1.0, 0.80);
+        let quotes = vec![
+            quote("cex-a", "cex", median_recovery_price, now),
+            quote("cex-b", "cex", median_recovery_price, now),
+            quote("chainlink", "oracle", median_recovery_price, now),
+            quote("pyth", "oracle", blocking_oracle_price, now),
+        ];
+        let mut policy = spec_policy();
+        policy.resolution_blocks = 1;
+
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(60)),
+            last_divergence_pct: Some(1.5),
+            last_severity: Some("high".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+
+        assert_eq!(outcome.next_state.below_trigger_blocks, 0);
+        assert!(outcome.transition != Some(IncidentTransition::Resolve));
+    }
+
+    /// TC-D-505: Resolution passes when unavailable oracle is not blocking
+    #[test]
+    fn tc_d_505_resolution_passes_with_absent_oracle() {
+        let now = Utc::now();
+        let recovery_price = price_from_deviation(1.0, 0.10);
+        // No oracle quotes — only CEX
+        let quotes = make_quotes(recovery_price, None, None, 12, now);
+        let mut policy = spec_policy();
+        policy.toggles.oracle_confirmation = false; // Don't require oracle for detection either
+        policy.resolution_blocks = 1;
+
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(60)),
+            last_divergence_pct: Some(1.5),
+            last_severity: Some("high".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        // 0.10% < 0.50% → resolves (absent oracles don't block)
+        assert_transition(&outcome, IncidentTransition::Resolve);
+    }
+
+    // ─── 6. State Manager — Multi-Block Resolution Lifecycle (TC-D-600 to TC-D-603) ──
+
+    /// TC-D-600: Full resolution countdown — ACTIVE → RESOLVING → RESOLVED
+    #[test]
+    fn tc_d_600_full_resolution_countdown() {
+        let now = Utc::now();
+        let recovery_price = price_from_deviation(1.0, 0.10);
+        let mut policy = spec_policy();
+        policy.toggles.oracle_confirmation = false;
+        policy.resolution_blocks = 30;
+
+        let mut state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(120)),
+            last_divergence_pct: Some(1.5),
+            last_severity: Some("high".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        // Run 30 consecutive below-floor evaluations
+        for i in 1..=30 {
+            let ts = now + Duration::seconds(i);
+            let quotes = make_quotes(recovery_price, None, None, 12, ts);
+            let outcome = evaluate_policy(
+                &policy,
+                &quotes,
+                &state,
+                ts,
+                ContextClassification::Isolated,
+            )
+            .expect("evaluation");
+            if i < 30 {
+                assert!(!outcome.should_emit_alert, "Should not emit at block {}", i);
+                assert_eq!(outcome.next_state.below_trigger_blocks, i);
+            } else {
+                assert!(outcome.should_emit_alert, "Should emit resolve at block 30");
+                assert_transition(&outcome, IncidentTransition::Resolve);
+            }
+            state = outcome.next_state;
+        }
+    }
+
+    /// TC-D-601: Resolution interrupted — counter resets to ACTIVE
+    #[test]
+    fn tc_d_601_resolution_interrupted_resets() {
+        let now = Utc::now();
+        let breach_price = price_from_deviation(1.0, 1.50);
+        let mut policy = spec_policy();
+        policy.toggles.oracle_confirmation = false;
+        policy.resolution_blocks = 30;
+
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(120)),
+            last_divergence_pct: Some(1.5),
+            last_severity: Some("high".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 15, // Halfway through resolution
+        };
+
+        // Breach resumes — counter should reset
+        let quotes = make_quotes(breach_price, None, None, 12, now);
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        assert_eq!(outcome.next_state.below_trigger_blocks, 0);
+    }
+
+    /// TC-D-602: Resolution interrupted, then resumes from zero
+    #[test]
+    fn tc_d_602_resolution_resumes_from_zero() {
+        let now = Utc::now();
+        let recovery_price = price_from_deviation(1.0, 0.10);
+        let breach_price = price_from_deviation(1.0, 1.50);
+        let mut policy = spec_policy();
+        policy.toggles.oracle_confirmation = false;
+        policy.resolution_blocks = 30;
+
+        let base_state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(120)),
+            last_divergence_pct: Some(1.5),
+            last_severity: Some("high".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        // 15 blocks recovering
+        let mut state = base_state;
+        for i in 1..=15 {
+            let ts = now + Duration::seconds(i);
+            let quotes = make_quotes(recovery_price, None, None, 12, ts);
+            let outcome = evaluate_policy(
+                &policy,
+                &quotes,
+                &state,
+                ts,
+                ContextClassification::Isolated,
+            )
+            .expect("evaluation");
+            state = outcome.next_state;
+        }
+        assert_eq!(state.below_trigger_blocks, 15);
+
+        // Block 115: breach resumes
+        let ts = now + Duration::seconds(16);
+        let quotes = make_quotes(breach_price, None, None, 12, ts);
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            ts,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        state = outcome.next_state;
+        assert_eq!(state.below_trigger_blocks, 0);
+
+        // Block 116: recovery again — starts from 1, NOT 16
+        let ts = now + Duration::seconds(17);
+        let quotes = make_quotes(recovery_price, None, None, 12, ts);
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            ts,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        assert_eq!(outcome.next_state.below_trigger_blocks, 1);
+    }
+
+    /// TC-D-603: Resolution payload structure — transition=Resolve, severity cleared
+    #[test]
+    fn tc_d_603_resolution_payload_structure() {
+        let now = Utc::now();
+        let recovery_price = price_from_deviation(1.0, 0.10);
+        let mut policy = spec_policy();
+        policy.toggles.oracle_confirmation = false;
+        policy.resolution_blocks = 1; // Fast resolution
+
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(60)),
+            last_divergence_pct: Some(1.5),
+            last_severity: Some("high".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let quotes = make_quotes(recovery_price, None, None, 12, now);
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+
+        assert_transition(&outcome, IncidentTransition::Resolve);
+        // Emitted severity is the original incident severity (high)
+        assert_eq!(outcome.emitted_severity, Some(Severity::High));
+        // After resolution, state is cleared
+        assert!(outcome.next_state.last_severity.is_none());
+        assert!(outcome.next_state.last_classification.is_none());
+        assert!(outcome.next_state.trigger_floor_pct.is_none());
+        assert_eq!(outcome.next_state.below_trigger_blocks, 0);
+        // Cooldown is set
+        assert!(outcome.next_state.cooldown_until.is_some());
+    }
+
+    // ─── 7. Dedup / Escalation / Suppression (TC-D-700 to TC-D-704) ──────
+
+    /// TC-D-700: Duplicate detection suppressed — same severity, no new alert (cooldown)
+    #[test]
+    fn tc_d_700_duplicate_detection_suppressed() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 0.60);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let policy = spec_policy();
+
+        // First trigger
+        let step1 = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+        assert_transition(&step1, IncidentTransition::Trigger);
+
+        // Second evaluation at same severity during cooldown — no new alert
+        let step2 = evaluate_policy(
+            &policy,
+            &quotes,
+            &step1.next_state,
+            now + Duration::seconds(1),
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        assert_no_alert(&step2);
+    }
+
+    /// TC-D-701: Escalation — severity increases from MEDIUM → CRITICAL
+    #[test]
+    fn tc_d_701_escalation_higher_severity() {
+        let now = Utc::now();
+        let medium_price = price_from_deviation(1.0, 0.60);
+        let critical_price = price_from_deviation(1.0, 5.50);
+        let mut policy = spec_policy();
+        policy.cooldown_sec = 0; // No cooldown for test
+
+        // Step 1: Trigger at MEDIUM
+        let quotes1 = make_quotes(
+            medium_price,
+            Some(medium_price),
+            Some(medium_price),
+            12,
+            now,
+        );
+        let step1 = eval_fresh(&policy, &quotes1, now, ContextClassification::Isolated);
+        assert_alert_with_severity(&step1, Severity::Medium);
+        assert_transition(&step1, IncidentTransition::Trigger);
+
+        // Step 2: Escalate to CRITICAL
+        let quotes2 = make_quotes(
+            critical_price,
+            Some(critical_price),
+            Some(critical_price),
+            12,
+            now,
+        );
+        let step2 = evaluate_policy(
+            &policy,
+            &quotes2,
+            &step1.next_state,
+            now + Duration::seconds(1),
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        assert_alert_with_severity(&step2, Severity::Critical);
+        assert_transition(&step2, IncidentTransition::Escalate);
+    }
+
+    /// TC-D-702: Escalation at equal or lower severity — no-op
+    #[test]
+    fn tc_d_702_escalation_equal_severity_noop() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 5.50);
+        let lower_p = price_from_deviation(1.0, 0.60);
+        let mut policy = spec_policy();
+        policy.cooldown_sec = 0;
+
+        // Trigger at CRITICAL
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let step1 = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+        assert_alert_with_severity(&step1, Severity::Critical);
+
+        // Same severity — no emit
+        let step2 = evaluate_policy(
+            &policy,
+            &quotes,
+            &step1.next_state,
+            now + Duration::seconds(1),
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        assert_no_alert(&step2);
+
+        // Lower severity (MEDIUM) — starts deescalation counter, no immediate emit
+        let quotes_low = make_quotes(lower_p, Some(lower_p), Some(lower_p), 12, now);
+        let step3 = evaluate_policy(
+            &policy,
+            &quotes_low,
+            &step2.next_state,
+            now + Duration::seconds(2),
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        // Below severity blocks increments, but not enough to deescalate
+        assert!(
+            !step3.should_emit_alert
+                || !matches!(step3.transition, Some(IncidentTransition::Escalate))
+        );
+    }
+
+    /// TC-D-703: Cooldown prevents re-trigger after resolution
+    #[test]
+    fn tc_d_703_cooldown_prevents_retrigger() {
+        let now = Utc::now();
+        let breach_price = price_from_deviation(1.0, 1.50);
+        let mut policy = spec_policy();
+        policy.cooldown_sec = 300;
+
+        // State: just resolved, cooldown active
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: Some(now + Duration::seconds(250)),
+            last_alerted_at: Some(now - Duration::seconds(5)),
+            last_divergence_pct: None,
+            last_severity: None, // Cleared by resolution
+            last_classification: None,
+            trigger_floor_pct: None,
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let quotes = make_quotes(
+            breach_price,
+            Some(breach_price),
+            Some(breach_price),
+            12,
+            now,
+        );
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        // Breach detected but cooldown blocks alert emission
+        assert_no_alert(&outcome);
+    }
+
+    /// TC-D-704: Cooldown expired — new incident allowed
+    #[test]
+    fn tc_d_704_cooldown_expired_new_incident() {
+        let now = Utc::now();
+        let breach_price = price_from_deviation(1.0, 1.50);
+        let mut policy = spec_policy();
+        policy.cooldown_sec = 300;
+
+        // State: resolved long ago, cooldown expired
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: Some(now - Duration::seconds(10)), // Expired
+            last_alerted_at: Some(now - Duration::seconds(310)),
+            last_divergence_pct: None,
+            last_severity: None,
+            last_classification: None,
+            trigger_floor_pct: None,
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let quotes = make_quotes(
+            breach_price,
+            Some(breach_price),
+            Some(breach_price),
+            12,
+            now,
+        );
+        let outcome = evaluate_policy(
+            &policy,
+            &quotes,
+            &state,
+            now,
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        assert_alert_with_severity(&outcome, Severity::High);
+        assert_transition(&outcome, IncidentTransition::Trigger);
+    }
+
+    // ─── 7b. Terminal States & Dedup (TC-D-705 to TC-D-708) ─────────────────
+
+    /// TC-D-705: RESOLVED state — subsequent breach doesn't immediately re-escalate
+    /// (simulates terminal state: after resolution + cooldown active, no transition)
+    #[test]
+    fn tc_d_705_resolved_cannot_transition_during_cooldown() {
+        let now = Utc::now();
+        let breach_price = price_from_deviation(1.0, 1.50);
+        let mut policy = spec_policy();
+        policy.cooldown_sec = 300;
+
+        // State after resolution: severity cleared, cooldown active
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: Some(now + Duration::seconds(250)),
+            last_alerted_at: Some(now - Duration::seconds(5)),
+            last_divergence_pct: None,
+            last_severity: None,
+            last_classification: None,
+            trigger_floor_pct: None,
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let quotes = make_quotes(
+            breach_price,
+            Some(breach_price),
+            Some(breach_price),
+            12,
+            now,
+        );
+        let outcome = evaluate_policy(&policy, &quotes, &state, now, ContextClassification::Isolated)
+            .expect("evaluation");
+        // Cooldown blocks any new trigger — terminal-like behavior
+        assert_no_alert(&outcome);
+        assert_eq!(outcome.transition, None);
+    }
+
+    /// TC-D-706: FALSE_POSITIVE terminal — once severity is cleared and cooldown
+    /// is active, no re-trigger is possible (mirrors false-positive state).
+    #[test]
+    fn tc_d_706_false_positive_state_blocks_retrigger() {
+        let now = Utc::now();
+        let critical_price = price_from_deviation(1.0, 5.50);
+        let mut policy = spec_policy();
+        policy.cooldown_sec = 600;
+
+        // Simulate a false-positive closure: severity cleared, long cooldown
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: Some(now + Duration::seconds(500)),
+            last_alerted_at: Some(now - Duration::seconds(10)),
+            last_divergence_pct: None,
+            last_severity: None,
+            last_classification: None,
+            trigger_floor_pct: None,
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let quotes = make_quotes(
+            critical_price,
+            Some(critical_price),
+            Some(critical_price),
+            12,
+            now,
+        );
+        let outcome = evaluate_policy(&policy, &quotes, &state, now, ContextClassification::Isolated)
+            .expect("evaluation");
+        assert_no_alert(&outcome);
+    }
+
+    /// TC-D-707: Deescalation requires configured block count — cannot skip
+    #[test]
+    fn tc_d_707_deescalation_requires_block_count() {
+        let now = Utc::now();
+        let medium_price = price_from_deviation(1.0, 0.60);
+        let mut policy = spec_policy();
+        policy.cooldown_sec = 0;
+        policy.deescalation_blocks = 5;
+
+        // Active incident at CRITICAL
+        let state = DpegAlertState {
+            breach_started_at: Some(now - Duration::seconds(120)),
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(60)),
+            last_divergence_pct: Some(5.50),
+            last_severity: Some("critical".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        // 1 block at MEDIUM — not enough for deescalation (needs 5)
+        let quotes = make_quotes(medium_price, Some(medium_price), Some(medium_price), 12, now);
+        let step1 = evaluate_policy(&policy, &quotes, &state, now, ContextClassification::Isolated)
+            .expect("evaluation");
+        // Should NOT emit deescalation after only 1 block
+        assert_no_alert(&step1);
+        assert_eq!(step1.next_state.below_severity_blocks, 1);
+
+        // Continue for 3 more blocks (total = 4, still < 5)
+        let mut s = step1.next_state;
+        for i in 1..4 {
+            let ts = now + Duration::seconds(i);
+            let q = make_quotes(medium_price, Some(medium_price), Some(medium_price), 12, ts);
+            let out = evaluate_policy(&policy, &q, &s, ts, ContextClassification::Isolated)
+                .expect("evaluation");
+            assert_no_alert(&out);
+            s = out.next_state;
+        }
+        assert_eq!(s.below_severity_blocks, 4);
+
+        // 5th block — deescalation fires
+        let ts = now + Duration::seconds(4);
+        let q = make_quotes(medium_price, Some(medium_price), Some(medium_price), 12, ts);
+        let final_out = evaluate_policy(&policy, &q, &s, ts, ContextClassification::Isolated)
+            .expect("evaluation");
+        assert_alert_with_severity(&final_out, Severity::Medium);
+        assert_transition(&final_out, IncidentTransition::Deescalate);
+    }
+
+    /// TC-D-708: Stale state recovery — if last_severity references a state that
+    /// no longer makes sense (divergence recovered), resolution countdown runs.
+    #[test]
+    fn tc_d_708_stale_state_triggers_resolution_countdown() {
+        let now = Utc::now();
+        let recovery_price = price_from_deviation(1.0, 0.10);
+        let mut policy = spec_policy();
+        policy.toggles.oracle_confirmation = false;
+        policy.resolution_blocks = 3;
+
+        // Stale state: says HIGH but divergence is now 0.10%
+        let state = DpegAlertState {
+            breach_started_at: None,
+            cooldown_until: None,
+            last_alerted_at: Some(now - Duration::seconds(300)),
+            last_divergence_pct: Some(1.50),
+            last_severity: Some("high".to_string()),
+            last_classification: Some("isolated".to_string()),
+            trigger_floor_pct: Some(0.5),
+            below_severity_blocks: 0,
+            below_trigger_blocks: 0,
+        };
+
+        let mut s = state;
+        for i in 0..3 {
+            let ts = now + Duration::seconds(i);
+            let q = make_quotes(recovery_price, None, None, 12, ts);
+            let out = evaluate_policy(&policy, &q, &s, ts, ContextClassification::Isolated)
+                .expect("evaluation");
+            if i < 2 {
+                assert!(!out.should_emit_alert);
+                assert_eq!(out.next_state.below_trigger_blocks, i + 1);
+            } else {
+                assert_transition(&out, IncidentTransition::Resolve);
+            }
+            s = out.next_state;
+        }
+    }
+
+    // ─── 13. Blast Radius & Recommended Actions (TC-D-1301 to TC-D-1302) ──
+
+    /// TC-D-1301: Recommended actions vary by severity
+    #[test]
+    fn tc_d_1301_recommended_actions_by_severity() {
+        let critical_actions = recommended_actions_for_severity(&Severity::Critical);
+        assert_eq!(critical_actions.len(), 3);
+        assert!(critical_actions[0].contains("Immediate Rebalance"));
+        assert!(critical_actions[1].contains("Exit all positions"));
+        assert!(critical_actions[2].contains("Withdraw to Owner"));
+
+        let high_actions = recommended_actions_for_severity(&Severity::High);
+        assert_eq!(high_actions.len(), 3);
+        assert!(high_actions[0].contains("Partial Exit"));
+        assert!(high_actions[1].contains("Rebalance to ETH"));
+        assert!(high_actions[2].contains("Hold and Monitor"));
+
+        let medium_actions = recommended_actions_for_severity(&Severity::Medium);
+        assert_eq!(medium_actions.len(), 2);
+        assert!(medium_actions[0].contains("Hold and Monitor"));
+
+        let info_actions = recommended_actions_for_severity(&Severity::Info);
+        assert!(info_actions.is_empty());
+    }
+
+    // ─── 14. Signal Detail Payload (TC-D-1400 to TC-D-1401) ─────────────────
+
+    /// TC-D-1400: Detection signal contains all required fields
+    #[test]
+    fn tc_d_1400_detection_signal_detail_fields() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 5.50);
+        let quotes = make_quotes(p, Some(p), Some(p), 12, now);
+        let policy = spec_policy();
+
+        let outcome = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+        assert_alert_with_severity(&outcome, Severity::Critical);
+
+        // Build the detection payload and verify structure
+        let event = UnifiedEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            tenant_id: "test-tenant".to_string(),
+            source_type: event_schema::SourceType::CexWebsocket,
+            source_id: "binance".to_string(),
+            event_type: "quote".to_string(),
+            timestamp: now,
+            payload: serde_json::Value::Null,
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            market_key: Some("USDC/USD".to_string()),
+            price: Some(p),
+        };
+
+        let detection = build_detection(
+            &event,
+            &policy,
+            &outcome.snapshot,
+            Severity::Critical,
+            Some(IncidentTransition::Trigger),
+            now,
+        );
+
+        assert_eq!(detection.pattern_id, "dpeg");
+        assert_eq!(detection.severity, Severity::Critical);
+        assert_eq!(detection.chain, Chain::Offchain);
+        assert_eq!(detection.attack_family, AttackFamily::PegDeviation);
+        assert!(detection.subject_type.as_deref() == Some("market"));
+        assert!(detection.subject_key.is_some());
+        assert!(detection.tenant_id.is_some());
+        assert!(detection.event_key.is_some());
+        assert_eq!(detection.incident_transition, Some(IncidentTransition::Trigger));
+        assert_eq!(detection.context_classification, Some(ContextClassification::Isolated));
+        assert!(!detection.signals.is_empty());
+        assert_eq!(detection.signals[0].signal_type, SignalType::PriceDeviation);
+        assert!(detection.signals[0].value > 5.0);
+        assert!(!detection.risk_score.rationale.is_empty());
+        assert!(!detection.actions_recommended.is_empty());
+        assert!(detection.oracle_context.contains_key("oracle_confirmed"));
+        assert!(detection.oracle_context.contains_key("weighted_median_price"));
+        assert!(detection.oracle_context.contains_key("trigger_floor_pct"));
+        assert!(detection.oracle_context.contains_key("context_classification"));
+        assert!(!detection.confidence_breakdown.is_empty());
+        assert!(detection.description.is_some());
+    }
+
+    /// TC-D-1401: Oracle `breached` flag matches threshold comparison
+    #[test]
+    fn tc_d_1401_oracle_breached_flag_matches_threshold() {
+        let now = Utc::now();
+        // Chainlink at 0.60% deviation (above 0.50% floor) → breached
+        // Pyth at 0.30% deviation (below 0.50% floor) → not breached
+        let median_price = price_from_deviation(1.0, 0.60);
+        let chainlink_price = price_from_deviation(1.0, 0.60);
+        let pyth_price = price_from_deviation(1.0, 0.30);
+        let quotes = make_quotes(median_price, Some(chainlink_price), Some(pyth_price), 12, now);
+        let policy = spec_policy();
+
+        let outcome = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+
+        // Chainlink alone breaches → oracle_confirmed should be true
+        assert!(outcome.snapshot.oracle_confirmed);
+        assert!(outcome.snapshot.breach_active);
+
+        // Now test with neither oracle breaching
+        let low_chainlink = price_from_deviation(1.0, 0.20);
+        let low_pyth = price_from_deviation(1.0, 0.30);
+        let quotes2 = make_quotes(median_price, Some(low_chainlink), Some(low_pyth), 12, now);
+        let outcome2 = eval_fresh(&policy, &quotes2, now, ContextClassification::Isolated);
+        // Oracles don't breach → oracle_confirmed=false → no breach
+        assert!(!outcome2.snapshot.oracle_confirmed);
+        assert!(!outcome2.snapshot.breach_active);
+    }
+
+    // ─── Severity edge cases ────────────────────────────────────────────────
+
+    /// TC-D-1402: severity_for_divergence returns None below all bands
+    #[test]
+    fn tc_d_1402_severity_none_below_all_bands() {
+        let bands = DpegSeverityBands {
+            medium: 0.5,
+            high: 1.0,
+            critical: 5.0,
+        };
+        assert_eq!(severity_for_divergence(0.0, &bands), None);
+        assert_eq!(severity_for_divergence(0.49, &bands), None);
+    }
+
+    /// TC-D-1403: severity_for_divergence boundary tests
+    #[test]
+    fn tc_d_1403_severity_boundaries() {
+        let bands = DpegSeverityBands {
+            medium: 0.5,
+            high: 1.0,
+            critical: 5.0,
+        };
+        assert_eq!(severity_for_divergence(0.5, &bands), Some(Severity::Medium));
+        assert_eq!(severity_for_divergence(0.99, &bands), Some(Severity::Medium));
+        assert_eq!(severity_for_divergence(1.0, &bands), Some(Severity::High));
+        assert_eq!(severity_for_divergence(4.99, &bands), Some(Severity::High));
+        assert_eq!(severity_for_divergence(5.0, &bands), Some(Severity::Critical));
+        assert_eq!(severity_for_divergence(99.0, &bands), Some(Severity::Critical));
+    }
+
+    /// TC-D-1404: Systemic severity bands boundary tests
+    #[test]
+    fn tc_d_1404_systemic_severity_boundaries() {
+        let bands = DpegSeverityBands {
+            medium: 0.01,
+            high: 0.25,
+            critical: 0.5,
+        };
+        assert_eq!(severity_for_divergence(0.009, &bands), None);
+        assert_eq!(severity_for_divergence(0.01, &bands), Some(Severity::Medium));
+        assert_eq!(severity_for_divergence(0.24, &bands), Some(Severity::Medium));
+        assert_eq!(severity_for_divergence(0.25, &bands), Some(Severity::High));
+        assert_eq!(severity_for_divergence(0.49, &bands), Some(Severity::High));
+        assert_eq!(severity_for_divergence(0.5, &bands), Some(Severity::Critical));
+    }
+
+    // ─── Contagion classification helper ─────────────────────────────────────
+
+    /// TC-D-1405: context_classification_str returns correct strings
+    #[test]
+    fn tc_d_1405_context_classification_str_values() {
+        assert_eq!(context_classification_str(&ContextClassification::Isolated), "isolated");
+        assert_eq!(context_classification_str(&ContextClassification::Systemic), "systemic");
+        assert_eq!(context_classification_str(&ContextClassification::None), "none");
+    }
+
+    /// TC-D-1406: severity_from_str round-trip
+    #[test]
+    fn tc_d_1406_severity_from_str_roundtrip() {
+        assert_eq!(severity_from_str(Some("critical")), Some(Severity::Critical));
+        assert_eq!(severity_from_str(Some("HIGH")), Some(Severity::High));
+        assert_eq!(severity_from_str(Some("Medium")), Some(Severity::Medium));
+        assert_eq!(severity_from_str(Some("low")), Some(Severity::Low));
+        assert_eq!(severity_from_str(Some("info")), Some(Severity::Info));
+        assert_eq!(severity_from_str(Some("unknown")), None);
+        assert_eq!(severity_from_str(None), None);
+    }
+
+    /// TC-D-1407: severity_rank ordering
+    #[test]
+    fn tc_d_1407_severity_rank_ordering() {
+        assert!(severity_rank(Some(&Severity::Critical)) > severity_rank(Some(&Severity::High)));
+        assert!(severity_rank(Some(&Severity::High)) > severity_rank(Some(&Severity::Medium)));
+        assert!(severity_rank(Some(&Severity::Medium)) > severity_rank(Some(&Severity::Low)));
+        assert!(severity_rank(Some(&Severity::Low)) > severity_rank(Some(&Severity::Info)));
+        assert!(severity_rank(Some(&Severity::Info)) > severity_rank(None));
+        assert_eq!(severity_rank(None), 0);
+    }
+
+    // ─── Resolution with oracle floor checks ────────────────────────────────
+
+    /// TC-D-1408: available_oracles_within_resolution_floor — all below
+    #[test]
+    fn tc_d_1408_oracles_within_resolution_floor() {
+        let now = Utc::now();
+        let good_oracle = quote("chainlink", "oracle", 0.998, now);
+        let good_pyth = quote("pyth", "oracle", 0.999, now);
+        let quotes = vec![good_oracle, good_pyth];
+        // Both oracles within 0.5% of peg target 1.0
+        assert!(available_oracles_within_resolution_floor(&quotes, 0.5, 1.0));
+    }
+
+    /// TC-D-1409: available_oracles_within_resolution_floor — one above
+    #[test]
+    fn tc_d_1409_oracle_above_resolution_floor() {
+        let now = Utc::now();
+        let good_oracle = quote("chainlink", "oracle", 0.998, now);
+        let bad_pyth = quote("pyth", "oracle", 0.990, now); // 1.0% deviation
+        let quotes = vec![good_oracle, bad_pyth];
+        // Pyth at 1.0% > floor 0.5% → resolution blocked
+        assert!(!available_oracles_within_resolution_floor(&quotes, 0.5, 1.0));
+    }
+
+    /// TC-D-1410: available_oracles_within_resolution_floor — no oracles → true
+    #[test]
+    fn tc_d_1410_no_oracles_resolution_passes() {
+        let now = Utc::now();
+        let quotes = vec![quote("binance", "cex", 0.998, now)];
+        // No oracle quotes → .all() over empty iterator → true
+        assert!(available_oracles_within_resolution_floor(&quotes, 0.5, 1.0));
+    }
+
+    // ─── Weighted median edge cases ─────────────────────────────────────────
+
+    /// TC-D-1411: Single source still computes valid median
+    #[test]
+    fn tc_d_1411_single_source_valid_median() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 1.50);
+        let mut policy = spec_policy();
+        policy.min_sources = 1;
+        policy.source_filter.min_healthy_sources = 1;
+        policy.toggles.oracle_confirmation = false;
+
+        let quotes = vec![quote("binance", "cex", p, now)];
+        let outcome = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+        assert_eq!(outcome.snapshot.source_count, 1);
+        assert!(outcome.snapshot.breach_active);
+    }
+
+    /// TC-D-1412: Zero-weight source excluded from median
+    #[test]
+    fn tc_d_1412_zero_weight_source_excluded() {
+        let now = Utc::now();
+        let mut policy = spec_policy();
+        policy.toggles.oracle_confirmation = false;
+        policy.min_sources = 1;
+        policy.source_filter.min_healthy_sources = 1;
+        policy.source_overrides.insert(
+            "bad-source".to_string(),
+            DpegSourceOverride {
+                source_id: "bad-source".to_string(),
+                weight: 0.0,
+                enabled: true,
+                stale_timeout_ms: None,
+            },
+        );
+
+        let good_price = price_from_deviation(1.0, 0.10); // No breach
+        let bad_price = price_from_deviation(1.0, 5.0); // Would breach if included
+        let quotes = vec![
+            quote("good-source", "cex", good_price, now),
+            quote("bad-source", "cex", bad_price, now),
+        ];
+
+        let outcome = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+        // Only good-source counted (weight > 0), 0.10% < 0.50% → no breach
+        assert_eq!(outcome.snapshot.source_count, 1);
+        assert!(!outcome.snapshot.breach_active);
+    }
+
+    /// TC-D-1413: Disabled source excluded
+    #[test]
+    fn tc_d_1413_disabled_source_excluded() {
+        let now = Utc::now();
+        let mut policy = spec_policy();
+        policy.toggles.oracle_confirmation = false;
+        policy.min_sources = 1;
+        policy.source_filter.min_healthy_sources = 1;
+        policy.source_overrides.insert(
+            "disabled-cex".to_string(),
+            DpegSourceOverride {
+                source_id: "disabled-cex".to_string(),
+                weight: 1.0,
+                enabled: false,
+                stale_timeout_ms: None,
+            },
+        );
+
+        let good_price = price_from_deviation(1.0, 0.10);
+        let breach_price = price_from_deviation(1.0, 5.0);
+        let quotes = vec![
+            quote("active-cex", "cex", good_price, now),
+            quote("disabled-cex", "cex", breach_price, now),
+        ];
+
+        let outcome = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+        assert_eq!(outcome.snapshot.source_count, 1);
+        assert!(!outcome.snapshot.breach_active);
+    }
+
+    // ─── Confidence gate ────────────────────────────────────────────────────
+
+    /// TC-D-1414: min_confidence_to_fire blocks low-confidence alerts
+    #[test]
+    fn tc_d_1414_confidence_gate_blocks_alert() {
+        let now = Utc::now();
+        let p = price_from_deviation(1.0, 1.50);
+        let mut policy = spec_policy();
+        policy.min_confidence_to_fire = 100.1; // Impossible to reach
+        policy.min_sources = 1;
+        policy.source_filter.min_healthy_sources = 1;
+        policy.toggles.oracle_confirmation = false;
+
+        let quotes = vec![quote("binance", "cex", p, now)];
+        let outcome = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+        // Confidence can never reach 100.1% → breach_active = false
+        assert!(!outcome.snapshot.breach_active);
+        assert_no_alert(&outcome);
+    }
+
+    // ─── Deescalation + resolution interaction ──────────────────────────────
+
+    /// TC-D-1415: Full escalation → deescalation → resolution lifecycle
+    #[test]
+    fn tc_d_1415_full_escalation_deescalation_resolution_lifecycle() {
+        let now = Utc::now();
+        let mut policy = spec_policy();
+        policy.cooldown_sec = 0;
+        policy.deescalation_blocks = 2;
+        policy.resolution_blocks = 2;
+        policy.toggles.oracle_confirmation = false;
+
+        // Step 1: Trigger at MEDIUM
+        let medium_price = price_from_deviation(1.0, 0.60);
+        let q1 = make_quotes(medium_price, None, None, 12, now);
+        let s1 = eval_fresh(&policy, &q1, now, ContextClassification::Isolated);
+        assert_transition(&s1, IncidentTransition::Trigger);
+        assert_alert_with_severity(&s1, Severity::Medium);
+
+        // Step 2: Escalate to CRITICAL
+        let critical_price = price_from_deviation(1.0, 5.50);
+        let q2 = make_quotes(critical_price, None, None, 12, now + Duration::seconds(1));
+        let s2 = evaluate_policy(
+            &policy,
+            &q2,
+            &s1.next_state,
+            now + Duration::seconds(1),
+            ContextClassification::Isolated,
+        )
+        .expect("evaluation");
+        assert_transition(&s2, IncidentTransition::Escalate);
+        assert_alert_with_severity(&s2, Severity::Critical);
+
+        // Steps 3-4: Deescalate (2 blocks at MEDIUM)
+        let mut state = s2.next_state;
+        for i in 2..4 {
+            let ts = now + Duration::seconds(i);
+            let q = make_quotes(medium_price, None, None, 12, ts);
+            let out = evaluate_policy(&policy, &q, &state, ts, ContextClassification::Isolated)
+                .expect("evaluation");
+            if i == 3 {
+                assert_transition(&out, IncidentTransition::Deescalate);
+                assert_alert_with_severity(&out, Severity::Medium);
+            }
+            state = out.next_state;
+        }
+
+        // Steps 5-6: Resolve (2 blocks below trigger floor)
+        let recovery_price = price_from_deviation(1.0, 0.10);
+        for i in 4..6 {
+            let ts = now + Duration::seconds(i);
+            let q = make_quotes(recovery_price, None, None, 12, ts);
+            let out = evaluate_policy(&policy, &q, &state, ts, ContextClassification::Isolated)
+                .expect("evaluation");
+            if i == 5 {
+                assert_transition(&out, IncidentTransition::Resolve);
+            }
+            state = out.next_state;
+        }
+    }
+
+    // ─── Policy validation ──────────────────────────────────────────────────
+
+    /// TC-D-1416: Policy validation rejects invalid configs
+    #[test]
+    fn tc_d_1416_policy_validation() {
+        let mut p = base_policy();
+        p.sustained_window_ms = 1; // base_policy uses 0, but validate requires > 0
+        assert!(p.validate().is_ok());
+
+        p.peg_target = 0.0;
+        assert!(p.validate().is_err());
+        p.peg_target = 1.0;
+
+        p.min_sources = 0;
+        assert!(p.validate().is_err());
+        p.min_sources = 3;
+
+        p.quorum_pct = 1.5;
+        assert!(p.validate().is_err());
+        p.quorum_pct = 0.5;
+
+        p.sustained_window_ms = -1;
+        assert!(p.validate().is_err());
+        p.sustained_window_ms = 0; // Also invalid (must be > 0)
+        assert!(p.validate().is_err());
+        p.sustained_window_ms = 1;
+
+        p.resolution_blocks = 0;
+        assert!(p.validate().is_err());
+        p.resolution_blocks = 30;
+
+        p.min_confidence_to_fire = 101.0;
+        assert!(p.validate().is_err());
+    }
+
+    // ─── Stale quote handling ───────────────────────────────────────────────
+
+    /// TC-D-1417: Stale quotes are excluded from consensus
+    #[test]
+    fn tc_d_1417_stale_quotes_excluded() {
+        let now = Utc::now();
+        let mut policy = spec_policy();
+        policy.stale_timeout_ms = 30_000; // 30s
+        policy.min_sources = 1;
+        policy.source_filter.min_healthy_sources = 1;
+        policy.toggles.oracle_confirmation = false;
+
+        // Quote from 60s ago — stale
+        let stale_time = now - Duration::seconds(60);
+        let breach_price = price_from_deviation(1.0, 5.0);
+        let quotes = vec![quote("binance", "cex", breach_price, stale_time)];
+
+        let outcome = eval_fresh(&policy, &quotes, now, ContextClassification::Isolated);
+        // Stale quote excluded → source_count = 0
+        assert_eq!(outcome.snapshot.source_count, 0);
+        assert!(!outcome.snapshot.breach_active);
+    }
+
+    /// TC-D-1418: Per-source stale timeout override
+    #[test]
+    fn tc_d_1418_per_source_stale_override() {
+        let now = Utc::now();
+        let mut policy = spec_policy();
+        policy.stale_timeout_ms = 30_000; // 30s default
+        policy.min_sources = 1;
+        policy.source_filter.min_healthy_sources = 1;
+        policy.toggles.oracle_confirmation = false;
+        policy.source_overrides.insert(
+            "slow-source".to_string(),
+            DpegSourceOverride {
+                source_id: "slow-source".to_string(),
+                weight: 1.0,
+                enabled: true,
+                stale_timeout_ms: Some(120_000), // 120s override
+            },
+        );
+
+        let old_time = now - Duration::seconds(60);
+        let breach_price = price_from_deviation(1.0, 1.50);
+
+        // Normal source at 60s → stale (> 30s default)
+        let quotes_normal = vec![quote("normal-source", "cex", breach_price, old_time)];
+        let out1 = eval_fresh(&policy, &quotes_normal, now, ContextClassification::Isolated);
+        assert_eq!(out1.snapshot.source_count, 0);
+
+        // Overridden source at 60s → NOT stale (< 120s override)
+        let quotes_slow = vec![quote("slow-source", "cex", breach_price, old_time)];
+        let out2 = eval_fresh(&policy, &quotes_slow, now, ContextClassification::Isolated);
+        assert_eq!(out2.snapshot.source_count, 1);
+        assert!(out2.snapshot.breach_active);
     }
 }

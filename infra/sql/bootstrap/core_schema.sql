@@ -1041,10 +1041,30 @@ CREATE TABLE IF NOT EXISTS pattern.tenant_pattern_alert_policies (
     cooldown_sec       INTEGER     NOT NULL DEFAULT 300,
     default_channels   TEXT[]      NOT NULL DEFAULT '{webhook}',
     route_overrides    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    alerts_paused      BOOLEAN     NOT NULL DEFAULT FALSE,
+    alerts_paused_until TIMESTAMPTZ,
+    pause_reason       TEXT,
+    critical_bypass    BOOLEAN     NOT NULL DEFAULT TRUE,
+    retraction_bypass  BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, pattern_id)
 );
+
+ALTER TABLE pattern.tenant_pattern_alert_policies
+    ADD COLUMN IF NOT EXISTS alerts_paused BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE pattern.tenant_pattern_alert_policies
+    ADD COLUMN IF NOT EXISTS alerts_paused_until TIMESTAMPTZ;
+
+ALTER TABLE pattern.tenant_pattern_alert_policies
+    ADD COLUMN IF NOT EXISTS pause_reason TEXT;
+
+ALTER TABLE pattern.tenant_pattern_alert_policies
+    ADD COLUMN IF NOT EXISTS critical_bypass BOOLEAN NOT NULL DEFAULT TRUE;
+
+ALTER TABLE pattern.tenant_pattern_alert_policies
+    ADD COLUMN IF NOT EXISTS retraction_bypass BOOLEAN NOT NULL DEFAULT TRUE;
 
 CREATE INDEX IF NOT EXISTS idx_tenant_pattern_alert_policies_tenant
     ON pattern.tenant_pattern_alert_policies (tenant_id);

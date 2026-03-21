@@ -317,6 +317,283 @@ mod tests {
             update.event_key == "ev-3" && update.lifecycle_state == LifecycleState::Provisional
         }));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // BA/QA Test Suite — Finality & Reorg (Test_Cases_DepegV1_0)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ─── 10. Finality Lifecycle (TC-D-1000 to TC-D-1004) ──────────────────
+    // NOTE: Current code uses Provisional→Confirmed (not TENTATIVE→SAFE→FINALIZED).
+    // The orchestrator maps: Provisional→Tentative, Confirmed→Finalized.
+    // There is no SAFE intermediate state in the current implementation.
+    // Tests validate the core finality tracker behaviour which underpins the spec.
+
+    /// TC-D-1000: PROVISIONAL → CONFIRMED finality progression
+    /// Spec: TENTATIVE → SAFE → FINALIZED (maps to Provisional → Confirmed in code)
+    #[test]
+    fn tc_d_1000_finality_provisional_to_confirmed() {
+        let mut tracker = ChainFinalityTracker::new(Chain::Ethereum, 2);
+
+        // Block 100: event enters as Provisional
+        let batch1 = tracker.observe_event(&mk_event("depeg-alert-1", 100, "0xaaa"));
+        assert!(batch1.updates.iter().any(|u| {
+            u.event_key == "depeg-alert-1" && u.lifecycle_state == LifecycleState::Provisional
+        }));
+
+        // Block 101: still provisional (depth=2, need 2 more blocks)
+        let batch2 = tracker.observe_event(&mk_event("ev-filler-101", 101, "0xbbb"));
+        assert!(!batch2
+            .updates
+            .iter()
+            .any(|u| u.event_key == "depeg-alert-1"
+                && u.lifecycle_state == LifecycleState::Confirmed));
+
+        // Block 102: confirmation depth reached → Confirmed
+        let batch3 = tracker.observe_event(&mk_event("ev-filler-102", 102, "0xccc"));
+        assert!(batch3.updates.iter().any(|u| {
+            u.event_key == "depeg-alert-1" && u.lifecycle_state == LifecycleState::Confirmed
+        }));
+    }
+
+    /// TC-D-1001: Multiple events confirmed in order
+    #[test]
+    fn tc_d_1001_multiple_events_confirmed_in_sequence() {
+        let mut tracker = ChainFinalityTracker::new(Chain::Ethereum, 2);
+
+        tracker.observe_event(&mk_event("depeg-1", 100, "0xaaa"));
+        tracker.observe_event(&mk_event("depeg-2", 101, "0xbbb"));
+        let batch = tracker.observe_event(&mk_event("ev-103", 103, "0xddd"));
+
+        // Block 100 event should be confirmed (103 - 2 = 101, so block 100 and 101 confirmed)
+        assert!(batch
+            .updates
+            .iter()
+            .any(|u| u.event_key == "depeg-1" && u.lifecycle_state == LifecycleState::Confirmed));
+        assert!(batch
+            .updates
+            .iter()
+            .any(|u| u.event_key == "depeg-2" && u.lifecycle_state == LifecycleState::Confirmed));
+    }
+
+    /// TC-D-1002: No finality confirmation for retracted (invalidated) event
+    #[test]
+    fn tc_d_1002_no_finality_for_retracted_event() {
+        let mut tracker = ChainFinalityTracker::new(Chain::Ethereum, 2);
+
+        // Block 100: event enters
+        tracker.observe_event(&mk_event("depeg-1", 100, "0xaaa"));
+        // Block 101: another event
+        tracker.observe_event(&mk_event("depeg-2", 101, "0xbbb"));
+        // Reorg at block 101: depeg-2 retracted
+        let reorg_batch = tracker.observe_event(&mk_event("depeg-2-canonical", 101, "0xfff"));
+        assert!(reorg_batch.reorg_notice.is_some());
+
+        // Block 102 and 103: advance chain
+        tracker.observe_event(&mk_event("ev-102", 102, "0xeee"));
+        let batch = tracker.observe_event(&mk_event("ev-103", 103, "0xggg"));
+
+        // depeg-2 was retracted and should NOT appear as Confirmed
+        assert!(!batch
+            .updates
+            .iter()
+            .any(|u| u.event_key == "depeg-2" && u.lifecycle_state == LifecycleState::Confirmed));
+    }
+
+    /// Helper: create event that uses tracker's default confirmation depth.
+    fn mk_event_default_depth(
+        event_key: &str,
+        block_number: u64,
+        block_hash: &str,
+    ) -> NormalizedEvent {
+        let mut event = mk_event(event_key, block_number, block_hash);
+        event.requires_confirmation = false; // Use tracker's default depth
+        event
+    }
+
+    /// TC-D-1003: Finality depth of 1 confirms immediately on next block
+    #[test]
+    fn tc_d_1003_finality_depth_one() {
+        let mut tracker = ChainFinalityTracker::new(Chain::Ethereum, 1);
+
+        tracker.observe_event(&mk_event_default_depth("depeg-1", 100, "0xaaa"));
+        let batch = tracker.observe_event(&mk_event_default_depth("ev-101", 101, "0xbbb"));
+
+        // With default depth=1: finalized_height = 101-1 = 100, so block 100 confirmed
+        assert!(batch
+            .updates
+            .iter()
+            .any(|u| u.event_key == "depeg-1" && u.lifecycle_state == LifecycleState::Confirmed));
+    }
+
+    /// TC-D-1004: Confirmation depth of 0 is clamped to 1
+    #[test]
+    fn tc_d_1004_confirmation_depth_clamped_to_one() {
+        // Constructor clamps to max(1)
+        let mut tracker = ChainFinalityTracker::new(Chain::Ethereum, 0);
+
+        tracker.observe_event(&mk_event_default_depth("depeg-1", 100, "0xaaa"));
+        let batch = tracker.observe_event(&mk_event_default_depth("ev-101", 101, "0xbbb"));
+
+        // depth=0 clamped to 1, so confirmed on next block
+        assert!(batch
+            .updates
+            .iter()
+            .any(|u| u.event_key == "depeg-1" && u.lifecycle_state == LifecycleState::Confirmed));
+    }
+
+    // ─── 11. Reorg Corrections (TC-D-1100 to TC-D-1105) ──────────────────
+
+    /// TC-D-1100: Retraction — event only on orphaned fork
+    #[test]
+    fn tc_d_1100_retraction_orphaned_fork_event() {
+        let mut tracker = ChainFinalityTracker::new(Chain::Ethereum, 2);
+
+        tracker.observe_event(&mk_event("depeg-alert", 100, "0xaaa"));
+        tracker.observe_event(&mk_event("ev-101", 101, "0xbbb"));
+
+        // Reorg at block 100 — depeg-alert was on orphaned chain
+        let reorg = tracker.observe_event(&mk_event("canonical-100", 100, "0xzzz"));
+
+        assert!(reorg.reorg_notice.is_some());
+        let notice = reorg.reorg_notice.as_ref().unwrap();
+        assert_eq!(notice.orphaned_from_block, 100);
+        assert!(notice
+            .affected_event_keys
+            .contains(&"depeg-alert".to_string()));
+        assert!(notice.affected_event_keys.contains(&"ev-101".to_string()));
+
+        // Both events retracted
+        assert!(reorg.updates.iter().any(|u| {
+            u.event_key == "depeg-alert" && u.lifecycle_state == LifecycleState::Retracted
+        }));
+        assert!(reorg.updates.iter().any(|u| {
+            u.event_key == "ev-101" && u.lifecycle_state == LifecycleState::Retracted
+        }));
+    }
+
+    /// TC-D-1101: apply_reorg_notice retracts specified events
+    #[test]
+    fn tc_d_1101_apply_reorg_notice_retracts_events() {
+        let mut tracker = ChainFinalityTracker::new(Chain::Ethereum, 2);
+
+        tracker.observe_event(&mk_event("depeg-1", 100, "0xaaa"));
+        tracker.observe_event(&mk_event("depeg-2", 101, "0xbbb"));
+
+        let notice = ReorgNotice {
+            chain: Chain::Ethereum,
+            orphaned_from_block: 100,
+            common_ancestor_block: 99,
+            affected_event_keys: vec!["depeg-1".to_string(), "depeg-2".to_string()],
+            noticed_at: Utc::now(),
+        };
+
+        let updates = tracker.apply_reorg_notice(&notice);
+        assert_eq!(updates.len(), 2);
+        assert!(updates
+            .iter()
+            .all(|u| u.lifecycle_state == LifecycleState::Retracted));
+    }
+
+    /// TC-D-1102: Reorg on different chain is ignored
+    #[test]
+    fn tc_d_1102_reorg_different_chain_ignored() {
+        let mut tracker = ChainFinalityTracker::new(Chain::Ethereum, 2);
+
+        tracker.observe_event(&mk_event("depeg-1", 100, "0xaaa"));
+
+        let notice = ReorgNotice {
+            chain: Chain::Base, // Different chain
+            orphaned_from_block: 100,
+            common_ancestor_block: 99,
+            affected_event_keys: vec!["depeg-1".to_string()],
+            noticed_at: Utc::now(),
+        };
+
+        let updates = tracker.apply_reorg_notice(&notice);
+        assert!(
+            updates.is_empty(),
+            "Reorg for different chain should be ignored"
+        );
+    }
+
+    /// TC-D-1103: Reorg does not double-retract already retracted events
+    #[test]
+    fn tc_d_1103_no_double_retraction() {
+        let mut tracker = ChainFinalityTracker::new(Chain::Ethereum, 2);
+
+        tracker.observe_event(&mk_event("depeg-1", 100, "0xaaa"));
+        tracker.observe_event(&mk_event("ev-101", 101, "0xbbb"));
+
+        // First reorg
+        let reorg1 = tracker.observe_event(&mk_event("canonical-101", 101, "0xyyy"));
+        assert!(reorg1
+            .updates
+            .iter()
+            .any(|u| u.event_key == "ev-101" && u.lifecycle_state == LifecycleState::Retracted));
+
+        // Apply notice again for same events — should not emit duplicate retractions
+        let notice = ReorgNotice {
+            chain: Chain::Ethereum,
+            orphaned_from_block: 101,
+            common_ancestor_block: 100,
+            affected_event_keys: vec!["ev-101".to_string()],
+            noticed_at: Utc::now(),
+        };
+        let updates = tracker.apply_reorg_notice(&notice);
+        // Already retracted → no new updates
+        assert!(
+            updates.is_empty(),
+            "Already retracted events should not produce duplicate updates"
+        );
+    }
+
+    /// TC-D-1104: Events before reorg point are unaffected
+    #[test]
+    fn tc_d_1104_events_before_reorg_unaffected() {
+        let mut tracker = ChainFinalityTracker::new(Chain::Ethereum, 2);
+
+        tracker.observe_event(&mk_event("depeg-block-99", 99, "0x999"));
+        tracker.observe_event(&mk_event("depeg-block-100", 100, "0xaaa"));
+        tracker.observe_event(&mk_event("ev-101", 101, "0xbbb"));
+
+        // Reorg at block 101 only
+        let reorg = tracker.observe_event(&mk_event("canonical-101", 101, "0xyyy"));
+
+        let notice = reorg.reorg_notice.as_ref().unwrap();
+        // Block 99 and 100 events should NOT be affected
+        assert!(!notice
+            .affected_event_keys
+            .contains(&"depeg-block-99".to_string()));
+        assert!(!notice
+            .affected_event_keys
+            .contains(&"depeg-block-100".to_string()));
+        // Only block 101 event affected
+        assert!(notice.affected_event_keys.contains(&"ev-101".to_string()));
+    }
+
+    /// TC-D-1105: Serialization round-trip preserves state
+    #[test]
+    fn tc_d_1105_serialization_roundtrip() {
+        let mut tracker = ChainFinalityTracker::new(Chain::Ethereum, 2);
+
+        tracker.observe_event(&mk_event("depeg-1", 100, "0xaaa"));
+        tracker.observe_event(&mk_event("depeg-2", 101, "0xbbb"));
+        tracker.observe_event(&mk_event("depeg-3", 102, "0xccc"));
+
+        let json = tracker.to_json().expect("serialize");
+        let restored =
+            ChainFinalityTracker::from_json(Chain::Ethereum, 2, json).expect("deserialize");
+
+        // Restored tracker should produce same confirmation on next block
+        // (depeg-1 at block 100 should be confirmed since head=102, depth=2)
+        // The state should already show depeg-1 as Confirmed after the observe_event calls
+        let json2 = restored.to_json().expect("serialize restored");
+        assert_eq!(
+            tracker.to_json().expect("original json"),
+            json2,
+            "Round-trip should preserve state"
+        );
+    }
 }
 
 // Persistence support for ChainFinalityTracker

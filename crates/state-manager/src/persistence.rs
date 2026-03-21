@@ -1430,6 +1430,47 @@ impl PostgresRepository {
         Ok(row.get::<_, i64>(0))
     }
 
+    pub async fn count_usage_event_quantity_for_past_hour(
+        &self,
+        tenant_id: &str,
+        event_type: &str,
+    ) -> Result<i64> {
+        let row = self
+            .client
+            .query_one(
+                r#"
+                SELECT COALESCE(SUM(quantity), 0)::bigint AS total
+                FROM usage_events
+                WHERE tenant_id = $1
+                  AND event_type = $2
+                  AND recorded_at >= NOW() - INTERVAL '1 hour'
+                "#,
+                &[&tenant_id, &event_type],
+            )
+            .await?;
+        Ok(row.get::<_, i64>(0))
+    }
+
+    pub async fn load_tenant_hourly_alert_limit(&self, tenant_id: &str) -> Result<Option<i64>> {
+        let row = match self
+            .client
+            .query_opt(
+                r#"
+                SELECT hourly_alert_limit
+                FROM notify.tenant_delivery_controls
+                WHERE tenant_id = $1
+                "#,
+                &[&tenant_id],
+            )
+            .await
+        {
+            Ok(row) => row,
+            Err(_) => return Ok(None),
+        };
+
+        Ok(row.map(|row| row.get::<_, i32>(0) as i64))
+    }
+
     pub async fn load_tenant_monthly_alert_quota(&self, tenant_id: &str) -> Result<Option<i64>> {
         let row = match self
             .client
