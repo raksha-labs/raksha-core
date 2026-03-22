@@ -1090,6 +1090,8 @@ CREATE TABLE IF NOT EXISTS pattern.pattern_state (
     pattern_id TEXT        NOT NULL,
     state_key  TEXT        NOT NULL,
     data       JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    window_metadata JSONB  NOT NULL DEFAULT '{}'::jsonb,
+    rule_context JSONB     NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, pattern_id, state_key)
 );
@@ -1103,6 +1105,9 @@ CREATE TABLE IF NOT EXISTS pattern.pattern_snapshots (
     pattern_id   TEXT        NOT NULL,
     snapshot_key TEXT        NOT NULL,
     data         JSONB       NOT NULL,
+    rule_id      TEXT,
+    rule_version INTEGER,
+    window_metadata JSONB    NOT NULL DEFAULT '{}'::jsonb,
     score        DOUBLE PRECISION,
     severity     TEXT,
     observed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
