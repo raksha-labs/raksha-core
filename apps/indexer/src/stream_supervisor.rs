@@ -222,6 +222,10 @@ fn skipped_test_stream_reason(cfg: &EffectiveStreamConfig) -> Option<&'static st
                 return Some("deprecated simulation replay endpoint");
             }
         }
+
+        if endpoint.contains('{') && endpoint.contains('}') {
+            return Some("unresolved endpoint placeholder");
+        }
     }
     None
 }
@@ -274,6 +278,15 @@ mod tests {
             "ws://workbench-services:8010/api/simulation/mock/rpc/chainlink-eth-mainnet?tenant_id=raksha-demo&stream_name=usdc-usd-feed&simulation_run_id=run_123",
         );
         assert_eq!(skipped_test_stream_reason(&cfg), None);
+    }
+
+    #[test]
+    fn skips_test_streams_with_unresolved_placeholders() {
+        let cfg = config_for("rpc_url", "{simlab_mock_rpc_base_url}/rpc/uniswap-v2-eth-mainnet");
+        assert_eq!(
+            skipped_test_stream_reason(&cfg),
+            Some("unresolved endpoint placeholder")
+        );
     }
 }
 
