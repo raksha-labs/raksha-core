@@ -665,6 +665,14 @@ async fn dispatch_alert(
 
     match notifier_gateway.dispatch_alert(&normalized_alert).await {
         Ok(dispatch_result) => {
+            info!(
+                tenant_id = %dispatch_result.tenant_id,
+                alert_id = %normalized_alert.alert_id,
+                delivered = dispatch_result.delivered,
+                reason = ?dispatch_result.reason,
+                resolved_channels = ?dispatch_result.resolved_channels,
+                "notifier-gateway dispatch completed"
+            );
             normalized_alert = apply_dispatch_result_metadata(normalized_alert, &dispatch_result);
             if let Some(repo) = repository {
                 for result in &dispatch_result.results {

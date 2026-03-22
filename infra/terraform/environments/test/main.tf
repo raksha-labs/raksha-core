@@ -115,7 +115,7 @@ locals {
     }
     orchestrator = {
       ALERT_FALLBACK_TENANT_ID = "glider"
-      NOTIFIER_GATEWAY_URL     = "http://notifier-gateway:3002"
+      NOTIFIER_GATEWAY_URL     = "http://notifier-gateway.${module.compute.service_discovery_namespace_name}:3002"
     }
     finality = {
       ALERT_FALLBACK_TENANT_ID = "glider"
