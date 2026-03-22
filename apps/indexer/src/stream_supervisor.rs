@@ -203,6 +203,9 @@ fn skipped_test_stream_reason(cfg: &EffectiveStreamConfig) -> Option<&'static st
         if endpoint.is_empty() {
             continue;
         }
+        if endpoint.contains('{') && endpoint.contains('}') {
+            return Some("unresolved endpoint placeholder");
+        }
 
         let Ok(parsed) = Url::parse(endpoint) else {
             continue;
@@ -221,10 +224,6 @@ fn skipped_test_stream_reason(cfg: &EffectiveStreamConfig) -> Option<&'static st
             if !has_tenant_id || !has_stream_name {
                 return Some("deprecated simulation replay endpoint");
             }
-        }
-
-        if endpoint.contains('{') && endpoint.contains('}') {
-            return Some("unresolved endpoint placeholder");
         }
     }
     None
@@ -282,7 +281,10 @@ mod tests {
 
     #[test]
     fn skips_test_streams_with_unresolved_placeholders() {
-        let cfg = config_for("rpc_url", "{simlab_mock_rpc_base_url}/rpc/uniswap-v2-eth-mainnet");
+        let cfg = config_for(
+            "rpc_url",
+            "{simlab_mock_rpc_base_url}/rpc/uniswap-v2-eth-mainnet",
+        );
         assert_eq!(
             skipped_test_stream_reason(&cfg),
             Some("unresolved endpoint placeholder")
