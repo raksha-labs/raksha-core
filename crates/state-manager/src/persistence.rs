@@ -502,6 +502,15 @@ impl PostgresRepository {
                   ON ds.source_id = ssc.source_id
                 WHERE ds.enabled = TRUE
                   AND ssc.enabled = TRUE
+                  AND EXISTS (
+                    SELECT 1
+                    FROM catalog.source_stream_tenant_targets sstt
+                    LEFT JOIN catalog.tenant_operating_mode tom
+                      ON tom.tenant_id = sstt.tenant_id
+                    WHERE sstt.stream_config_id = ssc.stream_config_id
+                      AND sstt.enabled = TRUE
+                      AND COALESCE(tom.mode, 'live') = ssc.operating_mode_profile
+                  )
                 ORDER BY ssc.source_id, ssc.operating_mode_profile, ssc.stream_name, ssc.asset_pair NULLS FIRST
                 "#,
                 &[],
@@ -1051,8 +1060,11 @@ impl PostgresRepository {
                 JOIN catalog.source_stream_tenant_targets stt
                   ON stt.stream_config_id = ssc.stream_config_id
                  AND stt.enabled = TRUE
+                LEFT JOIN catalog.tenant_operating_mode tom
+                  ON tom.tenant_id = stt.tenant_id
                 WHERE ds.source_id = $1
                   AND ds.enabled = TRUE
+                  AND COALESCE(tom.mode, 'live') = ssc.operating_mode_profile
                 LIMIT 1
                 "#,
                 &[&source_id],
