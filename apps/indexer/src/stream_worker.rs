@@ -112,6 +112,23 @@ struct TestModeLogState {
     unsimulated_warning_emitted: bool,
 }
 
+struct PayloadProcessingContext<'a> {
+    stream: &'a RedisStreamPublisher,
+    chain_id_hint: Option<i64>,
+    fx_cache: &'a mut FxRateCache,
+    test_mode_log_state: &'a mut TestModeLogState,
+}
+
+struct TestModePayloadLogContext<'a> {
+    inserted: bool,
+    is_simulated: bool,
+    simulation_run_id: Option<&'a str>,
+    parsed: &'a ParsedFeedEvent,
+    dedup_key: Option<&'a str>,
+    raw_landing_status: RawLandingStatus,
+    raw_landing_error: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct EndpointLogContext {
     host: Option<String>,
@@ -288,7 +305,13 @@ async fn run_websocket_loop(
             }
             raw = connector.next_payload() => {
                 let payload = raw?;
-                process_payload(config, repo, raw_repo, stream, payload, None, fx_cache, &mut test_mode_log_state).await?;
+                let mut payload_ctx = PayloadProcessingContext {
+                    stream,
+                    chain_id_hint: None,
+                    fx_cache,
+                    test_mode_log_state: &mut test_mode_log_state,
+                };
+                process_payload(config, repo, raw_repo, payload, &mut payload_ctx).await?;
             }
         }
     }
@@ -326,7 +349,13 @@ async fn run_rpc_logs_loop(
                         map.insert("chainId".to_string(), json!(chain_id));
                     }
                 }
-                process_payload(config, repo, raw_repo, stream, payload, connector.chain_id(), fx_cache, &mut test_mode_log_state).await?;
+                let mut payload_ctx = PayloadProcessingContext {
+                    stream,
+                    chain_id_hint: connector.chain_id(),
+                    fx_cache,
+                    test_mode_log_state: &mut test_mode_log_state,
+                };
+                process_payload(config, repo, raw_repo, payload, &mut payload_ctx).await?;
             }
         }
     }
@@ -418,7 +447,13 @@ async fn run_rpc_state_loop(
                         map.entry("chainId".to_string()).or_insert_with(|| json!(chain_id));
                     }
                 }
-                process_payload(config, repo, raw_repo, stream, payload, connector.chain_id(), fx_cache, &mut test_mode_log_state).await?;
+                let mut payload_ctx = PayloadProcessingContext {
+                    stream,
+                    chain_id_hint: connector.chain_id(),
+                    fx_cache,
+                    test_mode_log_state: &mut test_mode_log_state,
+                };
+                process_payload(config, repo, raw_repo, payload, &mut payload_ctx).await?;
             }
         }
     }
@@ -495,15 +530,22 @@ async fn process_http_poll_payload(
     fx_cache: &mut FxRateCache,
     test_mode_log_state: &mut TestModeLogState,
 ) -> Result<()> {
+    let mut payload_ctx = PayloadProcessingContext {
+        stream,
+        chain_id_hint: None,
+        fx_cache,
+        test_mode_log_state,
+    };
+
     match payload {
         Value::Array(items) => {
             for item in items {
-                process_payload(config, repo, raw_repo, stream, item, None, fx_cache, test_mode_log_state).await?;
+                process_payload(config, repo, raw_repo, item, &mut payload_ctx).await?;
             }
             Ok(())
         }
         Value::Null => Ok(()),
-        other => process_payload(config, repo, raw_repo, stream, other, None, fx_cache, test_mode_log_state).await,
+        other => process_payload(config, repo, raw_repo, other, &mut payload_ctx).await,
     }
 }
 
@@ -511,11 +553,8 @@ async fn process_payload(
     config: &RuntimeStreamConfig,
     repo: &PostgresRepository,
     raw_repo: Option<&PostgresRawRepository>,
-    stream: &RedisStreamPublisher,
     payload: Value,
-    chain_id_hint: Option<i64>,
-    fx_cache: &mut FxRateCache,
-    test_mode_log_state: &mut TestModeLogState,
+    payload_ctx: &mut PayloadProcessingContext<'_>,
 ) -> Result<()> {
     let parser_input = ParserInput {
         parser_name: &config.parser_name,
@@ -530,13 +569,18 @@ async fn process_payload(
     match parse_payload(&parser_input, &payload) {
         Ok(mut parsed) => {
             if parsed.chain_id.is_none() {
-                parsed.chain_id = chain_id_hint;
+                parsed.chain_id = payload_ctx.chain_id_hint;
             }
             let (is_simulated, simulation_run_id) = simulation_metadata_from_payload(&payload);
             let mut payload_for_storage = payload.clone();
             let (parse_status, parse_error, should_fanout) =
-                apply_usdt_normalization(repo, &mut parsed, &mut payload_for_storage, fx_cache)
-                    .await?;
+                apply_usdt_normalization(
+                    repo,
+                    &mut parsed,
+                    &mut payload_for_storage,
+                    payload_ctx.fx_cache,
+                )
+                .await?;
             apply_market_truth_context(repo, config, &mut parsed, &mut payload_for_storage).await?;
 
             let dedup_key = build_dedup_key(config, &parsed, &payload);
@@ -580,14 +624,16 @@ async fn process_payload(
             let inserted = repo.insert_ingest_operational_event(&record).await?;
             maybe_log_test_mode_payload(
                 config,
-                test_mode_log_state,
-                inserted,
-                is_simulated,
-                simulation_run_id.as_deref(),
-                &parsed,
-                dedup_key.as_deref(),
-                raw_landing.status,
-                raw_landing.error.as_deref(),
+                payload_ctx.test_mode_log_state,
+                &TestModePayloadLogContext {
+                    inserted,
+                    is_simulated,
+                    simulation_run_id: simulation_run_id.as_deref(),
+                    parsed: &parsed,
+                    dedup_key: dedup_key.as_deref(),
+                    raw_landing_status: raw_landing.status,
+                    raw_landing_error: raw_landing.error.as_deref(),
+                },
             );
             if !inserted {
                 debug!(
@@ -610,7 +656,7 @@ async fn process_payload(
             if should_fanout {
                 fanout_unified_events(
                     config,
-                    stream,
+                    payload_ctx.stream,
                     &payload_for_storage,
                     &parsed,
                     dedup_key,
@@ -637,7 +683,7 @@ async fn process_payload(
                 partition_key: observed_at.date_naive().to_string(),
                 idempotency_key: dedup_key.clone(),
                 payload: payload.clone(),
-                chain_id: chain_id_hint,
+                chain_id: payload_ctx.chain_id_hint,
                 block_number: None,
                 tx_hash: None,
                 log_index: None,
@@ -674,7 +720,7 @@ async fn process_payload(
                 event_id: None,
                 market_key: config.market_key.clone(),
                 asset_pair: config.asset_pair.clone(),
-                chain_id: chain_id_hint,
+                chain_id: payload_ctx.chain_id_hint,
                 block_number: None,
                 tx_hash: None,
                 log_index: None,
@@ -696,7 +742,7 @@ async fn process_payload(
             let _ = repo.insert_ingest_operational_event(&record).await?;
             maybe_log_test_mode_parse_failure(
                 config,
-                test_mode_log_state,
+                payload_ctx.test_mode_log_state,
                 is_simulated,
                 simulation_run_id.as_deref(),
                 record.parse_error.as_deref(),
@@ -727,19 +773,16 @@ async fn process_payload(
 fn maybe_log_test_mode_payload(
     config: &RuntimeStreamConfig,
     test_mode_log_state: &mut TestModeLogState,
-    inserted: bool,
-    is_simulated: bool,
-    simulation_run_id: Option<&str>,
-    parsed: &ParsedFeedEvent,
-    dedup_key: Option<&str>,
-    raw_landing_status: RawLandingStatus,
-    raw_landing_error: Option<&str>,
+    payload_log: &TestModePayloadLogContext<'_>,
 ) {
     if config.operating_mode_profile != "test" {
         return;
     }
 
-    if !is_simulated && simulation_run_id.is_none() && !test_mode_log_state.unsimulated_warning_emitted {
+    if !payload_log.is_simulated
+        && payload_log.simulation_run_id.is_none()
+        && !test_mode_log_state.unsimulated_warning_emitted
+    {
         test_mode_log_state.unsimulated_warning_emitted = true;
         warn!(
             stream_config_id = %config.stream_config_id,
@@ -759,18 +802,18 @@ fn maybe_log_test_mode_payload(
         source_id = %config.source_id,
         stream_name = %config.stream_name,
         connector_mode = %config.connector_mode,
-        simulation_run_id,
-        is_simulated,
-        event_type = %parsed.event_type,
-        event_id = parsed.event_id.as_deref(),
-        market_key = parsed.market_key.as_deref(),
-        asset_pair = parsed.asset_pair.as_deref(),
-        payload_event_ts = ?parsed.payload_event_ts,
-        observed_at = ?parsed.observed_at,
-        dedup_key,
-        ingest_inserted = inserted,
-        raw_landing_status = raw_landing_status.as_str(),
-        raw_landing_error,
+        simulation_run_id = payload_log.simulation_run_id,
+        is_simulated = payload_log.is_simulated,
+        event_type = %payload_log.parsed.event_type,
+        event_id = payload_log.parsed.event_id.as_deref(),
+        market_key = payload_log.parsed.market_key.as_deref(),
+        asset_pair = payload_log.parsed.asset_pair.as_deref(),
+        payload_event_ts = ?payload_log.parsed.payload_event_ts,
+        observed_at = ?payload_log.parsed.observed_at,
+        dedup_key = payload_log.dedup_key,
+        ingest_inserted = payload_log.inserted,
+        raw_landing_status = payload_log.raw_landing_status.as_str(),
+        raw_landing_error = payload_log.raw_landing_error,
         "test-mode payload observed by indexer",
     );
 }
