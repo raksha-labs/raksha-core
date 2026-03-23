@@ -555,7 +555,7 @@ impl DetectionPattern for DpegPattern {
         let Some(policy) = policy else {
             return Ok(None);
         };
-        let (_, simulation_run_id) = super::simulation_metadata_from_event(event);
+        let (is_simulated, simulation_run_id) = super::simulation_metadata_from_event(event);
         let replay_scope = simulation_run_id
             .clone()
             .unwrap_or_else(|| "__live__".to_string());
@@ -607,6 +607,17 @@ impl DetectionPattern for DpegPattern {
             evaluation_time,
             classification,
         )?;
+        if is_simulated {
+            log_test_mode_decision(
+                event,
+                &policy,
+                market_key,
+                &current_state,
+                &outcome,
+                evaluation_time,
+                simulation_run_id.as_deref(),
+            );
+        }
 
         // Persist snapshot regardless of whether an alert fired.
         let snapshot_data = serde_json::json!({
@@ -1246,6 +1257,170 @@ fn build_detection(
         simulation_run_id,
         created_at: now,
     }
+}
+
+fn log_test_mode_decision(
+    event: &UnifiedEvent,
+    policy: &DpegPolicy,
+    market_key: &str,
+    current_state: &DpegAlertState,
+    outcome: &EvaluationOutcome,
+    now: DateTime<Utc>,
+    simulation_run_id: Option<&str>,
+) {
+    let previous_severity = severity_from_str(current_state.last_severity.as_deref());
+    let previous_rank = severity_rank(previous_severity.as_ref());
+    let current_rank = severity_rank(outcome.snapshot.severity.as_ref());
+    let confidence_total = outcome
+        .snapshot
+        .confidence_breakdown
+        .get("total")
+        .copied()
+        .unwrap_or_default();
+    let breach_started_at = outcome.next_state.breach_started_at;
+    let breach_age_ms = breach_started_at
+        .map(|started| now.signed_duration_since(started).num_milliseconds())
+        .unwrap_or(0);
+    let sustained_met =
+        outcome.snapshot.breach_active && breach_age_ms >= policy.sustained_window_ms;
+    let cooldown_until = current_state.cooldown_until;
+    let cooldown_active = cooldown_until.map(|until| until > now).unwrap_or(false);
+    let suppression_reason =
+        dpeg_test_mode_reason(policy, current_state, outcome, now, confidence_total);
+    let transition = outcome
+        .transition
+        .as_ref()
+        .map(|value| format!("{value:?}").to_ascii_lowercase());
+    let severity = outcome
+        .snapshot
+        .severity
+        .as_ref()
+        .map(|value| format!("{value:?}").to_ascii_lowercase());
+    let previous_severity =
+        previous_severity.map(|value| format!("{value:?}").to_ascii_lowercase());
+
+    tracing::info!(
+        pipeline_mode = "test",
+        component = "detector",
+        pattern_id = PATTERN_ID,
+        tenant_id = %event.tenant_id,
+        source_id = %event.source_id,
+        event_id = %event.event_id,
+        event_type = %event.event_type,
+        market_key,
+        simulation_run_id,
+        divergence_pct = outcome.snapshot.divergence_pct,
+        weighted_median_price = outcome.snapshot.weighted_median_price,
+        confidence_total,
+        confidence_threshold = policy.min_confidence_to_fire,
+        quorum_met = outcome.snapshot.quorum_met,
+        oracle_confirmed = outcome.snapshot.oracle_confirmed,
+        breach_active = outcome.snapshot.breach_active,
+        breach_started_at = ?breach_started_at,
+        breach_age_ms,
+        sustained_window_ms = policy.sustained_window_ms,
+        sustained_met,
+        current_severity = severity.as_deref(),
+        previous_severity = previous_severity.as_deref(),
+        current_rank,
+        previous_rank,
+        cooldown_until = ?cooldown_until,
+        cooldown_active,
+        below_severity_blocks = outcome.next_state.below_severity_blocks,
+        deescalation_blocks = policy.deescalation_blocks,
+        below_trigger_blocks = outcome.next_state.below_trigger_blocks,
+        resolution_blocks = policy.resolution_blocks,
+        incident_transition = transition.as_deref(),
+        should_emit_alert = outcome.should_emit_alert,
+        suppression_reason,
+        "test-mode dpeg evaluation completed"
+    );
+}
+
+fn dpeg_test_mode_reason(
+    policy: &DpegPolicy,
+    current_state: &DpegAlertState,
+    outcome: &EvaluationOutcome,
+    now: DateTime<Utc>,
+    confidence_total: f64,
+) -> &'static str {
+    if outcome.should_emit_alert {
+        return match outcome.transition {
+            Some(IncidentTransition::Trigger) => "emitted_trigger",
+            Some(IncidentTransition::Escalate) => "emitted_escalate",
+            Some(IncidentTransition::Deescalate) => "emitted_deescalate",
+            Some(IncidentTransition::Resolve) => "emitted_resolve",
+            Some(IncidentTransition::Retract) => "emitted_retract",
+            Some(IncidentTransition::Update) => "emitted_update",
+            None => "emitted_detection",
+        };
+    }
+
+    let previous_active = severity_from_str(current_state.last_severity.as_deref());
+    let previous_rank = severity_rank(previous_active.as_ref());
+    let current_rank = severity_rank(outcome.snapshot.severity.as_ref());
+    let cooldown_active = current_state
+        .cooldown_until
+        .map(|until| until > now)
+        .unwrap_or(false);
+    let breach_age_ms = outcome
+        .next_state
+        .breach_started_at
+        .map(|started| now.signed_duration_since(started).num_milliseconds())
+        .unwrap_or(0);
+
+    if outcome.snapshot.breach_active {
+        if previous_active.is_none() {
+            if breach_age_ms < policy.sustained_window_ms {
+                return "sustained_window_not_met";
+            }
+            if cooldown_active {
+                return "cooldown_active_for_trigger";
+            }
+            return "trigger_suppressed";
+        }
+        if current_rank > previous_rank {
+            if cooldown_active {
+                return "cooldown_active_for_escalation";
+            }
+            return "escalation_suppressed";
+        }
+        if current_rank < previous_rank {
+            if outcome.next_state.below_severity_blocks < policy.deescalation_blocks {
+                return "deescalation_window_not_met";
+            }
+            if cooldown_active {
+                return "cooldown_active_for_deescalation";
+            }
+            return "deescalation_suppressed";
+        }
+        return "already_active_same_severity";
+    }
+
+    if !outcome.snapshot.quorum_met {
+        return "quorum_not_met";
+    }
+    if policy.toggles.oracle_confirmation && !outcome.snapshot.oracle_confirmed {
+        return "oracle_confirmation_not_met";
+    }
+    if confidence_total < policy.min_confidence_to_fire {
+        return "confidence_below_threshold";
+    }
+    if outcome.snapshot.severity.is_none() {
+        return "trigger_floor_not_met";
+    }
+    if previous_active.is_some() {
+        if outcome.next_state.below_trigger_blocks > 0
+            && outcome.next_state.below_trigger_blocks < policy.resolution_blocks
+        {
+            return "resolution_window_not_met";
+        }
+        if cooldown_active {
+            return "cooldown_active_for_resolution";
+        }
+        return "resolution_gates_not_met";
+    }
+    "breach_inactive"
 }
 
 fn recommended_actions_for_severity(severity: &Severity) -> Vec<String> {
