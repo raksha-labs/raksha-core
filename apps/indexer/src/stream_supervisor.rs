@@ -302,69 +302,6 @@ fn skipped_test_stream_reason(cfg: &EffectiveStreamConfig) -> Option<&'static st
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::skipped_test_stream_reason;
-    use state_manager::EffectiveStreamConfig;
-
-    fn config_for(endpoint_key: &str, endpoint: &str) -> EffectiveStreamConfig {
-        EffectiveStreamConfig {
-            stream_config_id: "stream-1".to_string(),
-            source_id: "source-1".to_string(),
-            source_type: "cex".to_string(),
-            source_name: "source".to_string(),
-            connection_config: serde_json::json!({ endpoint_key: endpoint }),
-            connector_mode: "websocket".to_string(),
-            operating_mode_profile: "test".to_string(),
-            stream_name: "ticker-usdc-usd".to_string(),
-            subscription_key: None,
-            event_type: "quote".to_string(),
-            parser_name: "parser".to_string(),
-            market_key: Some("USDC/USD".to_string()),
-            asset_pair: Some("USDC/USD".to_string()),
-            filter_config: serde_json::json!({}),
-            auth_secret_ref: None,
-            auth_config: serde_json::json!({}),
-            payload_ts_path: None,
-            payload_ts_unit: "ms".to_string(),
-            poll_interval_ms: None,
-        }
-    }
-
-    #[test]
-    fn skips_bare_simulation_mock_routes() {
-        let cfg = config_for(
-            "rpc_url",
-            "ws://workbench-services:8010/api/simulation/mock/rpc/chainlink-eth-mainnet",
-        );
-        assert_eq!(
-            skipped_test_stream_reason(&cfg),
-            Some("deprecated simulation replay endpoint")
-        );
-    }
-
-    #[test]
-    fn keeps_run_scoped_simulation_routes() {
-        let cfg = config_for(
-            "rpc_url",
-            "ws://workbench-services:8010/api/simulation/mock/rpc/chainlink-eth-mainnet?tenant_id=raksha-demo&stream_name=usdc-usd-feed&simulation_run_id=run_123",
-        );
-        assert_eq!(skipped_test_stream_reason(&cfg), None);
-    }
-
-    #[test]
-    fn skips_test_streams_with_unresolved_placeholders() {
-        let cfg = config_for(
-            "rpc_url",
-            "{simlab_mock_rpc_base_url}/rpc/uniswap-v2-eth-mainnet",
-        );
-        assert_eq!(
-            skipped_test_stream_reason(&cfg),
-            Some("unresolved endpoint placeholder")
-        );
-    }
-}
-
 fn to_runtime_config(
     cfg: EffectiveStreamConfig,
     tenant_targets: Vec<String>,
@@ -582,4 +519,67 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<NotifySi
         }
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skipped_test_stream_reason;
+    use state_manager::EffectiveStreamConfig;
+
+    fn config_for(endpoint_key: &str, endpoint: &str) -> EffectiveStreamConfig {
+        EffectiveStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "source-1".to_string(),
+            source_type: "cex".to_string(),
+            source_name: "source".to_string(),
+            connection_config: serde_json::json!({ endpoint_key: endpoint }),
+            connector_mode: "websocket".to_string(),
+            operating_mode_profile: "test".to_string(),
+            stream_name: "ticker-usdc-usd".to_string(),
+            subscription_key: None,
+            event_type: "quote".to_string(),
+            parser_name: "parser".to_string(),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDC/USD".to_string()),
+            filter_config: serde_json::json!({}),
+            auth_secret_ref: None,
+            auth_config: serde_json::json!({}),
+            payload_ts_path: None,
+            payload_ts_unit: "ms".to_string(),
+            poll_interval_ms: None,
+        }
+    }
+
+    #[test]
+    fn skips_bare_simulation_mock_routes() {
+        let cfg = config_for(
+            "rpc_url",
+            "ws://workbench-services:8010/api/simulation/mock/rpc/chainlink-eth-mainnet",
+        );
+        assert_eq!(
+            skipped_test_stream_reason(&cfg),
+            Some("deprecated simulation replay endpoint")
+        );
+    }
+
+    #[test]
+    fn keeps_run_scoped_simulation_routes() {
+        let cfg = config_for(
+            "rpc_url",
+            "ws://workbench-services:8010/api/simulation/mock/rpc/chainlink-eth-mainnet?tenant_id=raksha-demo&stream_name=usdc-usd-feed&simulation_run_id=run_123",
+        );
+        assert_eq!(skipped_test_stream_reason(&cfg), None);
+    }
+
+    #[test]
+    fn skips_test_streams_with_unresolved_placeholders() {
+        let cfg = config_for(
+            "rpc_url",
+            "{simlab_mock_rpc_base_url}/rpc/uniswap-v2-eth-mainnet",
+        );
+        assert_eq!(
+            skipped_test_stream_reason(&cfg),
+            Some("unresolved endpoint placeholder")
+        );
+    }
 }

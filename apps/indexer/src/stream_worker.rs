@@ -123,6 +123,13 @@ struct PayloadProcessingContext<'a> {
     test_mode_log_state: &'a mut TestModeLogState,
 }
 
+struct HttpPollProcessingContext<'a> {
+    config: &'a RuntimeStreamConfig,
+    repo: &'a PostgresRepository,
+    raw_repo: Option<&'a PostgresRawRepository>,
+    payload_ctx: PayloadProcessingContext<'a>,
+}
+
 struct TestModePayloadLogContext<'a> {
     inserted: bool,
     is_simulated: bool,
@@ -131,6 +138,16 @@ struct TestModePayloadLogContext<'a> {
     dedup_key: Option<&'a str>,
     raw_landing_status: RawLandingStatus,
     raw_landing_error: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
+struct UnifiedEventMeta<'a> {
+    dedup_key: Option<&'a str>,
+    ingest_persisted: bool,
+    raw_landing_status: RawLandingStatus,
+    raw_landing_error: Option<&'a str>,
+    is_simulated: bool,
+    simulation_run_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -446,17 +463,21 @@ async fn run_http_poll_loop(
             fetch_due = false;
             match connector.fetch_payload(connector.endpoint()).await {
                 Ok(Some(payload)) => {
-                    process_http_poll_payload(
+                    let mut processing_ctx = HttpPollProcessingContext {
                         config,
                         repo,
                         raw_repo,
-                        stream,
-                        payload,
-                        endpoint_log_context.simulation_run_id.as_deref(),
-                        fx_cache,
-                        &mut test_mode_log_state,
-                    )
-                    .await?;
+                        payload_ctx: PayloadProcessingContext {
+                            stream,
+                            chain_id_hint: None,
+                            simulation_run_id_hint: endpoint_log_context
+                                .simulation_run_id
+                                .as_deref(),
+                            fx_cache,
+                            test_mode_log_state: &mut test_mode_log_state,
+                        },
+                    };
+                    process_http_poll_payload(&mut processing_ctx, payload).await?;
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -584,7 +605,10 @@ async fn persist_raw_envelope(
     }
 }
 
-fn defer_raw_envelope_persist(raw_repo: Option<&PostgresRawRepository>, envelope: &SourceEnvelopeV1) {
+fn defer_raw_envelope_persist(
+    raw_repo: Option<&PostgresRawRepository>,
+    envelope: &SourceEnvelopeV1,
+) {
     let Some(writer) = raw_repo.cloned() else {
         return;
     };
@@ -649,32 +673,34 @@ async fn start_raw_landing(
 }
 
 async fn process_http_poll_payload(
-    config: &RuntimeStreamConfig,
-    repo: &PostgresRepository,
-    raw_repo: Option<&PostgresRawRepository>,
-    stream: &RedisStreamPublisher,
+    processing_ctx: &mut HttpPollProcessingContext<'_>,
     payload: Value,
-    simulation_run_id_hint: Option<&str>,
-    fx_cache: &mut FxRateCache,
-    test_mode_log_state: &mut TestModeLogState,
 ) -> Result<()> {
-    let mut payload_ctx = PayloadProcessingContext {
-        stream,
-        chain_id_hint: None,
-        simulation_run_id_hint,
-        fx_cache,
-        test_mode_log_state,
-    };
-
     match payload {
         Value::Array(items) => {
             for item in items {
-                process_payload(config, repo, raw_repo, item, &mut payload_ctx).await?;
+                process_payload(
+                    processing_ctx.config,
+                    processing_ctx.repo,
+                    processing_ctx.raw_repo,
+                    item,
+                    &mut processing_ctx.payload_ctx,
+                )
+                .await?;
             }
             Ok(())
         }
         Value::Null => Ok(()),
-        other => process_payload(config, repo, raw_repo, other, &mut payload_ctx).await,
+        other => {
+            process_payload(
+                processing_ctx.config,
+                processing_ctx.repo,
+                processing_ctx.raw_repo,
+                other,
+                &mut processing_ctx.payload_ctx,
+            )
+            .await
+        }
     }
 }
 
@@ -700,10 +726,8 @@ async fn process_payload(
             if parsed.chain_id.is_none() {
                 parsed.chain_id = payload_ctx.chain_id_hint;
             }
-            let (is_simulated, simulation_run_id) = effective_simulation_metadata(
-                &payload,
-                payload_ctx.simulation_run_id_hint,
-            );
+            let (is_simulated, simulation_run_id) =
+                effective_simulation_metadata(&payload, payload_ctx.simulation_run_id_hint);
             let mut payload_for_storage = payload.clone();
             let (parse_status, parse_error, should_fanout) = apply_usdt_normalization(
                 repo,
@@ -790,17 +814,20 @@ async fn process_payload(
                 return Ok(());
             }
             if should_fanout {
+                let fanout_meta = UnifiedEventMeta {
+                    dedup_key: dedup_key.as_deref(),
+                    ingest_persisted: inserted,
+                    raw_landing_status: raw_landing.status,
+                    raw_landing_error: raw_landing.error.as_deref(),
+                    is_simulated,
+                    simulation_run_id: simulation_run_id.as_deref(),
+                };
                 fanout_unified_events(
                     config,
                     payload_ctx.stream,
                     &payload_for_storage,
                     &parsed,
-                    dedup_key,
-                    inserted,
-                    raw_landing.status,
-                    raw_landing.error.as_deref(),
-                    is_simulated,
-                    simulation_run_id.as_deref(),
+                    fanout_meta,
                 )
                 .await?;
             }
@@ -814,10 +841,8 @@ async fn process_payload(
                 observed_at,
                 payload_ctx.simulation_run_id_hint,
             );
-            let (is_simulated, simulation_run_id) = effective_simulation_metadata(
-                &payload,
-                payload_ctx.simulation_run_id_hint,
-            );
+            let (is_simulated, simulation_run_id) =
+                effective_simulation_metadata(&payload, payload_ctx.simulation_run_id_hint);
             let envelope = SourceEnvelopeV1 {
                 envelope_id: Uuid::new_v4().to_string(),
                 source_id: config.source_id.clone(),
@@ -1495,12 +1520,7 @@ async fn fanout_unified_events(
     stream: &RedisStreamPublisher,
     payload: &Value,
     parsed: &ParsedFeedEvent,
-    dedup_key: Option<String>,
-    ingest_persisted: bool,
-    raw_landing_status: RawLandingStatus,
-    raw_landing_error: Option<&str>,
-    is_simulated: bool,
-    simulation_run_id: Option<&str>,
+    meta: UnifiedEventMeta<'_>,
 ) -> Result<()> {
     let source_type = map_source_type(&config.source_type);
 
@@ -1509,17 +1529,7 @@ async fn fanout_unified_events(
             .event_id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let enriched_payload = enrich_payload_for_unified(
-            config,
-            payload,
-            parsed,
-            dedup_key.as_deref(),
-            ingest_persisted,
-            raw_landing_status,
-            raw_landing_error,
-            is_simulated,
-            simulation_run_id,
-        );
+        let enriched_payload = enrich_payload_for_unified(config, payload, parsed, &meta);
         let event = UnifiedEvent {
             event_id,
             tenant_id: tenant_id.to_string(),
@@ -1544,19 +1554,14 @@ fn enrich_payload_for_unified(
     config: &RuntimeStreamConfig,
     payload: &Value,
     parsed: &ParsedFeedEvent,
-    dedup_key: Option<&str>,
-    ingest_persisted: bool,
-    raw_landing_status: RawLandingStatus,
-    raw_landing_error: Option<&str>,
-    is_simulated: bool,
-    simulation_run_id: Option<&str>,
+    meta: &UnifiedEventMeta<'_>,
 ) -> Value {
     let mut enriched = payload.clone();
     if !enriched.is_object() {
         enriched = json!({ "raw_payload": payload });
     }
     if let Some(obj) = enriched.as_object_mut() {
-        if is_simulated {
+        if meta.is_simulated {
             obj.insert("is_simulated".to_string(), Value::Bool(true));
             let simulation = obj
                 .entry("simulation".to_string())
@@ -1566,9 +1571,8 @@ fn enrich_payload_for_unified(
             }
             if let Some(simulation_meta) = simulation.as_object_mut() {
                 simulation_meta.insert("is_simulated".to_string(), Value::Bool(true));
-                if let Some(run_id) = simulation_run_id {
-                    simulation_meta
-                        .insert("run_id".to_string(), Value::String(run_id.to_string()));
+                if let Some(run_id) = meta.simulation_run_id {
+                    simulation_meta.insert("run_id".to_string(), Value::String(run_id.to_string()));
                     simulation_meta.insert(
                         "simulation_run_id".to_string(),
                         Value::String(run_id.to_string()),
@@ -1578,17 +1582,17 @@ fn enrich_payload_for_unified(
         }
         obj.insert(
             "raw_persisted".to_string(),
-            Value::Bool(raw_landing_status.persisted()),
+            Value::Bool(meta.raw_landing_status.persisted()),
         );
         obj.insert(
             "ingest_persisted".to_string(),
-            Value::Bool(ingest_persisted),
+            Value::Bool(meta.ingest_persisted),
         );
         obj.insert(
             "raw_landing_status".to_string(),
-            Value::String(raw_landing_status.as_str().to_string()),
+            Value::String(meta.raw_landing_status.as_str().to_string()),
         );
-        if let Some(error) = raw_landing_error {
+        if let Some(error) = meta.raw_landing_error {
             if !error.trim().is_empty() {
                 obj.insert(
                     "raw_landing_error".to_string(),
@@ -1624,7 +1628,7 @@ fn enrich_payload_for_unified(
         if let Some(chain_id) = parsed.chain_id {
             obj.insert("chainId".to_string(), json!(chain_id));
         }
-        if let Some(dedup_key) = dedup_key {
+        if let Some(dedup_key) = meta.dedup_key {
             obj.insert(
                 "dedup_key".to_string(),
                 Value::String(dedup_key.to_string()),
@@ -2463,15 +2467,20 @@ mod tests {
             &config,
             &payload,
             &parsed,
-            Some("dedup-1"),
-            true,
-            RawLandingStatus::Deferred,
-            None,
-            true,
-            Some("run-test-1"),
+            &UnifiedEventMeta {
+                dedup_key: Some("dedup-1"),
+                ingest_persisted: true,
+                raw_landing_status: RawLandingStatus::Deferred,
+                raw_landing_error: None,
+                is_simulated: true,
+                simulation_run_id: Some("run-test-1"),
+            },
         );
 
-        assert_eq!(enriched.get("is_simulated").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            enriched.get("is_simulated").and_then(Value::as_bool),
+            Some(true)
+        );
         let simulation = enriched
             .get("simulation")
             .and_then(Value::as_object)
@@ -2485,9 +2494,7 @@ mod tests {
             Some("run-test-1")
         );
         assert_eq!(
-            simulation
-                .get("simulation_run_id")
-                .and_then(Value::as_str),
+            simulation.get("simulation_run_id").and_then(Value::as_str),
             Some("run-test-1")
         );
     }

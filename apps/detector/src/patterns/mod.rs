@@ -221,7 +221,8 @@ impl PatternRegistry {
             .get("ingest_persisted")
             .and_then(|value| value.as_bool())
             .or_else(|| {
-                event.payload
+                event
+                    .payload
                     .get("raw_persisted")
                     .and_then(|value| value.as_bool())
             })
