@@ -133,6 +133,39 @@ pub(crate) fn simulation_metadata_from_event(event: &UnifiedEvent) -> (bool, Opt
     (is_simulated, run_id)
 }
 
+fn log_test_mode_event_received(event: &UnifiedEvent, simulation_run_id: Option<&str>) {
+    tracing::info!(
+        pipeline_mode = "test",
+        component = "detector",
+        tenant_id = %event.tenant_id,
+        source_id = %event.source_id,
+        event_id = %event.event_id,
+        event_type = %event.event_type,
+        market_key = event.market_key.as_deref(),
+        tx_hash = event.tx_hash.as_deref(),
+        block_number = event.block_number,
+        simulation_run_id,
+        "test-mode event received by detector"
+    );
+}
+
+fn log_test_mode_detection_emitted(detection: &DetectionResult) {
+    tracing::info!(
+        pipeline_mode = "test",
+        component = "detector",
+        detection_id = %detection.detection_id,
+        pattern_id = %detection.pattern_id,
+        tenant_id = detection.tenant_id.as_deref(),
+        event_key = detection.event_key.as_deref(),
+        subject_key = detection.subject_key.as_deref(),
+        severity = ?detection.severity,
+        lifecycle_state = ?detection.lifecycle_state,
+        incident_transition = ?detection.incident_transition,
+        simulation_run_id = detection.simulation_run_id.as_deref(),
+        "test-mode detection emitted"
+    );
+}
+
 /// Owns all registered patterns and dispatches events to each in turn.
 pub struct PatternRegistry {
     patterns: Vec<Box<dyn DetectionPattern>>,
@@ -178,6 +211,11 @@ impl PatternRegistry {
         repo: &PostgresRepository,
         stream: &RedisStreamPublisher,
     ) -> Result<()> {
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
+        if is_simulated {
+            log_test_mode_event_received(event, simulation_run_id.as_deref());
+        }
+
         let raw_persisted = event
             .payload
             .get("raw_persisted")
@@ -199,6 +237,9 @@ impl PatternRegistry {
         for pattern in &mut self.patterns {
             match pattern.process_event(event, now, repo).await {
                 Ok(Some(detection)) => {
+                    if detection.is_simulated || detection.simulation_run_id.is_some() {
+                        log_test_mode_detection_emitted(&detection);
+                    }
                     if let Err(err) = repo.save_detection(&detection).await {
                         common::log_error!(
                             warn,

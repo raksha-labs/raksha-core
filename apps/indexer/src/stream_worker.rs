@@ -10,8 +10,9 @@ use state_manager::{
     RawRecordPointer, RedisStreamPublisher, SourceEnvelopeV1,
 };
 use tokio::sync::watch;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
+use url::Url;
 
 use crate::stream_connector::{
     http_poll::HttpPollConnector, rpc_logs::RpcLogsConnector, rpc_state::RpcStateConnector,
@@ -58,6 +59,7 @@ pub struct RuntimeStreamConfig {
     pub source_type: String,
     pub source_name: String,
     pub connection_config: Value,
+    pub operating_mode_profile: String,
     pub auth_secret_ref: Option<String>,
     pub auth_config: Value,
     pub connector_mode: String,
@@ -102,6 +104,22 @@ struct RawLandingOutcome {
     pointer: Option<RawRecordPointer>,
     status: RawLandingStatus,
     error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct TestModeLogState {
+    payload_logs_emitted: u32,
+    unsimulated_warning_emitted: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EndpointLogContext {
+    host: Option<String>,
+    path: String,
+    is_mock_endpoint: bool,
+    tenant_id: Option<String>,
+    stream_name: Option<String>,
+    simulation_run_id: Option<String>,
 }
 
 fn resolve_poll_interval_duration(configured_ms: Option<u64>, default_ms: u64) -> Duration {
@@ -149,6 +167,7 @@ pub async fn run_stream_worker(
         stream_config_id = %config.stream_config_id,
         source_id = %config.source_id,
         connector_mode = %config.connector_mode,
+        operating_mode_profile = %config.operating_mode_profile,
         tenant_target_count = config.tenant_targets.len(),
         "stream worker started",
     );
@@ -249,6 +268,7 @@ async fn run_websocket_loop(
     fx_cache: &mut FxRateCache,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
+    let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
     let mut connector = WebsocketStreamConnector::new(
         endpoint,
         config.stream_name.clone(),
@@ -256,6 +276,8 @@ async fn run_websocket_loop(
         config.filter_config.clone(),
     );
     connector.connect().await?;
+    log_test_mode_connector_connected(config, &endpoint_log_context);
+    let mut test_mode_log_state = TestModeLogState::default();
 
     loop {
         tokio::select! {
@@ -266,7 +288,7 @@ async fn run_websocket_loop(
             }
             raw = connector.next_payload() => {
                 let payload = raw?;
-                process_payload(config, repo, raw_repo, stream, payload, None, fx_cache).await?;
+                process_payload(config, repo, raw_repo, stream, payload, None, fx_cache, &mut test_mode_log_state).await?;
             }
         }
     }
@@ -283,9 +305,12 @@ async fn run_rpc_logs_loop(
     let endpoint = endpoint_from_runtime_config(config)?;
     let poll_interval =
         resolve_poll_interval_duration(config.poll_interval_ms, DEFAULT_RPC_LOGS_POLL_INTERVAL_MS);
+    let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
     let mut connector =
         RpcLogsConnector::new(endpoint, config.filter_config.clone(), poll_interval);
     connector.connect().await?;
+    log_test_mode_connector_connected(config, &endpoint_log_context);
+    let mut test_mode_log_state = TestModeLogState::default();
 
     loop {
         tokio::select! {
@@ -301,7 +326,7 @@ async fn run_rpc_logs_loop(
                         map.insert("chainId".to_string(), json!(chain_id));
                     }
                 }
-                process_payload(config, repo, raw_repo, stream, payload, connector.chain_id(), fx_cache).await?;
+                process_payload(config, repo, raw_repo, stream, payload, connector.chain_id(), fx_cache, &mut test_mode_log_state).await?;
             }
         }
     }
@@ -318,8 +343,11 @@ async fn run_http_poll_loop(
     let endpoint = endpoint_from_runtime_config(config)?;
     let poll_interval =
         resolve_poll_interval_duration(config.poll_interval_ms, DEFAULT_HTTP_POLL_INTERVAL_MS);
+    let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
     let mut connector = HttpPollConnector::new(endpoint, poll_interval);
     connector.connect().await?;
+    log_test_mode_connector_connected(config, &endpoint_log_context);
+    let mut test_mode_log_state = TestModeLogState::default();
 
     loop {
         tokio::select! {
@@ -338,6 +366,7 @@ async fn run_http_poll_loop(
                             stream,
                             payload,
                             fx_cache,
+                            &mut test_mode_log_state,
                         ).await?;
                     }
                     Ok(None) => {}
@@ -368,9 +397,12 @@ async fn run_rpc_state_loop(
     let endpoint = endpoint_from_runtime_config(config)?;
     let poll_interval =
         resolve_poll_interval_duration(config.poll_interval_ms, DEFAULT_RPC_STATE_POLL_INTERVAL_MS);
+    let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
     let mut connector =
         RpcStateConnector::new(endpoint, config.filter_config.clone(), poll_interval);
     connector.connect().await?;
+    log_test_mode_connector_connected(config, &endpoint_log_context);
+    let mut test_mode_log_state = TestModeLogState::default();
 
     loop {
         tokio::select! {
@@ -386,7 +418,7 @@ async fn run_rpc_state_loop(
                         map.entry("chainId".to_string()).or_insert_with(|| json!(chain_id));
                     }
                 }
-                process_payload(config, repo, raw_repo, stream, payload, connector.chain_id(), fx_cache).await?;
+                process_payload(config, repo, raw_repo, stream, payload, connector.chain_id(), fx_cache, &mut test_mode_log_state).await?;
             }
         }
     }
@@ -461,16 +493,17 @@ async fn process_http_poll_payload(
     stream: &RedisStreamPublisher,
     payload: Value,
     fx_cache: &mut FxRateCache,
+    test_mode_log_state: &mut TestModeLogState,
 ) -> Result<()> {
     match payload {
         Value::Array(items) => {
             for item in items {
-                process_payload(config, repo, raw_repo, stream, item, None, fx_cache).await?;
+                process_payload(config, repo, raw_repo, stream, item, None, fx_cache, test_mode_log_state).await?;
             }
             Ok(())
         }
         Value::Null => Ok(()),
-        other => process_payload(config, repo, raw_repo, stream, other, None, fx_cache).await,
+        other => process_payload(config, repo, raw_repo, stream, other, None, fx_cache, test_mode_log_state).await,
     }
 }
 
@@ -482,6 +515,7 @@ async fn process_payload(
     payload: Value,
     chain_id_hint: Option<i64>,
     fx_cache: &mut FxRateCache,
+    test_mode_log_state: &mut TestModeLogState,
 ) -> Result<()> {
     let parser_input = ParserInput {
         parser_name: &config.parser_name,
@@ -544,6 +578,17 @@ async fn process_payload(
                 simulation_run_id.clone(),
             );
             let inserted = repo.insert_ingest_operational_event(&record).await?;
+            maybe_log_test_mode_payload(
+                config,
+                test_mode_log_state,
+                inserted,
+                is_simulated,
+                simulation_run_id.as_deref(),
+                &parsed,
+                dedup_key.as_deref(),
+                raw_landing.status,
+                raw_landing.error.as_deref(),
+            );
             if !inserted {
                 debug!(
                     stream_config_id = %config.stream_config_id,
@@ -646,9 +691,16 @@ async fn process_payload(
                 raw_ref_id: raw_landing.pointer.as_ref().map(|p| p.raw_ref_id.clone()),
                 raw_s3_uri: None,
                 is_simulated,
-                simulation_run_id,
+                simulation_run_id: simulation_run_id.clone(),
             };
             let _ = repo.insert_ingest_operational_event(&record).await?;
+            maybe_log_test_mode_parse_failure(
+                config,
+                test_mode_log_state,
+                is_simulated,
+                simulation_run_id.as_deref(),
+                record.parse_error.as_deref(),
+            );
             if let Some(writer) = raw_repo {
                 let _ = writer
                     .record_ingest_failure(&IngestFailureRecord {
@@ -670,6 +722,83 @@ async fn process_payload(
             Ok(())
         }
     }
+}
+
+fn maybe_log_test_mode_payload(
+    config: &RuntimeStreamConfig,
+    test_mode_log_state: &mut TestModeLogState,
+    inserted: bool,
+    is_simulated: bool,
+    simulation_run_id: Option<&str>,
+    parsed: &ParsedFeedEvent,
+    dedup_key: Option<&str>,
+    raw_landing_status: RawLandingStatus,
+    raw_landing_error: Option<&str>,
+) {
+    if config.operating_mode_profile != "test" {
+        return;
+    }
+
+    if !is_simulated && simulation_run_id.is_none() && !test_mode_log_state.unsimulated_warning_emitted {
+        test_mode_log_state.unsimulated_warning_emitted = true;
+        warn!(
+            stream_config_id = %config.stream_config_id,
+            source_id = %config.source_id,
+            stream_name = %config.stream_name,
+            connector_mode = %config.connector_mode,
+            "test-mode worker received payload without simulation metadata",
+        );
+    }
+
+    if test_mode_log_state.payload_logs_emitted >= 5 {
+        return;
+    }
+    test_mode_log_state.payload_logs_emitted += 1;
+    info!(
+        stream_config_id = %config.stream_config_id,
+        source_id = %config.source_id,
+        stream_name = %config.stream_name,
+        connector_mode = %config.connector_mode,
+        simulation_run_id,
+        is_simulated,
+        event_type = %parsed.event_type,
+        event_id = parsed.event_id.as_deref(),
+        market_key = parsed.market_key.as_deref(),
+        asset_pair = parsed.asset_pair.as_deref(),
+        payload_event_ts = ?parsed.payload_event_ts,
+        observed_at = ?parsed.observed_at,
+        dedup_key,
+        ingest_inserted = inserted,
+        raw_landing_status = raw_landing_status.as_str(),
+        raw_landing_error,
+        "test-mode payload observed by indexer",
+    );
+}
+
+fn maybe_log_test_mode_parse_failure(
+    config: &RuntimeStreamConfig,
+    test_mode_log_state: &mut TestModeLogState,
+    is_simulated: bool,
+    simulation_run_id: Option<&str>,
+    parse_error: Option<&str>,
+) {
+    if config.operating_mode_profile != "test" {
+        return;
+    }
+    if test_mode_log_state.payload_logs_emitted >= 5 {
+        return;
+    }
+    test_mode_log_state.payload_logs_emitted += 1;
+    warn!(
+        stream_config_id = %config.stream_config_id,
+        source_id = %config.source_id,
+        stream_name = %config.stream_name,
+        connector_mode = %config.connector_mode,
+        simulation_run_id,
+        is_simulated,
+        parse_error,
+        "test-mode payload failed to parse in indexer",
+    );
 }
 
 fn ensure_object_payload(payload: &mut Value) {
@@ -1274,6 +1403,117 @@ fn endpoint_from_runtime_config(config: &RuntimeStreamConfig) -> Result<String> 
     )
 }
 
+fn endpoint_log_context(endpoint: &str) -> EndpointLogContext {
+    let Ok(parsed) = Url::parse(endpoint) else {
+        return EndpointLogContext {
+            host: None,
+            path: endpoint.to_string(),
+            is_mock_endpoint: endpoint.contains("/api/simulation/mock/"),
+            tenant_id: None,
+            stream_name: None,
+            simulation_run_id: None,
+        };
+    };
+
+    let mut context = EndpointLogContext {
+        host: parsed.host_str().map(ToOwned::to_owned),
+        path: parsed.path().to_string(),
+        is_mock_endpoint: parsed.path().contains("/api/simulation/mock/"),
+        tenant_id: None,
+        stream_name: None,
+        simulation_run_id: None,
+    };
+
+    for (key, value) in parsed.query_pairs() {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match key.as_ref() {
+            "tenant_id" => context.tenant_id = Some(value.to_string()),
+            "stream_name" => context.stream_name = Some(value.to_string()),
+            "simulation_run_id" => context.simulation_run_id = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    context
+}
+
+fn log_test_mode_connector_endpoint(
+    config: &RuntimeStreamConfig,
+    endpoint: &str,
+) -> EndpointLogContext {
+    let context = endpoint_log_context(endpoint);
+    if config.operating_mode_profile != "test" {
+        return context;
+    }
+
+    info!(
+        stream_config_id = %config.stream_config_id,
+        source_id = %config.source_id,
+        stream_name = %config.stream_name,
+        connector_mode = %config.connector_mode,
+        endpoint_host = context.host.as_deref(),
+        endpoint_path = %context.path,
+        is_mock_endpoint = context.is_mock_endpoint,
+        endpoint_tenant_id = context.tenant_id.as_deref(),
+        endpoint_stream_name = context.stream_name.as_deref(),
+        endpoint_simulation_run_id = context.simulation_run_id.as_deref(),
+        "resolved test-mode stream endpoint",
+    );
+
+    if !context.is_mock_endpoint {
+        warn!(
+            stream_config_id = %config.stream_config_id,
+            source_id = %config.source_id,
+            stream_name = %config.stream_name,
+            connector_mode = %config.connector_mode,
+            endpoint_host = context.host.as_deref(),
+            endpoint_path = %context.path,
+            "test-mode stream resolved to a non-mock endpoint",
+        );
+    } else if context.tenant_id.is_none() || context.stream_name.is_none() || context.simulation_run_id.is_none() {
+        warn!(
+            stream_config_id = %config.stream_config_id,
+            source_id = %config.source_id,
+            stream_name = %config.stream_name,
+            connector_mode = %config.connector_mode,
+            endpoint_host = context.host.as_deref(),
+            endpoint_path = %context.path,
+            endpoint_tenant_id = context.tenant_id.as_deref(),
+            endpoint_stream_name = context.stream_name.as_deref(),
+            endpoint_simulation_run_id = context.simulation_run_id.as_deref(),
+            "test-mode mock endpoint is missing expected query parameters",
+        );
+    }
+
+    context
+}
+
+fn log_test_mode_connector_connected(
+    config: &RuntimeStreamConfig,
+    endpoint_context: &EndpointLogContext,
+) {
+    if config.operating_mode_profile != "test" {
+        return;
+    }
+
+    info!(
+        stream_config_id = %config.stream_config_id,
+        source_id = %config.source_id,
+        stream_name = %config.stream_name,
+        connector_mode = %config.connector_mode,
+        endpoint_host = endpoint_context.host.as_deref(),
+        endpoint_path = %endpoint_context.path,
+        is_mock_endpoint = endpoint_context.is_mock_endpoint,
+        endpoint_tenant_id = endpoint_context.tenant_id.as_deref(),
+        endpoint_stream_name = endpoint_context.stream_name.as_deref(),
+        endpoint_simulation_run_id = endpoint_context.simulation_run_id.as_deref(),
+        "connected test-mode stream connector",
+    );
+}
+
 fn endpoint_from_connection_config(config: &Value) -> Result<String> {
     for key in ["ws_endpoint", "rpc_url", "ws_url", "endpoint", "http_url"] {
         if let Some(value) = config.get(key).and_then(Value::as_str) {
@@ -1574,6 +1814,7 @@ mod tests {
             source_type: "cex_api".to_string(),
             source_name: "Binance".to_string(),
             connection_config: json!({"endpoint": "http://example.invalid"}),
+            operating_mode_profile: "test".to_string(),
             auth_secret_ref: None,
             auth_config: json!({}),
             connector_mode: "http_poll".to_string(),

@@ -121,6 +121,10 @@ async fn main() -> Result<()> {
                 continue;
             }
 
+            if is_test_mode_detection(&detection) {
+                log_test_mode_detection_received(&detection);
+            }
+
             let alert = alert_from_detection(&detection);
             let alert = attach_incident_context(alert, &detection, repository.as_ref()).await;
             let dispatched =
@@ -323,6 +327,47 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
         simulation_run_id: detection.simulation_run_id.clone(),
         created_at: Utc::now(),
     }
+}
+
+fn is_test_mode_detection(detection: &DetectionResult) -> bool {
+    detection.is_simulated || detection.simulation_run_id.is_some()
+}
+
+fn is_test_mode_alert(alert: &AlertEvent) -> bool {
+    alert.is_simulated || alert.simulation_run_id.is_some()
+}
+
+fn log_test_mode_detection_received(detection: &DetectionResult) {
+    info!(
+        pipeline_mode = "test",
+        component = "orchestrator",
+        detection_id = %detection.detection_id,
+        pattern_id = %detection.pattern_id,
+        tenant_id = detection.tenant_id.as_deref(),
+        event_key = detection.event_key.as_deref(),
+        subject_key = detection.subject_key.as_deref(),
+        severity = ?detection.severity,
+        lifecycle_state = ?detection.lifecycle_state,
+        simulation_run_id = detection.simulation_run_id.as_deref(),
+        "test-mode detection received by orchestrator"
+    );
+}
+
+fn log_test_mode_alert_state(message: &'static str, alert: &AlertEvent) {
+    info!(
+        pipeline_mode = "test",
+        component = "orchestrator",
+        alert_id = %alert.alert_id,
+        incident_id = alert.incident_id.as_deref(),
+        tenant_id = alert.tenant_id.as_deref(),
+        pattern_id = %alert.pattern_id,
+        event_key = alert.event_key.as_deref(),
+        subject_key = alert.subject_key.as_deref(),
+        severity = ?alert.severity,
+        lifecycle_state = ?alert.lifecycle_state,
+        simulation_run_id = alert.simulation_run_id.as_deref(),
+        "{message}"
+    );
 }
 
 async fn attach_incident_context(
@@ -609,6 +654,11 @@ async fn dispatch_alert(
     let mut normalized_alert = alert.clone();
     let tenant_id = resolve_alert_tenant_id(normalized_alert.tenant_id.clone());
     normalized_alert.tenant_id = Some(tenant_id.clone());
+    let is_test_mode = is_test_mode_alert(&normalized_alert);
+
+    if is_test_mode {
+        log_test_mode_alert_state("dispatching test-mode alert", &normalized_alert);
+    }
 
     if let Some(repo) = repository {
         match should_escalate_to_all_channels_for_rate_limit(repo, &tenant_id, &normalized_alert)
@@ -645,6 +695,13 @@ async fn dispatch_alert(
                         serde_json::json!(consumed),
                     );
 
+                    if is_test_mode_alert(&suppressed) {
+                        log_test_mode_alert_state(
+                            "test-mode alert suppressed before notifier dispatch",
+                            &suppressed,
+                        );
+                    }
+
                     persist_and_publish_alert(&suppressed, repository, stream).await;
                     record_usage_event(repo, &tenant_id, "alert_suppressed_quota", &suppressed)
                         .await;
@@ -673,6 +730,19 @@ async fn dispatch_alert(
                 resolved_channels = ?dispatch_result.resolved_channels,
                 "notifier-gateway dispatch completed"
             );
+            if is_test_mode {
+                info!(
+                    pipeline_mode = "test",
+                    component = "orchestrator",
+                    tenant_id = %dispatch_result.tenant_id,
+                    alert_id = %normalized_alert.alert_id,
+                    delivered = dispatch_result.delivered,
+                    reason = ?dispatch_result.reason,
+                    resolved_channels = ?dispatch_result.resolved_channels,
+                    simulation_run_id = normalized_alert.simulation_run_id.as_deref(),
+                    "test-mode alert dispatch completed"
+                );
+            }
             normalized_alert = apply_dispatch_result_metadata(normalized_alert, &dispatch_result);
             if let Some(repo) = repository {
                 for result in &dispatch_result.results {
@@ -758,6 +828,9 @@ async fn persist_and_publish_alert(
     }
     if let Err(err) = stream.publish_alert_lifecycle(alert).await {
         common::log_error!(warn, err, "failed to publish alert lifecycle stream event");
+    }
+    if is_test_mode_alert(alert) {
+        log_test_mode_alert_state("test-mode alert persisted and published", alert);
     }
 }
 

@@ -122,6 +122,7 @@ async fn reconcile(
         }
 
         let runtime_cfg = to_runtime_config(cfg, targets);
+        log_test_mode_stream_selection(&runtime_cfg);
         let config_hash = hash_runtime_config(&runtime_cfg);
         desired_ids.push(runtime_cfg.stream_config_id.clone());
 
@@ -302,6 +303,7 @@ fn to_runtime_config(
         source_type: cfg.source_type,
         source_name: cfg.source_name,
         connection_config: cfg.connection_config,
+        operating_mode_profile: cfg.operating_mode_profile,
         auth_secret_ref: cfg.auth_secret_ref,
         auth_config: cfg.auth_config,
         connector_mode: cfg.connector_mode,
@@ -328,6 +330,7 @@ fn hash_runtime_config(cfg: &RuntimeStreamConfig) -> String {
         "source_type": cfg.source_type,
         "source_name": cfg.source_name,
         "connection_config": cfg.connection_config,
+        "operating_mode_profile": cfg.operating_mode_profile,
         "auth_secret_ref": cfg.auth_secret_ref,
         "auth_config": cfg.auth_config,
         "connector_mode": cfg.connector_mode,
@@ -346,6 +349,94 @@ fn hash_runtime_config(cfg: &RuntimeStreamConfig) -> String {
     let mut hasher = Sha256::new();
     hasher.update(serializable.to_string().as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn log_test_mode_stream_selection(cfg: &RuntimeStreamConfig) {
+    if cfg.operating_mode_profile != "test" {
+        return;
+    }
+
+    let endpoint = cfg
+        .connection_config
+        .as_object()
+        .and_then(|config| {
+            ["ws_endpoint", "rpc_url", "ws_url", "endpoint", "http_url"]
+                .iter()
+                .find_map(|key| config.get(*key).and_then(|value| value.as_str()))
+        })
+        .map(str::trim)
+        .unwrap_or("");
+
+    let parsed = Url::parse(endpoint).ok();
+    let endpoint_path = parsed
+        .as_ref()
+        .map(|url| url.path().to_string())
+        .unwrap_or_else(|| endpoint.to_string());
+    let endpoint_host = parsed.as_ref().and_then(|url| url.host_str());
+    let is_mock_endpoint = parsed
+        .as_ref()
+        .map(|url| url.path().contains("/api/simulation/mock/"))
+        .unwrap_or_else(|| endpoint.contains("/api/simulation/mock/"));
+    let mut endpoint_tenant_id: Option<String> = None;
+    let mut endpoint_stream_name: Option<String> = None;
+    let mut endpoint_simulation_run_id: Option<String> = None;
+    if let Some(url) = parsed.as_ref() {
+        for (key, value) in url.query_pairs() {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            match key.as_ref() {
+                "tenant_id" => endpoint_tenant_id = Some(value.to_string()),
+                "stream_name" => endpoint_stream_name = Some(value.to_string()),
+                "simulation_run_id" => endpoint_simulation_run_id = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+
+    info!(
+        stream_config_id = %cfg.stream_config_id,
+        source_id = %cfg.source_id,
+        stream_name = %cfg.stream_name,
+        connector_mode = %cfg.connector_mode,
+        tenant_targets = ?cfg.tenant_targets,
+        endpoint_host,
+        endpoint_path = %endpoint_path,
+        is_mock_endpoint,
+        endpoint_tenant_id = endpoint_tenant_id.as_deref(),
+        endpoint_stream_name = endpoint_stream_name.as_deref(),
+        endpoint_simulation_run_id = endpoint_simulation_run_id.as_deref(),
+        "selected test-mode stream config",
+    );
+
+    if !is_mock_endpoint {
+        warn!(
+            stream_config_id = %cfg.stream_config_id,
+            source_id = %cfg.source_id,
+            stream_name = %cfg.stream_name,
+            connector_mode = %cfg.connector_mode,
+            endpoint_host,
+            endpoint_path = %endpoint_path,
+            "selected test-mode stream config does not point to a mock endpoint",
+        );
+    } else if endpoint_tenant_id.is_none()
+        || endpoint_stream_name.is_none()
+        || endpoint_simulation_run_id.is_none()
+    {
+        warn!(
+            stream_config_id = %cfg.stream_config_id,
+            source_id = %cfg.source_id,
+            stream_name = %cfg.stream_name,
+            connector_mode = %cfg.connector_mode,
+            endpoint_host,
+            endpoint_path = %endpoint_path,
+            endpoint_tenant_id = endpoint_tenant_id.as_deref(),
+            endpoint_stream_name = endpoint_stream_name.as_deref(),
+            endpoint_simulation_run_id = endpoint_simulation_run_id.as_deref(),
+            "selected test-mode mock endpoint is missing expected query parameters",
+        );
+    }
 }
 
 fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
