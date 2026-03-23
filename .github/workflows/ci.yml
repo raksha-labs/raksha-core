@@ -155,7 +155,9 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          ignore: RUSTSEC-2025-0009  # ring 0.16 AES panic - blocked by ethers→jsonwebtoken dep chain; tracked for alloy migration
+          ignore: RUSTSEC-2025-0009,RUSTSEC-2026-0049
+          # RUSTSEC-2025-0009: ring 0.16 AES panic - blocked by ethers→jsonwebtoken dep chain; tracked for alloy migration
+          # RUSTSEC-2026-0049: rustls-webpki CRL distribution point matching - inherited via reqwest/tokio-tungstenite/ethers rustls stack
 
       - name: Install tfsec
         run: |

@@ -11,8 +11,8 @@ use state_manager::{
 };
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
-use uuid::Uuid;
 use url::Url;
+use uuid::Uuid;
 
 use crate::stream_connector::{
     http_poll::HttpPollConnector, rpc_logs::RpcLogsConnector, rpc_state::RpcStateConnector,
@@ -573,14 +573,13 @@ async fn process_payload(
             }
             let (is_simulated, simulation_run_id) = simulation_metadata_from_payload(&payload);
             let mut payload_for_storage = payload.clone();
-            let (parse_status, parse_error, should_fanout) =
-                apply_usdt_normalization(
-                    repo,
-                    &mut parsed,
-                    &mut payload_for_storage,
-                    payload_ctx.fx_cache,
-                )
-                .await?;
+            let (parse_status, parse_error, should_fanout) = apply_usdt_normalization(
+                repo,
+                &mut parsed,
+                &mut payload_for_storage,
+                payload_ctx.fx_cache,
+            )
+            .await?;
             apply_market_truth_context(repo, config, &mut parsed, &mut payload_for_storage).await?;
 
             let dedup_key = build_dedup_key(config, &parsed, &payload);
@@ -1516,7 +1515,10 @@ fn log_test_mode_connector_endpoint(
             endpoint_path = %context.path,
             "test-mode stream resolved to a non-mock endpoint",
         );
-    } else if context.tenant_id.is_none() || context.stream_name.is_none() || context.simulation_run_id.is_none() {
+    } else if context.tenant_id.is_none()
+        || context.stream_name.is_none()
+        || context.simulation_run_id.is_none()
+    {
         warn!(
             stream_config_id = %config.stream_config_id,
             source_id = %config.source_id,
