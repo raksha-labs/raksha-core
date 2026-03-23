@@ -41,8 +41,8 @@ use chrono::TimeZone;
 use serde_json::{json, Value};
 
 use super::{
-    decode_hex_words, observed_at, parse_i256_word_to_f64, parse_u256_word_to_f64, ParsedFeedEvent,
-    ParserInput,
+    decode_hex_words, observed_at, parse_i256_word_to_f64, parse_i64, parse_u256_word_to_f64,
+    source_event_id, ParsedFeedEvent, ParserInput,
 };
 
 /// Decode a Pyth fixed-point numeric object into a `f64`.
@@ -113,6 +113,20 @@ fn decode_pyth_log(
     Some((feed_id, price, conf_usd, expo, publish_time))
 }
 
+fn pyth_log_event_id(payload: &Value) -> Option<String> {
+    let tx_hash = payload
+        .get("transactionHash")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("tx_hash").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let log_index = parse_i64(payload.get("logIndex").or_else(|| payload.get("log_index")));
+    Some(match log_index {
+        Some(index) => format!("{tx_hash}:{index}"),
+        None => tx_hash.to_string(),
+    })
+}
+
 /// Derive a normalised `market_key` from the Pyth symbol string.
 ///
 /// Pyth symbols follow the pattern `"Asset.BASE/QUOTE"` (e.g. `"Crypto.USDC/USD"`).
@@ -143,17 +157,41 @@ fn market_key_from_pyth_symbol(raw_symbol: &str) -> String {
 pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFeedEvent, String> {
     if let Some((feed_id, price, conf_usd, expo, payload_event_ts)) = decode_pyth_log(payload) {
         let observed_at = observed_at(payload_event_ts);
+        let tx_hash = payload
+            .get("transactionHash")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("tx_hash").and_then(Value::as_str))
+            .map(ToString::to_string);
+        let block_number = parse_i64(
+            payload
+                .get("blockNumber")
+                .or_else(|| payload.get("block_number")),
+        );
+        let log_index = parse_i64(payload.get("logIndex").or_else(|| payload.get("log_index")));
+        let chain_id = parse_i64(payload.get("chainId").or_else(|| payload.get("chain_id")));
+        let topic0 = payload
+            .get("topics")
+            .and_then(Value::as_array)
+            .and_then(|topics| topics.first())
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| {
+                payload
+                    .get("topic0")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            });
         return Ok(ParsedFeedEvent {
             event_type: input.event_type.to_string(),
-            event_id: feed_id.clone(),
+            event_id: pyth_log_event_id(payload).or_else(|| source_event_id(payload)),
             market_key: input.market_key_hint.map(ToString::to_string),
             asset_pair: input.asset_pair_hint.map(ToString::to_string),
             price: Some(price),
-            chain_id: None,
-            block_number: None,
-            tx_hash: None,
-            log_index: None,
-            topic0: None,
+            chain_id,
+            block_number,
+            tx_hash,
+            log_index,
+            topic0,
             payload_event_ts,
             observed_at,
             normalized_fields: json!({
@@ -342,5 +380,33 @@ mod tests {
         let filter = Value::Null;
         let payload = json!({"id": "0xabc"});
         assert!(parse(&make_input(&filter), &payload).is_err());
+    }
+
+    #[test]
+    fn pyth_log_uses_transaction_identity_for_event_id() {
+        let filter = Value::Null;
+        let payload = json!({
+            "transactionHash": "0xabc123",
+            "logIndex": "0x7",
+            "blockNumber": "0x123",
+            "chainId": 1,
+            "topics": [
+                "0xd06a6b7f4918494b3719217d1802786c1f5112a6c1d88fe2cfb5bef7fda2bc6f",
+                "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc3a1b6f9e3f75f2d5"
+            ],
+            "data": "0x\
+        00000000000000000000000000000000000000000000000000000000053ec600\
+        0000000000000000000000000000000000000000000000000000000000004e20\
+        fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8\
+        00000000000000000000000000000000000000000000000000000000640c3455"
+        });
+
+        let result = parse(&make_input(&filter), &payload).expect("should parse pyth log");
+        assert_eq!(result.event_id.as_deref(), Some("0xabc123:7"));
+        assert_eq!(result.tx_hash.as_deref(), Some("0xabc123"));
+        assert_eq!(result.log_index, Some(7));
+        assert_eq!(result.block_number, Some(0x123));
+        assert_eq!(result.chain_id, Some(1));
+        assert_eq!(result.price, Some(0.88));
     }
 }

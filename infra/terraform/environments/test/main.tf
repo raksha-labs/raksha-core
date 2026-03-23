@@ -110,6 +110,9 @@ locals {
   ]))
 
   service_static_env_overrides = {
+    indexer = {
+      AUTH_INTERNAL_SERVICE_TOKEN = "raksha-auth-token"
+    }
     orchestrator = {
       ALERT_FALLBACK_TENANT_ID = "glider"
       NOTIFIER_GATEWAY_URL     = "http://notifier-gateway.${module.compute.service_discovery_namespace_name}:3002"

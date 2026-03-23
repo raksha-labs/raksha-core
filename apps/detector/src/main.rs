@@ -7,7 +7,10 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use common::{init_logging, make_postgres_tls_connector, start_health_check_server};
+use common::{
+    init_logging, make_postgres_tls_connector, start_health_check_server_with_commands,
+    HealthCommand,
+};
 use dotenvy::dotenv;
 use futures_util::future::poll_fn;
 use state_manager::{describe_redis_url, PostgresRepository, RedisStreamPublisher};
@@ -30,7 +33,10 @@ const CONFIG_RELOAD_INTERVAL_SECS: u64 = 30;
 async fn main() -> Result<()> {
     dotenv().ok();
     init_logging("info");
-    let health_status = start_health_check_server("detector");
+    let (command_tx, mut command_rx) = mpsc::channel(16);
+    let command_token = std::env::var("AUTH_INTERNAL_SERVICE_TOKEN").ok();
+    let health_status =
+        start_health_check_server_with_commands("detector", command_tx, command_token);
 
     let redis_url = std::env::var("REDIS_URL").context("REDIS_URL not set")?;
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL not set")?;
@@ -104,6 +110,17 @@ async fn main() -> Result<()> {
                     warn!("pattern config notify listener stopped; continuing with periodic reload only");
                 }
                 reload_pattern_configs(&repo, &mut registry).await;
+            }
+
+            command = command_rx.recv() => {
+                match command {
+                    Some(HealthCommand::TriggerReload) => {
+                        reload_pattern_configs(&repo, &mut registry).await;
+                    }
+                    None => {
+                        warn!("detector health command channel closed; continuing without explicit reload commands");
+                    }
+                }
             }
 
             // Poll the unified-events consumer group.

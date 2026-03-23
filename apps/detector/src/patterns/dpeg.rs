@@ -378,6 +378,14 @@ pub struct DpegPattern {
 impl DpegPattern {
     const MAX_QUOTE_HISTORY_PER_SOURCE: usize = 16;
 
+    fn state_key(market_key: &str, simulation_run_id: Option<&str>) -> String {
+        simulation_run_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|run_id| format!("{market_key}::{run_id}"))
+            .unwrap_or_else(|| market_key.to_string())
+    }
+
     fn normalized_policy_config(config: &Value) -> Value {
         let Some(object) = config.as_object() else {
             return config.clone();
@@ -559,6 +567,7 @@ impl DetectionPattern for DpegPattern {
         let replay_scope = simulation_run_id
             .clone()
             .unwrap_or_else(|| "__live__".to_string());
+        let state_key = Self::state_key(market_key, simulation_run_id.as_deref());
         let policy_key = (
             event.tenant_id.clone(),
             market_key.to_string(),
@@ -593,7 +602,7 @@ impl DetectionPattern for DpegPattern {
         // Use persisted state as the source of truth so cleanup/reset operations
         // take effect on the next replay without needing a detector restart.
         let current_state = repo
-            .load_pattern_state(&policy_key.0, PATTERN_ID, &policy_key.1)
+            .load_pattern_state(&policy_key.0, PATTERN_ID, &state_key)
             .await?
             .and_then(|v| serde_json::from_value::<DpegAlertState>(v).ok())
             .unwrap_or_default();
@@ -654,7 +663,7 @@ impl DetectionPattern for DpegPattern {
         // Persist updated alert state to DB.
         let state_value = serde_json::to_value(&outcome.next_state)?;
         let _ = repo
-            .upsert_pattern_state(&policy_key.0, PATTERN_ID, &policy_key.1, state_value)
+            .upsert_pattern_state(&policy_key.0, PATTERN_ID, &state_key, state_value)
             .await;
 
         // Emit detection if needed.
@@ -1504,6 +1513,15 @@ mod tests {
             price,
             observed_at,
         }
+    }
+
+    #[test]
+    fn simulation_state_key_is_scoped_by_run() {
+        assert_eq!(
+            DpegPattern::state_key("USDC/USD", Some("run_123")),
+            "USDC/USD::run_123"
+        );
+        assert_eq!(DpegPattern::state_key("USDC/USD", None), "USDC/USD");
     }
 
     #[test]

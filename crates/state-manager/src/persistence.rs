@@ -1242,6 +1242,56 @@ impl PostgresRepository {
         }))
     }
 
+    pub async fn find_active_incident_for_simulation(
+        &self,
+        key: IncidentKey<'_>,
+        simulation_run_id: &str,
+    ) -> Result<Option<IncidentRecord>> {
+        let row = self
+            .client
+            .query_opt(
+                r#"
+                SELECT i.incident_id, i.tenant_id, i.pattern_id, i.subject_type, i.subject_key, i.chain_slug, i.status, i.current_severity
+                FROM incidents i
+                WHERE i.tenant_id = $1
+                  AND i.pattern_id = $2
+                  AND COALESCE(i.subject_type, '') = COALESCE($3, '')
+                  AND COALESCE(i.subject_key, '') = COALESCE($4, '')
+                  AND i.chain_slug = $5
+                  AND i.status NOT IN ('resolved', 'retracted', 'closed', 'cancelled')
+                  AND EXISTS (
+                      SELECT 1
+                      FROM alerts a
+                      WHERE a.incident_id = i.incident_id
+                        AND a.is_simulated = TRUE
+                        AND a.simulation_run_id = $6
+                  )
+                ORDER BY i.updated_at DESC
+                LIMIT 1
+                "#,
+                &[
+                    &key.tenant_id,
+                    &key.pattern_id,
+                    &key.subject_type,
+                    &key.subject_key,
+                    &key.chain_slug,
+                    &simulation_run_id,
+                ],
+            )
+            .await?;
+
+        Ok(row.map(|record| IncidentRecord {
+            incident_id: record.get(0),
+            tenant_id: record.get(1),
+            pattern_id: record.get(2),
+            subject_type: record.get(3),
+            subject_key: record.get(4),
+            chain_slug: record.get(5),
+            status: record.get(6),
+            current_severity: record.get(7),
+        }))
+    }
+
     pub async fn create_incident(
         &self,
         incident: &IncidentRecord,

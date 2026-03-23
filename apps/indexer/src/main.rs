@@ -1,9 +1,10 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use common::{init_logging, start_health_check_server};
+use common::{init_logging, start_health_check_server_with_commands, HealthCommand};
 use dotenvy::dotenv;
 use state_manager::{describe_redis_url, PostgresRepository, RedisStreamPublisher};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 mod stream_connector;
@@ -11,7 +12,7 @@ mod stream_parser;
 mod stream_supervisor;
 mod stream_worker;
 
-use stream_supervisor::run_stream_supervisor;
+use stream_supervisor::{run_stream_supervisor, SupervisorCommand};
 
 const REDIS_STARTUP_RETRY_ATTEMPTS: usize = 3;
 const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
@@ -20,7 +21,10 @@ const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 async fn main() -> Result<()> {
     dotenv().ok();
     init_logging("info");
-    let health_status = start_health_check_server("indexer");
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let command_token = std::env::var("AUTH_INTERNAL_SERVICE_TOKEN").ok();
+    let health_status =
+        start_health_check_server_with_commands("indexer", command_tx, command_token);
 
     let database_url = std::env::var("DATABASE_URL")
         .context("DATABASE_URL not set; indexer requires DB-driven stream configuration")?;
@@ -36,14 +40,22 @@ async fn main() -> Result<()> {
         health.postgres_connected = true;
         health.details = vec![
             "config_source=catalog.source_stream_configs".to_string(),
-            "reload_triggers=LISTEN source_stream_config_changed + periodic reconcile".to_string(),
+            "reload_triggers=LISTEN source_stream_config_changed + POST /reload + periodic reconcile".to_string(),
             format!("stream_purge_enabled={stream_purge_enabled}"),
         ];
         health.is_ready = true;
     }
 
     info!(stream_purge_enabled, "db-driven stream supervisor started");
-    run_stream_supervisor(repo, stream, database_url, stream_purge_enabled).await
+    let supervisor_command_rx = adapt_health_commands(command_rx);
+    run_stream_supervisor(
+        repo,
+        stream,
+        database_url,
+        stream_purge_enabled,
+        supervisor_command_rx,
+    )
+    .await
 }
 
 fn read_bool_env(name: &str, default: bool) -> bool {
@@ -104,4 +116,21 @@ async fn init_stream_publisher() -> Result<RedisStreamPublisher> {
     Err(anyhow!(
         "redis startup retry loop exited unexpectedly without initializing the stream publisher"
     ))
+}
+
+fn adapt_health_commands(
+    mut health_command_rx: mpsc::Receiver<HealthCommand>,
+) -> mpsc::Receiver<SupervisorCommand> {
+    let (supervisor_tx, supervisor_rx) = mpsc::channel(16);
+    tokio::spawn(async move {
+        while let Some(command) = health_command_rx.recv().await {
+            let supervisor_command = match command {
+                HealthCommand::TriggerReload => SupervisorCommand::ReconcileNow,
+            };
+            if supervisor_tx.send(supervisor_command).await.is_err() {
+                break;
+            }
+        }
+    });
+    supervisor_rx
 }

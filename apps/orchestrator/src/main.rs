@@ -399,7 +399,13 @@ async fn attach_incident_context(
         chain_slug: &detection.chain_slug,
     };
 
-    let incident = match repo.find_active_incident(key).await {
+    let incident_lookup = if let Some(run_id) = detection.simulation_run_id.as_deref() {
+        repo.find_active_incident_for_simulation(key, run_id).await
+    } else {
+        repo.find_active_incident(key).await
+    };
+
+    let incident = match incident_lookup {
         Ok(Some(existing)) => existing,
         Ok(None) => {
             let created = IncidentRecord {

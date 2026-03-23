@@ -34,6 +34,11 @@ enum NotifySignal {
     Disconnected,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SupervisorCommand {
+    ReconcileNow,
+}
+
 struct WorkerHandle {
     config_hash: String,
     stop_tx: watch::Sender<bool>,
@@ -45,6 +50,7 @@ pub async fn run_stream_supervisor(
     stream: RedisStreamPublisher,
     database_url: String,
     purge_enabled: bool,
+    mut command_rx: mpsc::Receiver<SupervisorCommand>,
 ) -> Result<()> {
     let raw_repo = match PostgresRawRepository::from_env().await {
         Some(Ok(repo)) => Some(repo),
@@ -119,6 +125,17 @@ pub async fn run_stream_supervisor(
                 }
                 if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
                     common::log_error!(warn, error, "stream supervisor notify-driven reconcile failed");
+                }
+            }
+            command = command_rx.recv() => {
+                let Some(SupervisorCommand::ReconcileNow) = command else {
+                    warn!("stream supervisor command channel closed; continuing without explicit reload triggers");
+                    let (_disabled_tx, disabled_rx) = mpsc::channel(1);
+                    command_rx = disabled_rx;
+                    continue;
+                };
+                if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
+                    common::log_error!(warn, error, "stream supervisor explicit reconcile failed");
                 }
             }
             _ = purge_tick.tick(), if purge_enabled => {
@@ -475,10 +492,7 @@ fn log_test_mode_stream_selection(cfg: &RuntimeStreamConfig) {
             endpoint_path = %endpoint_path,
             "selected test-mode stream config does not point to a mock endpoint",
         );
-    } else if endpoint_tenant_id.is_none()
-        || endpoint_stream_name.is_none()
-        || endpoint_simulation_run_id.is_none()
-    {
+    } else if endpoint_tenant_id.is_none() || endpoint_stream_name.is_none() {
         warn!(
             stream_config_id = %cfg.stream_config_id,
             source_id = %cfg.source_id,
@@ -489,7 +503,7 @@ fn log_test_mode_stream_selection(cfg: &RuntimeStreamConfig) {
             endpoint_tenant_id = endpoint_tenant_id.as_deref(),
             endpoint_stream_name = endpoint_stream_name.as_deref(),
             endpoint_simulation_run_id = endpoint_simulation_run_id.as_deref(),
-            "selected test-mode mock endpoint is missing expected query parameters",
+            "selected test-mode mock endpoint is missing tenant-scoped routing parameters",
         );
     }
 }

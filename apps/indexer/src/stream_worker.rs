@@ -118,6 +118,7 @@ struct TestModeLogState {
 struct PayloadProcessingContext<'a> {
     stream: &'a RedisStreamPublisher,
     chain_id_hint: Option<i64>,
+    simulation_run_id_hint: Option<&'a str>,
     fx_cache: &'a mut FxRateCache,
     test_mode_log_state: &'a mut TestModeLogState,
 }
@@ -195,6 +196,20 @@ fn simulation_metadata_from_payload(payload: &Value) -> (bool, Option<String>) {
             .unwrap_or(false)
         || run_id.is_some();
     (is_simulated, run_id)
+}
+
+fn effective_simulation_metadata(
+    payload: &Value,
+    simulation_run_id_hint: Option<&str>,
+) -> (bool, Option<String>) {
+    let (is_simulated, simulation_run_id) = simulation_metadata_from_payload(payload);
+    let resolved_run_id = simulation_run_id.or_else(|| {
+        simulation_run_id_hint
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    });
+    (is_simulated || resolved_run_id.is_some(), resolved_run_id)
 }
 
 pub async fn run_stream_worker(
@@ -336,6 +351,7 @@ async fn run_websocket_loop(
                 let mut payload_ctx = PayloadProcessingContext {
                     stream,
                     chain_id_hint: None,
+                    simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
                     fx_cache,
                     test_mode_log_state: &mut test_mode_log_state,
                 };
@@ -383,6 +399,7 @@ async fn run_rpc_logs_loop(
                 let mut payload_ctx = PayloadProcessingContext {
                     stream,
                     chain_id_hint: connector.chain_id(),
+                    simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
                     fx_cache,
                     test_mode_log_state: &mut test_mode_log_state,
                 };
@@ -435,6 +452,7 @@ async fn run_http_poll_loop(
                         raw_repo,
                         stream,
                         payload,
+                        endpoint_log_context.simulation_run_id.as_deref(),
                         fx_cache,
                         &mut test_mode_log_state,
                     )
@@ -494,6 +512,7 @@ async fn run_rpc_state_loop(
                 let mut payload_ctx = PayloadProcessingContext {
                     stream,
                     chain_id_hint: connector.chain_id(),
+                    simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
                     fx_cache,
                     test_mode_log_state: &mut test_mode_log_state,
                 };
@@ -635,12 +654,14 @@ async fn process_http_poll_payload(
     raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     payload: Value,
+    simulation_run_id_hint: Option<&str>,
     fx_cache: &mut FxRateCache,
     test_mode_log_state: &mut TestModeLogState,
 ) -> Result<()> {
     let mut payload_ctx = PayloadProcessingContext {
         stream,
         chain_id_hint: None,
+        simulation_run_id_hint,
         fx_cache,
         test_mode_log_state,
     };
@@ -679,7 +700,10 @@ async fn process_payload(
             if parsed.chain_id.is_none() {
                 parsed.chain_id = payload_ctx.chain_id_hint;
             }
-            let (is_simulated, simulation_run_id) = simulation_metadata_from_payload(&payload);
+            let (is_simulated, simulation_run_id) = effective_simulation_metadata(
+                &payload,
+                payload_ctx.simulation_run_id_hint,
+            );
             let mut payload_for_storage = payload.clone();
             let (parse_status, parse_error, should_fanout) = apply_usdt_normalization(
                 repo,
@@ -690,7 +714,12 @@ async fn process_payload(
             .await?;
             apply_market_truth_context(repo, config, &mut parsed, &mut payload_for_storage).await?;
 
-            let dedup_key = build_dedup_key(config, &parsed, &payload);
+            let dedup_key = build_dedup_key(
+                config,
+                &parsed,
+                &payload,
+                payload_ctx.simulation_run_id_hint,
+            );
             let envelope = to_source_envelope(
                 config,
                 &parsed,
@@ -770,6 +799,8 @@ async fn process_payload(
                     inserted,
                     raw_landing.status,
                     raw_landing.error.as_deref(),
+                    is_simulated,
+                    simulation_run_id.as_deref(),
                 )
                 .await?;
             }
@@ -777,8 +808,16 @@ async fn process_payload(
         }
         Err(parse_error) => {
             let observed_at = Utc::now();
-            let dedup_key = hash_payload_only(config, &payload, observed_at);
-            let (is_simulated, simulation_run_id) = simulation_metadata_from_payload(&payload);
+            let dedup_key = hash_payload_only(
+                config,
+                &payload,
+                observed_at,
+                payload_ctx.simulation_run_id_hint,
+            );
+            let (is_simulated, simulation_run_id) = effective_simulation_metadata(
+                &payload,
+                payload_ctx.simulation_run_id_hint,
+            );
             let envelope = SourceEnvelopeV1 {
                 envelope_id: Uuid::new_v4().to_string(),
                 source_id: config.source_id.clone(),
@@ -1066,6 +1105,22 @@ fn derive_quote_asset(parsed: &ParsedFeedEvent) -> Option<String> {
         .filter(|quote| !quote.is_empty())
 }
 
+fn fallback_usdt_usd_rate(parsed: &ParsedFeedEvent, quote_asset: Option<&str>) -> Option<f64> {
+    if quote_asset != Some("USDT") {
+        return None;
+    }
+
+    let market_key = parsed.market_key.as_deref()?.trim().to_ascii_uppercase();
+    if market_key == FX_LOOKUP_MARKET_KEY {
+        return None;
+    }
+    if !market_key.ends_with("/USD") {
+        return None;
+    }
+
+    Some(1.0)
+}
+
 async fn lookup_usdt_usd_rate(
     repo: &PostgresRepository,
     fx_cache: &mut FxRateCache,
@@ -1125,6 +1180,7 @@ async fn apply_usdt_normalization(
     }
 
     let fx_rate = lookup_usdt_usd_rate(repo, fx_cache).await?;
+    let fx_rate = fx_rate.or_else(|| fallback_usdt_usd_rate(parsed, quote_asset_ref));
     let Some(fx_rate) = fx_rate else {
         parsed.price = None;
         upsert_normalized_metadata(parsed, Some(raw_price), quote_asset_ref, None, None, true);
@@ -1443,6 +1499,8 @@ async fn fanout_unified_events(
     ingest_persisted: bool,
     raw_landing_status: RawLandingStatus,
     raw_landing_error: Option<&str>,
+    is_simulated: bool,
+    simulation_run_id: Option<&str>,
 ) -> Result<()> {
     let source_type = map_source_type(&config.source_type);
 
@@ -1459,6 +1517,8 @@ async fn fanout_unified_events(
             ingest_persisted,
             raw_landing_status,
             raw_landing_error,
+            is_simulated,
+            simulation_run_id,
         );
         let event = UnifiedEvent {
             event_id,
@@ -1488,12 +1548,34 @@ fn enrich_payload_for_unified(
     ingest_persisted: bool,
     raw_landing_status: RawLandingStatus,
     raw_landing_error: Option<&str>,
+    is_simulated: bool,
+    simulation_run_id: Option<&str>,
 ) -> Value {
     let mut enriched = payload.clone();
     if !enriched.is_object() {
         enriched = json!({ "raw_payload": payload });
     }
     if let Some(obj) = enriched.as_object_mut() {
+        if is_simulated {
+            obj.insert("is_simulated".to_string(), Value::Bool(true));
+            let simulation = obj
+                .entry("simulation".to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !simulation.is_object() {
+                *simulation = Value::Object(serde_json::Map::new());
+            }
+            if let Some(simulation_meta) = simulation.as_object_mut() {
+                simulation_meta.insert("is_simulated".to_string(), Value::Bool(true));
+                if let Some(run_id) = simulation_run_id {
+                    simulation_meta
+                        .insert("run_id".to_string(), Value::String(run_id.to_string()));
+                    simulation_meta.insert(
+                        "simulation_run_id".to_string(),
+                        Value::String(run_id.to_string()),
+                    );
+                }
+            }
+        }
         obj.insert(
             "raw_persisted".to_string(),
             Value::Bool(raw_landing_status.persisted()),
@@ -1631,10 +1713,7 @@ fn log_test_mode_connector_endpoint(
             endpoint_path = %context.path,
             "test-mode stream resolved to a non-mock endpoint",
         );
-    } else if context.tenant_id.is_none()
-        || context.stream_name.is_none()
-        || context.simulation_run_id.is_none()
-    {
+    } else if context.tenant_id.is_none() || context.stream_name.is_none() {
         warn!(
             stream_config_id = %config.stream_config_id,
             source_id = %config.source_id,
@@ -1645,7 +1724,7 @@ fn log_test_mode_connector_endpoint(
             endpoint_tenant_id = context.tenant_id.as_deref(),
             endpoint_stream_name = context.stream_name.as_deref(),
             endpoint_simulation_run_id = context.simulation_run_id.as_deref(),
-            "test-mode mock endpoint is missing expected query parameters",
+            "test-mode mock endpoint is missing tenant-scoped routing parameters",
         );
     }
 
@@ -1846,18 +1925,56 @@ fn build_dedup_key(
     config: &RuntimeStreamConfig,
     parsed: &ParsedFeedEvent,
     payload: &Value,
+    simulation_run_id_hint: Option<&str>,
 ) -> Option<String> {
-    if let Some(tx_hash) = parsed.tx_hash.as_deref().filter(|value| !value.is_empty()) {
+    let (is_simulated, simulation_run_id) =
+        effective_simulation_metadata(payload, simulation_run_id_hint);
+    let payload_tx_hash = payload
+        .get("transactionHash")
+        .or_else(|| payload.get("transaction_hash"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let payload_log_index = payload
+        .get("logIndex")
+        .or_else(|| payload.get("log_index"))
+        .and_then(|value| match value {
+            Value::Number(number) => number.as_i64(),
+            Value::String(raw) => {
+                let token = raw.trim();
+                if token.is_empty() {
+                    None
+                } else if let Some(hex) = token.strip_prefix("0x") {
+                    i64::from_str_radix(hex, 16).ok()
+                } else {
+                    token.parse::<i64>().ok()
+                }
+            }
+            _ => None,
+        });
+    let tx_hash = parsed
+        .tx_hash
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or(payload_tx_hash);
+    let log_index = parsed.log_index.or(payload_log_index);
+    if let Some(tx_hash) = tx_hash {
         let mut provider_key = format!(
             "provider:{}:{}:{}:{}",
             config.source_id,
             config.stream_config_id,
             tx_hash,
-            parsed.log_index.unwrap_or_default()
+            log_index.unwrap_or_default()
         );
         if let Some(payload_event_ts) = parsed.payload_event_ts {
             provider_key.push_str(":ts:");
             provider_key.push_str(&payload_event_ts.timestamp_millis().to_string());
+        }
+        if is_simulated {
+            if let Some(run_id) = simulation_run_id.as_deref() {
+                provider_key.push_str(":sim:");
+                provider_key.push_str(run_id);
+            }
         }
         return Some(provider_key);
     }
@@ -1869,6 +1986,12 @@ fn build_dedup_key(
         if let Some(payload_event_ts) = parsed.payload_event_ts {
             provider_key.push_str(":ts:");
             provider_key.push_str(&payload_event_ts.timestamp_millis().to_string());
+        }
+        if is_simulated {
+            if let Some(run_id) = simulation_run_id.as_deref() {
+                provider_key.push_str(":sim:");
+                provider_key.push_str(run_id);
+            }
         }
         return Some(provider_key);
     }
@@ -1892,6 +2015,10 @@ fn build_dedup_key(
     hasher.update(b"|");
     hasher.update(parsed.topic0.as_deref().unwrap_or_default().as_bytes());
     hasher.update(b"|");
+    if is_simulated {
+        hasher.update(simulation_run_id.as_deref().unwrap_or_default().as_bytes());
+    }
+    hasher.update(b"|");
     hasher.update(payload.to_string().as_bytes());
     Some(hex::encode(hasher.finalize()))
 }
@@ -1900,7 +2027,10 @@ fn hash_payload_only(
     config: &RuntimeStreamConfig,
     payload: &Value,
     observed_at: chrono::DateTime<Utc>,
+    simulation_run_id_hint: Option<&str>,
 ) -> String {
+    let (is_simulated, simulation_run_id) =
+        effective_simulation_metadata(payload, simulation_run_id_hint);
     let mut hasher = Sha256::new();
     hasher.update(config.source_id.as_bytes());
     hasher.update(b"|");
@@ -1909,6 +2039,10 @@ fn hash_payload_only(
     hasher.update(config.event_type.as_bytes());
     hasher.update(b"|");
     hasher.update(observed_at.timestamp_millis().to_string().as_bytes());
+    hasher.update(b"|");
+    if is_simulated {
+        hasher.update(simulation_run_id.as_deref().unwrap_or_default().as_bytes());
+    }
     hasher.update(b"|");
     hasher.update(payload.to_string().as_bytes());
     hex::encode(hasher.finalize())
@@ -2025,8 +2159,336 @@ mod tests {
             }
         });
 
-        let key_a = build_dedup_key(&config, &parsed, &payload_a).expect("key");
-        let key_b = build_dedup_key(&config, &parsed, &payload_b).expect("key");
+        let key_a = build_dedup_key(&config, &parsed, &payload_a, None).expect("key");
+        let key_b = build_dedup_key(&config, &parsed, &payload_b, None).expect("key");
         assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn build_dedup_key_provider_event_ids_are_scoped_by_simulation_run() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "pyth-eth-mainnet".to_string(),
+            source_type: "oracle_api".to_string(),
+            source_name: "Pyth".to_string(),
+            connection_config: json!({"endpoint": "http://example.invalid"}),
+            operating_mode_profile: "test".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "rpc_logs".to_string(),
+            stream_name: "usdc-usd-feed".to_string(),
+            subscription_key: None,
+            event_type: "oracle_update".to_string(),
+            parser_name: "pyth_price_feed_v1".to_string(),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSD".to_string()),
+            filter_config: json!({}),
+            poll_interval_ms: Some(5000),
+            payload_ts_path: Some("$.observed_at".to_string()),
+            payload_ts_unit: "ms".to_string(),
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+        let parsed = ParsedFeedEvent {
+            event_type: "oracle_update".to_string(),
+            event_id: Some("oracle-event-1".to_string()),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSD".to_string()),
+            price: Some(0.88),
+            chain_id: Some(1),
+            block_number: Some(123),
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: Some(Utc.timestamp_opt(1_678_521_640, 0).single().unwrap()),
+            observed_at: Utc.timestamp_opt(1_678_521_640, 0).single().unwrap(),
+            normalized_fields: json!({}),
+        };
+        let payload_a = json!({"simulation": {"is_simulated": true, "run_id": "run-a"}});
+        let payload_b = json!({"simulation": {"is_simulated": true, "run_id": "run-b"}});
+
+        let key_a = build_dedup_key(&config, &parsed, &payload_a, None).expect("key");
+        let key_b = build_dedup_key(&config, &parsed, &payload_b, None).expect("key");
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn hash_payload_only_is_scoped_by_simulation_run() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "custom-source".to_string(),
+            source_type: "custom_api".to_string(),
+            source_name: "Custom".to_string(),
+            connection_config: json!({"endpoint": "http://example.invalid"}),
+            operating_mode_profile: "test".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "http_poll".to_string(),
+            stream_name: "custom-stream".to_string(),
+            subscription_key: None,
+            event_type: "custom_event".to_string(),
+            parser_name: "custom".to_string(),
+            market_key: None,
+            asset_pair: None,
+            filter_config: json!({}),
+            poll_interval_ms: Some(5000),
+            payload_ts_path: None,
+            payload_ts_unit: "ms".to_string(),
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+        let observed_at = Utc.timestamp_opt(1_678_521_640, 0).single().unwrap();
+        let payload_a = json!({"simulation": {"is_simulated": true, "run_id": "run-a"}});
+        let payload_b = json!({"simulation": {"is_simulated": true, "run_id": "run-b"}});
+
+        let key_a = hash_payload_only(&config, &payload_a, observed_at, None);
+        let key_b = hash_payload_only(&config, &payload_b, observed_at, None);
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn build_dedup_key_uses_endpoint_simulation_run_hint() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "pyth-eth-mainnet".to_string(),
+            source_type: "oracle_api".to_string(),
+            source_name: "Pyth".to_string(),
+            connection_config: json!({"endpoint": "http://example.invalid"}),
+            operating_mode_profile: "test".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "rpc_logs".to_string(),
+            stream_name: "usdc-usd-feed".to_string(),
+            subscription_key: None,
+            event_type: "oracle_update".to_string(),
+            parser_name: "pyth_price_feed_v1".to_string(),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSD".to_string()),
+            filter_config: json!({}),
+            poll_interval_ms: Some(5000),
+            payload_ts_path: Some("$.observed_at".to_string()),
+            payload_ts_unit: "ms".to_string(),
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+        let parsed = ParsedFeedEvent {
+            event_type: "oracle_update".to_string(),
+            event_id: Some("oracle-event-1".to_string()),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSD".to_string()),
+            price: Some(0.88),
+            chain_id: Some(1),
+            block_number: Some(123),
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: Some(Utc.timestamp_opt(1_678_521_640, 0).single().unwrap()),
+            observed_at: Utc.timestamp_opt(1_678_521_640, 0).single().unwrap(),
+            normalized_fields: json!({}),
+        };
+        let payload = json!({"price": "0.88"});
+
+        let key_a = build_dedup_key(&config, &parsed, &payload, Some("run-a")).expect("key");
+        let key_b = build_dedup_key(&config, &parsed, &payload, Some("run-b")).expect("key");
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn build_dedup_key_uses_payload_transaction_hash_when_parser_does_not_surface_it() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "pyth-eth-mainnet".to_string(),
+            source_type: "oracle_api".to_string(),
+            source_name: "Pyth".to_string(),
+            connection_config: json!({"endpoint": "http://example.invalid"}),
+            operating_mode_profile: "test".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "rpc_logs".to_string(),
+            stream_name: "usdc-usd-feed".to_string(),
+            subscription_key: None,
+            event_type: "oracle_update".to_string(),
+            parser_name: "pyth_price_feed_v1".to_string(),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSD".to_string()),
+            filter_config: json!({}),
+            poll_interval_ms: Some(5000),
+            payload_ts_path: Some("$.observed_at".to_string()),
+            payload_ts_unit: "ms".to_string(),
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+        let parsed = ParsedFeedEvent {
+            event_type: "oracle_update".to_string(),
+            event_id: Some("oracle-event-1".to_string()),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSD".to_string()),
+            price: Some(0.88),
+            chain_id: Some(1),
+            block_number: Some(123),
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: Some(Utc.timestamp_opt(1_678_521_640, 0).single().unwrap()),
+            observed_at: Utc.timestamp_opt(1_678_521_640, 0).single().unwrap(),
+            normalized_fields: json!({}),
+        };
+        let payload = json!({
+            "transactionHash": "0xabc123",
+            "logIndex": "0x7",
+        });
+
+        let key = build_dedup_key(&config, &parsed, &payload, None).expect("key");
+        assert!(key.contains("0xabc123"));
+        assert!(key.contains(":7:"));
+    }
+
+    #[test]
+    fn hash_payload_only_uses_endpoint_simulation_run_hint() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "custom-source".to_string(),
+            source_type: "custom_api".to_string(),
+            source_name: "Custom".to_string(),
+            connection_config: json!({"endpoint": "http://example.invalid"}),
+            operating_mode_profile: "test".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "http_poll".to_string(),
+            stream_name: "custom-stream".to_string(),
+            subscription_key: None,
+            event_type: "custom_event".to_string(),
+            parser_name: "custom".to_string(),
+            market_key: None,
+            asset_pair: None,
+            filter_config: json!({}),
+            poll_interval_ms: Some(5000),
+            payload_ts_path: None,
+            payload_ts_unit: "ms".to_string(),
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+        let observed_at = Utc.timestamp_opt(1_678_521_640, 0).single().unwrap();
+        let payload = json!({"raw": true});
+
+        let key_a = hash_payload_only(&config, &payload, observed_at, Some("run-a"));
+        let key_b = hash_payload_only(&config, &payload, observed_at, Some("run-b"));
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn fallback_usdt_usd_rate_assumes_parity_for_non_usdt_markets() {
+        let parsed = ParsedFeedEvent {
+            event_type: "quote".to_string(),
+            event_id: None,
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSDT".to_string()),
+            price: Some(0.88),
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: None,
+            observed_at: Utc.timestamp_opt(1_678_521_640, 0).single().unwrap(),
+            normalized_fields: json!({}),
+        };
+
+        assert_eq!(fallback_usdt_usd_rate(&parsed, Some("USDT")), Some(1.0));
+    }
+
+    #[test]
+    fn fallback_usdt_usd_rate_does_not_mask_usdt_market() {
+        let parsed = ParsedFeedEvent {
+            event_type: "quote".to_string(),
+            event_id: None,
+            market_key: Some("USDT/USD".to_string()),
+            asset_pair: Some("USDTUSDC".to_string()),
+            price: Some(0.88),
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: None,
+            observed_at: Utc.timestamp_opt(1_678_521_640, 0).single().unwrap(),
+            normalized_fields: json!({}),
+        };
+
+        assert_eq!(fallback_usdt_usd_rate(&parsed, Some("USDT")), None);
+    }
+
+    #[test]
+    fn enrich_payload_for_unified_preserves_simulation_metadata_from_endpoint_hint() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "binance-global".to_string(),
+            source_type: "cex_api".to_string(),
+            source_name: "Binance".to_string(),
+            connection_config: json!({"endpoint": "http://example.invalid"}),
+            operating_mode_profile: "test".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "websocket".to_string(),
+            stream_name: "ticker-usdc-usd".to_string(),
+            subscription_key: Some("usdcusdt@miniticker".to_string()),
+            event_type: "quote".to_string(),
+            parser_name: "binance_miniticker_v1".to_string(),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSDT".to_string()),
+            filter_config: json!({}),
+            payload_ts_path: Some("$.E".to_string()),
+            payload_ts_unit: "ms".to_string(),
+            poll_interval_ms: Some(200),
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+        let parsed = ParsedFeedEvent {
+            event_type: "quote".to_string(),
+            event_id: Some("quote-1".to_string()),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSDT".to_string()),
+            price: Some(0.95),
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: Some(Utc.timestamp_opt(1_678_521_760, 0).single().unwrap()),
+            observed_at: Utc.timestamp_opt(1_678_521_760, 0).single().unwrap(),
+            normalized_fields: json!({}),
+        };
+        let payload = json!({
+            "e": "24hrMiniTicker",
+            "E": 1678521760000_i64,
+            "s": "USDCUSDT",
+            "c": "0.950000"
+        });
+
+        let enriched = enrich_payload_for_unified(
+            &config,
+            &payload,
+            &parsed,
+            Some("dedup-1"),
+            true,
+            RawLandingStatus::Deferred,
+            None,
+            true,
+            Some("run-test-1"),
+        );
+
+        assert_eq!(enriched.get("is_simulated").and_then(Value::as_bool), Some(true));
+        let simulation = enriched
+            .get("simulation")
+            .and_then(Value::as_object)
+            .expect("simulation metadata");
+        assert_eq!(
+            simulation.get("is_simulated").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            simulation.get("run_id").and_then(Value::as_str),
+            Some("run-test-1")
+        );
+        assert_eq!(
+            simulation
+                .get("simulation_run_id")
+                .and_then(Value::as_str),
+            Some("run-test-1")
+        );
     }
 }
