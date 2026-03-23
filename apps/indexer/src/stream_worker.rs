@@ -29,6 +29,7 @@ const DEFAULT_RPC_LOGS_POLL_INTERVAL_MS: u64 = 2_000;
 const DEFAULT_RPC_STATE_POLL_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_HTTP_POLL_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_RAW_LANDING_TIMEOUT_MS: u64 = 150;
+const TEST_MODE_MOCK_POLL_INTERVAL_MS: u64 = 200;
 const MIN_POLL_INTERVAL_MS: u64 = 200;
 const MAX_POLL_INTERVAL_MS: u64 = 60_000;
 
@@ -144,6 +145,31 @@ fn resolve_poll_interval_duration(configured_ms: Option<u64>, default_ms: u64) -
         .unwrap_or(default_ms)
         .clamp(MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS);
     Duration::from_millis(resolved_ms)
+}
+
+fn resolve_runtime_poll_interval_duration(
+    config: &RuntimeStreamConfig,
+    endpoint_context: &EndpointLogContext,
+    default_ms: u64,
+) -> Duration {
+    let configured_ms =
+        if config.operating_mode_profile == "test" && endpoint_context.is_mock_endpoint {
+            Some(
+                config
+                    .poll_interval_ms
+                    .unwrap_or(default_ms)
+                    .min(TEST_MODE_MOCK_POLL_INTERVAL_MS),
+            )
+        } else {
+            config.poll_interval_ms
+        };
+    let effective_default_ms =
+        if config.operating_mode_profile == "test" && endpoint_context.is_mock_endpoint {
+            default_ms.min(TEST_MODE_MOCK_POLL_INTERVAL_MS)
+        } else {
+            default_ms
+        };
+    resolve_poll_interval_duration(configured_ms, effective_default_ms)
 }
 
 fn simulation_metadata_from_payload(payload: &Value) -> (bool, Option<String>) {
@@ -326,9 +352,12 @@ async fn run_rpc_logs_loop(
     fx_cache: &mut FxRateCache,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
-    let poll_interval =
-        resolve_poll_interval_duration(config.poll_interval_ms, DEFAULT_RPC_LOGS_POLL_INTERVAL_MS);
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
+    let poll_interval = resolve_runtime_poll_interval_duration(
+        config,
+        &endpoint_log_context,
+        DEFAULT_RPC_LOGS_POLL_INTERVAL_MS,
+    );
     let mut connector =
         RpcLogsConnector::new(endpoint, config.filter_config.clone(), poll_interval);
     connector.connect().await?;
@@ -370,13 +399,17 @@ async fn run_http_poll_loop(
     fx_cache: &mut FxRateCache,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
-    let poll_interval =
-        resolve_poll_interval_duration(config.poll_interval_ms, DEFAULT_HTTP_POLL_INTERVAL_MS);
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
+    let poll_interval = resolve_runtime_poll_interval_duration(
+        config,
+        &endpoint_log_context,
+        DEFAULT_HTTP_POLL_INTERVAL_MS,
+    );
     let mut connector = HttpPollConnector::new(endpoint, poll_interval);
     connector.connect().await?;
     log_test_mode_connector_connected(config, &endpoint_log_context);
     let mut test_mode_log_state = TestModeLogState::default();
+    let mut fetch_due = true;
 
     loop {
         tokio::select! {
@@ -385,30 +418,36 @@ async fn run_http_poll_loop(
                     return Ok(());
                 }
             }
-            _ = tokio::time::sleep(poll_interval) => {
-                match connector.fetch_payload(connector.endpoint()).await {
-                    Ok(Some(payload)) => {
-                        process_http_poll_payload(
-                            config,
-                            repo,
-                            raw_repo,
-                            stream,
-                            payload,
-                            fx_cache,
-                            &mut test_mode_log_state,
-                        ).await?;
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        common::log_error!(
-                            warn,
-                            error,
-                            "http_poll connector returned error",
-                            stream_config_id = %config.stream_config_id,
-                            source_id = %config.source_id,
-                            endpoint = %connector.endpoint()
-                        );
-                    }
+            _ = tokio::time::sleep(poll_interval), if !fetch_due => {
+                fetch_due = true;
+            }
+        }
+
+        if fetch_due {
+            fetch_due = false;
+            match connector.fetch_payload(connector.endpoint()).await {
+                Ok(Some(payload)) => {
+                    process_http_poll_payload(
+                        config,
+                        repo,
+                        raw_repo,
+                        stream,
+                        payload,
+                        fx_cache,
+                        &mut test_mode_log_state,
+                    )
+                    .await?;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    common::log_error!(
+                        warn,
+                        error,
+                        "http_poll connector returned error",
+                        stream_config_id = %config.stream_config_id,
+                        source_id = %config.source_id,
+                        endpoint = %connector.endpoint()
+                    );
                 }
             }
         }
@@ -424,9 +463,12 @@ async fn run_rpc_state_loop(
     fx_cache: &mut FxRateCache,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
-    let poll_interval =
-        resolve_poll_interval_duration(config.poll_interval_ms, DEFAULT_RPC_STATE_POLL_INTERVAL_MS);
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
+    let poll_interval = resolve_runtime_poll_interval_duration(
+        config,
+        &endpoint_log_context,
+        DEFAULT_RPC_STATE_POLL_INTERVAL_MS,
+    );
     let mut connector =
         RpcStateConnector::new(endpoint, config.filter_config.clone(), poll_interval);
     connector.connect().await?;

@@ -1313,6 +1313,14 @@ fn log_test_mode_decision(
         weighted_median_price = outcome.snapshot.weighted_median_price,
         confidence_total,
         confidence_threshold = policy.min_confidence_to_fire,
+        source_count = outcome.snapshot.source_count,
+        eligible_source_count = outcome.snapshot.eligible_source_count,
+        min_healthy_sources = policy
+            .source_filter
+            .min_healthy_sources
+            .max(policy.min_sources)
+            .max(1),
+        quorum_pct = policy.quorum_pct,
         quorum_met = outcome.snapshot.quorum_met,
         oracle_confirmed = outcome.snapshot.oracle_confirmed,
         breach_active = outcome.snapshot.breach_active,
