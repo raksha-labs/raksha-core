@@ -16,12 +16,3 @@ github_allowed_branches = ["master", "release/*"]
 
 create_oidc_provider = false
 # oidc_provider_arn     = "arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com"
-
-# Required for the production-like indexer in stage. Create a secret such as:
-#   raksha/stage/rpc
-# with JSON keys ETH_WS_URL and BASE_WS_URL, then reference the ECS valueFrom
-# strings below.
-rpc_ws_url_secret_arns = {
-  ETH_WS_URL  = "replace-with-stage-rpc-secret-arn:ETH_WS_URL::"
-  BASE_WS_URL = "replace-with-stage-rpc-secret-arn:BASE_WS_URL::"
-}

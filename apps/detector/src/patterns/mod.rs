@@ -216,12 +216,17 @@ impl PatternRegistry {
             log_test_mode_event_received(event, simulation_run_id.as_deref());
         }
 
-        let raw_persisted = event
+        let ingest_persisted = event
             .payload
-            .get("raw_persisted")
+            .get("ingest_persisted")
             .and_then(|value| value.as_bool())
+            .or_else(|| {
+                event.payload
+                    .get("raw_persisted")
+                    .and_then(|value| value.as_bool())
+            })
             .unwrap_or(false);
-        if !raw_persisted {
+        if !ingest_persisted {
             if let Err(err) = repo.insert_raw_event(event).await {
                 common::log_error!(
                     warn,

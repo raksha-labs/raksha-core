@@ -31,7 +31,6 @@ From `raksha-core/infra`:
 
 ```bash
 cp .env.example .env
-# set ETH_WS_URL / ETH_WS_URL_BACKUP
 
 docker compose up -d postgres postgres_raw redis
 docker compose up --build indexer detector orchestrator finality
@@ -62,5 +61,6 @@ and environment stacks expose `raw_database_url_secret_arn`.
 
 ## Notes
 
+- The indexer is DB-driven only. Configure sources and streams in the catalog tables or via the control plane; it no longer accepts RPC/bootstrap settings from infra env files.
 - Primary ingestion landing for the rewrite is `raksha_raw.raw_ingest.*` plus `ingest_operational_events` in core DB.
 - See `infra/sql/README.md` for bootstrap details.

@@ -80,6 +80,7 @@ pub struct RuntimeStreamConfig {
 #[derive(Debug, Clone, Copy)]
 enum RawLandingStatus {
     Persisted,
+    Deferred,
     Disabled,
     TimedOut,
     Failed,
@@ -89,6 +90,7 @@ impl RawLandingStatus {
     fn as_str(self) -> &'static str {
         match self {
             Self::Persisted => "persisted",
+            Self::Deferred => "deferred",
             Self::Disabled => "disabled",
             Self::TimedOut => "timed_out",
             Self::Failed => "failed",
@@ -563,6 +565,70 @@ async fn persist_raw_envelope(
     }
 }
 
+fn defer_raw_envelope_persist(raw_repo: Option<&PostgresRawRepository>, envelope: &SourceEnvelopeV1) {
+    let Some(writer) = raw_repo.cloned() else {
+        return;
+    };
+
+    let envelope = envelope.clone();
+    let timeout_ms = raw_landing_timeout_ms();
+    tokio::spawn(async move {
+        match tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            writer.write_source_envelope(&envelope),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                common::log_error!(
+                    warn,
+                    error,
+                    "background raw landing failed",
+                    source_id = %envelope.source_id,
+                    stream_id = %envelope.stream_id,
+                    event_type = %envelope.event_type,
+                    envelope_id = %envelope.envelope_id
+                );
+            }
+            Err(_) => {
+                warn!(
+                    source_id = %envelope.source_id,
+                    stream_id = %envelope.stream_id,
+                    event_type = %envelope.event_type,
+                    envelope_id = %envelope.envelope_id,
+                    timeout_ms,
+                    "background raw landing timed out"
+                );
+            }
+        }
+    });
+}
+
+async fn start_raw_landing(
+    raw_repo: Option<&PostgresRawRepository>,
+    envelope: &SourceEnvelopeV1,
+) -> RawLandingOutcome {
+    if raw_landing_required() {
+        return persist_raw_envelope(raw_repo, envelope).await;
+    }
+
+    if raw_repo.is_some() {
+        defer_raw_envelope_persist(raw_repo, envelope);
+        return RawLandingOutcome {
+            pointer: None,
+            status: RawLandingStatus::Deferred,
+            error: None,
+        };
+    }
+
+    RawLandingOutcome {
+        pointer: None,
+        status: RawLandingStatus::Disabled,
+        error: Some("raw_repo_not_configured".to_string()),
+    }
+}
+
 async fn process_http_poll_payload(
     config: &RuntimeStreamConfig,
     repo: &PostgresRepository,
@@ -634,7 +700,7 @@ async fn process_payload(
                 is_simulated,
                 simulation_run_id.clone(),
             );
-            let raw_landing = persist_raw_envelope(raw_repo, &envelope).await;
+            let raw_landing = start_raw_landing(raw_repo, &envelope).await;
             if raw_landing_required() && !raw_landing.status.persisted() {
                 return Err(anyhow!(
                     "raw_landing_required_but_not_persisted status={} source_id={} stream_config_id={} error={}",
@@ -701,6 +767,7 @@ async fn process_payload(
                     &payload_for_storage,
                     &parsed,
                     dedup_key,
+                    inserted,
                     raw_landing.status,
                     raw_landing.error.as_deref(),
                 )
@@ -734,7 +801,7 @@ async fn process_payload(
                 is_simulated,
                 simulation_run_id: simulation_run_id.clone(),
             };
-            let raw_landing = persist_raw_envelope(raw_repo, &envelope).await;
+            let raw_landing = start_raw_landing(raw_repo, &envelope).await;
             if raw_landing_required() && !raw_landing.status.persisted() {
                 return Err(anyhow!(
                     "raw_landing_required_but_not_persisted status={} source_id={} stream_config_id={} error={}",
@@ -1373,6 +1440,7 @@ async fn fanout_unified_events(
     payload: &Value,
     parsed: &ParsedFeedEvent,
     dedup_key: Option<String>,
+    ingest_persisted: bool,
     raw_landing_status: RawLandingStatus,
     raw_landing_error: Option<&str>,
 ) -> Result<()> {
@@ -1388,6 +1456,7 @@ async fn fanout_unified_events(
             payload,
             parsed,
             dedup_key.as_deref(),
+            ingest_persisted,
             raw_landing_status,
             raw_landing_error,
         );
@@ -1416,6 +1485,7 @@ fn enrich_payload_for_unified(
     payload: &Value,
     parsed: &ParsedFeedEvent,
     dedup_key: Option<&str>,
+    ingest_persisted: bool,
     raw_landing_status: RawLandingStatus,
     raw_landing_error: Option<&str>,
 ) -> Value {
@@ -1427,6 +1497,10 @@ fn enrich_payload_for_unified(
         obj.insert(
             "raw_persisted".to_string(),
             Value::Bool(raw_landing_status.persisted()),
+        );
+        obj.insert(
+            "ingest_persisted".to_string(),
+            Value::Bool(ingest_persisted),
         );
         obj.insert(
             "raw_landing_status".to_string(),

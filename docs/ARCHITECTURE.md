@@ -19,7 +19,7 @@
   - `data_sources`
   - `source_stream_configs`
   - `source_stream_tenant_targets`
-- For DB-managed stream ingestion, indexer does not use YAML/rules for stream subscription/filter setup.
+- Indexer runtime no longer supports YAML/rules or env-driven chain adapter bootstrapping. All stream ingestion starts from the catalog tables above.
 - Polling connectors (`rpc_logs`, `http_poll`) read per-stream cadence from `source_stream_configs.poll_interval_ms` (ms). Websocket streams keep this field null.
 - Effective activation for a stream worker requires:
   - source enabled (`data_sources.enabled=true`)
@@ -27,7 +27,8 @@
   - at least one enabled tenant target in `source_stream_tenant_targets`
 - Reconciliation uses:
   - `LISTEN source_stream_config_changed` for immediate reaction
-  - 30 second full resync fallback
+  - 10 minute full resync fallback when the notify listener is healthy
+  - 30 second degraded fallback when the notify listener is unavailable
 - Raw-first ordering is enforced for stream supervisor events:
   1. parse payload
   2. persist immutable raw payload in `raksha_raw.raw_ingest.*` (when `RAW_DATABASE_URL` is configured)

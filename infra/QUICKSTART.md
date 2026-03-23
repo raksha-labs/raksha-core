@@ -5,7 +5,6 @@ This guide shows you how to run raksha-core locally with Docker Compose.
 ## Prerequisites
 
 - Docker Desktop installed and running
-- An Ethereum RPC endpoint (Alchemy, Infura, or Ankr)
 
 ## Step 1: Configure Environment
 
@@ -16,18 +15,9 @@ cd raksha-core/infra
 cp .env.example .env
 ```
 
-Edit `.env` and add your **actual RPC endpoints**:
+Edit `.env` if you want to change detector toggles or logging:
 
 ```bash
-# Required: Ethereum mainnet WebSocket endpoints
-ETH_WS_URL=wss://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY
-ETH_WS_URL_BACKUP=wss://mainnet.infura.io/ws/v3/YOUR_INFURA_KEY
-
-# Optional: Adjust ingestion settings
-INGESTION_POLL_INTERVAL_SECS=5
-INGESTION_MAX_RETRIES=20
-INGESTION_RETRY_BACKOFF_MS=2000
-
 # Optional: Logging
 RUST_LOG=info
 # For debug: RUST_LOG=debug,hyper=info,tokio=info
@@ -72,12 +62,12 @@ docker compose exec redis redis-cli XINFO STREAM raksha:detections
 
 ## What You Should See
 
-If configured correctly with real RPC endpoints, you'll see:
+If configured correctly, you'll see:
 
-1. **Indexer**: Connecting to Ethereum, processing blocks
+1. **Indexer**: Loading active stream configs from Postgres and starting workers
    ```
-   INFO indexer: Connected to Ethereum mainnet
-   INFO indexer: Processing block 19234567
+   INFO indexer: db-driven stream supervisor started
+   INFO indexer: stream worker started by reconcile
    ```
 
 2. **Detector**: Processing events, running pattern detection
@@ -96,16 +86,9 @@ If configured correctly with real RPC endpoints, you'll see:
    INFO finality: Finalized block 19234550
    ```
 
-## Getting Actual Data
+## Getting Data
 
-### Option 1: Real Ethereum Data (Recommended for Testing)
-
-Configure `.env` with your RPC endpoints as shown above. The indexer will:
-- Connect to Ethereum mainnet
-- Monitor for flash loan events
-- Process transactions in real-time
-
-### Option 2: Simulated Data (For Development)
+### Option 1: Simulated Data (Recommended for Local Testing)
 
 Use simlab to generate test scenarios:
 
@@ -118,24 +101,16 @@ docker compose run --rm simlab run batch --scenario flash_loan_attack
 docker compose run --rm simlab run batch --scenario usdc_depeg
 ```
 
-### Option 3: Historical Data Replay
+### Option 2: DB-Managed Live Streams
 
-Point to a local archive node:
-```bash
-ETH_WS_URL=wss://your-local-archive-node:8546
-```
+Create or enable sources and stream configs in the catalog tables, then point the relevant connectors at their real upstream endpoints through per-source connection config. The indexer will pick them up automatically through `LISTEN source_stream_config_changed` plus periodic reconcile.
 
 ## Common Issues & Solutions
 
-### "Connection refused" to RPC endpoint
-- Check your API key is valid
-- Verify the endpoint URL format (must start with `wss://`)
-- Test the endpoint: `wscat -c "wss://eth-mainnet.g.alchemy.com/v2/YOUR_KEY"`
-
 ### No events appearing
-- Check `RUST_LOG=debug` to see connection attempts
+- Check `RUST_LOG=debug` to see worker startup and stream activity
 - Verify patterns are enabled: `SELECT * FROM patterns WHERE enabled=true;`
-- Check data sources: `SELECT * FROM tenant_data_sources WHERE tenant_id='glider';`
+- Check data sources and streams: `SELECT * FROM catalog.data_sources;` and `SELECT * FROM catalog.source_stream_configs;`
 
 ### Database not initialized
 - First startup auto-loads schema from `/docker-entrypoint-initdb.d/`

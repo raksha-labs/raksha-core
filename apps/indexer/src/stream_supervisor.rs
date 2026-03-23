@@ -19,9 +19,20 @@ use url::Url;
 
 use crate::stream_worker::{run_stream_worker, RuntimeStreamConfig};
 
-const DEFAULT_RECONCILE_INTERVAL_SECS: u64 = 30;
+// Keep notify-driven reloads fast, but avoid unnecessary full reconciles when
+// stream configs are mostly stable. If LISTEN/NOTIFY is unavailable, fall back
+// to a shorter resync so ephemeral simulation streams are still picked up.
+const NOTIFY_CONNECTED_RECONCILE_INTERVAL_SECS: u64 = 600;
+const NOTIFY_DEGRADED_RECONCILE_INTERVAL_SECS: u64 = 30;
 const DEFAULT_PURGE_INTERVAL_SECS: u64 = 15;
 const DEFAULT_RETENTION_SECONDS: i64 = 300;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NotifySignal {
+    Connected,
+    Changed,
+    Disconnected,
+}
 
 struct WorkerHandle {
     config_hash: String,
@@ -54,8 +65,9 @@ pub async fn run_stream_supervisor(
     };
 
     let mut workers: HashMap<String, WorkerHandle> = HashMap::new();
+    let mut listener_connected = false;
     let mut notify_rx = spawn_config_notify_listener(database_url);
-    let mut reconcile_tick = interval(Duration::from_secs(DEFAULT_RECONCILE_INTERVAL_SECS));
+    let mut reconcile_tick = build_reconcile_tick(listener_connected);
     let mut purge_tick = interval(Duration::from_secs(DEFAULT_PURGE_INTERVAL_SECS));
 
     reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await?;
@@ -68,8 +80,42 @@ pub async fn run_stream_supervisor(
                 }
             }
             signal = notify_rx.recv() => {
-                if signal.is_none() {
-                    warn!("stream config notify listener stopped; continuing with periodic reconcile only");
+                let mut should_reconcile = false;
+                match signal {
+                    Some(NotifySignal::Connected) => {
+                        if !listener_connected {
+                            listener_connected = true;
+                            reconcile_tick = build_reconcile_tick(listener_connected);
+                            info!(
+                                reconcile_interval_secs = NOTIFY_CONNECTED_RECONCILE_INTERVAL_SECS,
+                                "stream config notify listener active; using long periodic fallback"
+                            );
+                        }
+                        should_reconcile = true;
+                    }
+                    Some(NotifySignal::Changed) => {
+                        should_reconcile = true;
+                    }
+                    Some(NotifySignal::Disconnected) => {
+                        if listener_connected {
+                            listener_connected = false;
+                            reconcile_tick = build_reconcile_tick(listener_connected);
+                            warn!(
+                                reconcile_interval_secs = NOTIFY_DEGRADED_RECONCILE_INTERVAL_SECS,
+                                "stream config notify listener unavailable; using degraded periodic fallback"
+                            );
+                        }
+                    }
+                    None => {
+                        if listener_connected {
+                            listener_connected = false;
+                            reconcile_tick = build_reconcile_tick(listener_connected);
+                        }
+                        warn!("stream config notify listener stopped; continuing with degraded periodic reconcile");
+                    }
+                }
+                if !should_reconcile {
+                    continue;
                 }
                 if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
                     common::log_error!(warn, error, "stream supervisor notify-driven reconcile failed");
@@ -87,6 +133,15 @@ pub async fn run_stream_supervisor(
             }
         }
     }
+}
+
+fn build_reconcile_tick(listener_connected: bool) -> tokio::time::Interval {
+    let reconcile_secs = if listener_connected {
+        NOTIFY_CONNECTED_RECONCILE_INTERVAL_SECS
+    } else {
+        NOTIFY_DEGRADED_RECONCILE_INTERVAL_SECS
+    };
+    interval(Duration::from_secs(reconcile_secs))
 }
 
 async fn reconcile(
@@ -439,7 +494,7 @@ fn log_test_mode_stream_selection(cfg: &RuntimeStreamConfig) {
     }
 }
 
-fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
+fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<NotifySignal> {
     let (tx, rx) = mpsc::channel(32);
     tokio::spawn(async move {
         loop {
@@ -480,6 +535,7 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
                 continue;
             }
 
+            let _ = tx.send(NotifySignal::Connected).await;
             info!("stream config listener connected (LISTEN source_stream_config_changed)");
 
             loop {
@@ -487,7 +543,7 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
                 match message {
                     Some(Ok(AsyncMessage::Notification(notification))) => {
                         if notification.channel() == "source_stream_config_changed"
-                            && tx.send(()).await.is_err()
+                            && tx.send(NotifySignal::Changed).await.is_err()
                         {
                             return;
                         }
@@ -499,9 +555,11 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
                             error,
                             "stream config listener connection error; reconnecting"
                         );
+                        let _ = tx.send(NotifySignal::Disconnected).await;
                         break;
                     }
                     None => {
+                        let _ = tx.send(NotifySignal::Disconnected).await;
                         warn!("stream config listener connection closed; reconnecting");
                         break;
                     }

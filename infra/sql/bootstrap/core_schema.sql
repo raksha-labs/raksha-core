@@ -19,7 +19,7 @@
 --                 + rule_execution_audit / rule_runtime_health (Core writes, Workbench reads)
 --                 + rule_tests (Workbench authors, Core replays)
 --   detection — detections, alerts, incidents, delivery, usage
---   ingest    — indexer state, event pipeline, dead-letter queue
+--   ingest    — operational ingest support, dead-letter queue
 --   ml        — feature vectors
 --   workbench — simulation lineage row-map
 --   history   — case intelligence, replay catalog (kept at end)
@@ -1302,78 +1302,15 @@ CREATE INDEX IF NOT EXISTS idx_usage_events_tenant_recorded
     ON detection.usage_events (tenant_id, recorded_at DESC);
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 4) Indexer Durable State + Dead Letter Queue  [ingest schema]
+-- 4) Ingest Runtime Support + Dead Letter Queue  [ingest schema]
 -- ─────────────────────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS ingest.indexer_state (
-    chain                  TEXT PRIMARY KEY,
-    last_indexed_block     BIGINT NOT NULL,
-    last_block_hash        TEXT NOT NULL,
-    last_block_timestamp   TIMESTAMPTZ,
-    processed_events_count BIGINT NOT NULL DEFAULT 0,
-    updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS ingest.processed_events (
-    event_id      UUID PRIMARY KEY,
-    tx_hash       TEXT NOT NULL,
-    block_number  BIGINT NOT NULL,
-    block_hash    TEXT NOT NULL,
-    chain         TEXT NOT NULL,
-    event_key     TEXT,
-    processed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    reverted      BOOLEAN NOT NULL DEFAULT FALSE,
-    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
-    simulation_run_id  TEXT,
-    UNIQUE (tx_hash, block_number, chain)
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_events_event_key
-    ON ingest.processed_events (event_key);
-CREATE INDEX IF NOT EXISTS idx_processed_events_chain_block
-    ON ingest.processed_events (chain, block_number);
-CREATE INDEX IF NOT EXISTS idx_processed_events_simulation_run
-    ON ingest.processed_events (simulation_run_id, processed_at DESC)
-    WHERE is_simulated;
-
-CREATE TABLE IF NOT EXISTS ingest.normalized_events (
-    event_key              TEXT PRIMARY KEY,
-    event_id               UUID NOT NULL,
-    chain                  TEXT NOT NULL,
-    chain_slug             TEXT NOT NULL,
-    chain_id               BIGINT,
-    protocol               TEXT NOT NULL,
-    protocol_category      TEXT NOT NULL,
-    event_type             TEXT NOT NULL CHECK (event_type IN ('oracle_update', 'flash_loan_candidate')),
-    tx_hash                TEXT NOT NULL,
-    block_number           BIGINT NOT NULL,
-    block_hash             TEXT,
-    tx_index               BIGINT,
-    log_index              BIGINT,
-    status                 TEXT NOT NULL,
-    lifecycle_state        TEXT NOT NULL,
-    requires_confirmation  BOOLEAN NOT NULL,
-    confirmation_depth     BIGINT NOT NULL,
-    observed_at            TIMESTAMPTZ NOT NULL,
-    reverted               BOOLEAN NOT NULL DEFAULT FALSE,
-    payload                JSONB NOT NULL,
-    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
-    simulation_run_id  TEXT,
-    created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_normalized_events_chain_block
-    ON ingest.normalized_events (chain_slug, block_number);
-CREATE INDEX IF NOT EXISTS idx_normalized_events_tx_hash
-    ON ingest.normalized_events (tx_hash);
-CREATE INDEX IF NOT EXISTS idx_normalized_events_observed_at
-    ON ingest.normalized_events (observed_at);
-CREATE INDEX IF NOT EXISTS idx_normalized_events_reverted
-    ON ingest.normalized_events (reverted);
-CREATE INDEX IF NOT EXISTS idx_normalized_events_simulation_run
-    ON ingest.normalized_events (simulation_run_id, observed_at DESC)
-    WHERE is_simulated;
+-- Legacy pre-rewrite event persistence tables are removed as part of the
+-- DB-driven indexer cutover. Keep explicit drops here so existing local/dev
+-- databases converge on the current runtime shape during bootstrap.
+DROP TABLE IF EXISTS ingest.normalized_events;
+DROP TABLE IF EXISTS ingest.processed_events;
+DROP TABLE IF EXISTS ingest.indexer_state;
 
 CREATE TABLE IF NOT EXISTS ingest.dead_letter_queue (
     id               TEXT PRIMARY KEY,
