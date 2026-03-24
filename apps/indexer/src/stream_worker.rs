@@ -229,6 +229,12 @@ fn effective_simulation_metadata(
     (is_simulated || resolved_run_id.is_some(), resolved_run_id)
 }
 
+fn is_static_worker_config_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("rpc_state connector missing calls configuration")
+        || message.contains("unsupported_connector_mode:")
+}
+
 pub async fn run_stream_worker(
     config: RuntimeStreamConfig,
     repo: PostgresRepository,
@@ -307,6 +313,16 @@ pub async fn run_stream_worker(
         }
 
         if let Err(error) = result {
+            if is_static_worker_config_error(&error) {
+                common::log_error!(
+                    warn,
+                    error,
+                    "stream worker configuration invalid; waiting for catalog reload",
+                    stream_config_id = %config.stream_config_id,
+                    source_id = %config.source_id,
+                );
+                break;
+            }
             common::log_error!(
                 warn,
                 error,
