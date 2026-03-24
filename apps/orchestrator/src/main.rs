@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
             }
 
             if is_test_mode_detection(&detection) {
-                log_test_mode_detection_received(&detection);
+                log_sim_detection_received(&detection);
             }
 
             let alert = alert_from_detection(&detection);
@@ -337,36 +337,84 @@ fn is_test_mode_alert(alert: &AlertEvent) -> bool {
     alert.is_simulated || alert.simulation_run_id.is_some()
 }
 
-fn log_test_mode_detection_received(detection: &DetectionResult) {
+fn log_sim_detection_received(detection: &DetectionResult) {
     info!(
         pipeline_mode = "test",
         component = "orchestrator",
+        stage = "detection.received",
         detection_id = %detection.detection_id,
         pattern_id = %detection.pattern_id,
         tenant_id = detection.tenant_id.as_deref(),
+        chain_slug = %detection.chain_slug,
+        protocol = %detection.protocol,
         event_key = detection.event_key.as_deref(),
         subject_key = detection.subject_key.as_deref(),
         severity = ?detection.severity,
+        transition = ?detection.incident_transition,
         lifecycle_state = ?detection.lifecycle_state,
         simulation_run_id = detection.simulation_run_id.as_deref(),
-        "test-mode detection received by orchestrator"
+        "sim detection received by orchestrator"
     );
 }
 
-fn log_test_mode_alert_state(message: &'static str, alert: &AlertEvent) {
+fn log_sim_alert_dispatching(alert: &AlertEvent) {
     info!(
         pipeline_mode = "test",
         component = "orchestrator",
+        stage = "alert.dispatching",
         alert_id = %alert.alert_id,
         incident_id = alert.incident_id.as_deref(),
         tenant_id = alert.tenant_id.as_deref(),
         pattern_id = %alert.pattern_id,
+        chain_slug = %alert.chain_slug,
+        protocol = %alert.protocol,
         event_key = alert.event_key.as_deref(),
         subject_key = alert.subject_key.as_deref(),
         severity = ?alert.severity,
         lifecycle_state = ?alert.lifecycle_state,
         simulation_run_id = alert.simulation_run_id.as_deref(),
-        "{message}"
+        "sim alert dispatching to notifier-gateway"
+    );
+}
+
+fn log_sim_alert_suppressed(alert: &AlertEvent) {
+    info!(
+        pipeline_mode = "test",
+        component = "orchestrator",
+        stage = "alert.suppressed",
+        suppression_reason = "monthly_quota_exceeded",
+        alert_id = %alert.alert_id,
+        incident_id = alert.incident_id.as_deref(),
+        tenant_id = alert.tenant_id.as_deref(),
+        pattern_id = %alert.pattern_id,
+        chain_slug = %alert.chain_slug,
+        protocol = %alert.protocol,
+        event_key = alert.event_key.as_deref(),
+        subject_key = alert.subject_key.as_deref(),
+        severity = ?alert.severity,
+        lifecycle_state = ?alert.lifecycle_state,
+        simulation_run_id = alert.simulation_run_id.as_deref(),
+        "sim alert suppressed before notifier dispatch"
+    );
+}
+
+fn log_sim_alert_persisted(alert: &AlertEvent) {
+    info!(
+        pipeline_mode = "test",
+        component = "orchestrator",
+        stage = "alert.persisted",
+        alert_id = %alert.alert_id,
+        incident_id = alert.incident_id.as_deref(),
+        tenant_id = alert.tenant_id.as_deref(),
+        pattern_id = %alert.pattern_id,
+        chain_slug = %alert.chain_slug,
+        protocol = %alert.protocol,
+        event_key = alert.event_key.as_deref(),
+        subject_key = alert.subject_key.as_deref(),
+        severity = ?alert.severity,
+        lifecycle_state = ?alert.lifecycle_state,
+        simulation_run_id = alert.simulation_run_id.as_deref(),
+        "sim alert persisted to db and published to stream"
     );
 }
 
@@ -663,7 +711,7 @@ async fn dispatch_alert(
     let is_test_mode = is_test_mode_alert(&normalized_alert);
 
     if is_test_mode {
-        log_test_mode_alert_state("dispatching test-mode alert", &normalized_alert);
+        log_sim_alert_dispatching(&normalized_alert);
     }
 
     if let Some(repo) = repository {
@@ -702,10 +750,7 @@ async fn dispatch_alert(
                     );
 
                     if is_test_mode_alert(&suppressed) {
-                        log_test_mode_alert_state(
-                            "test-mode alert suppressed before notifier dispatch",
-                            &suppressed,
-                        );
+                        log_sim_alert_suppressed(&suppressed);
                     }
 
                     persist_and_publish_alert(&suppressed, repository, stream).await;
@@ -740,13 +785,18 @@ async fn dispatch_alert(
                 info!(
                     pipeline_mode = "test",
                     component = "orchestrator",
+                    stage = "alert.dispatch_result",
                     tenant_id = %dispatch_result.tenant_id,
                     alert_id = %normalized_alert.alert_id,
+                    pattern_id = %normalized_alert.pattern_id,
+                    chain_slug = %normalized_alert.chain_slug,
+                    severity = ?normalized_alert.severity,
                     delivered = dispatch_result.delivered,
+                    channel_count = dispatch_result.resolved_channels.len(),
+                    channels = ?dispatch_result.resolved_channels,
                     reason = ?dispatch_result.reason,
-                    resolved_channels = ?dispatch_result.resolved_channels,
                     simulation_run_id = normalized_alert.simulation_run_id.as_deref(),
-                    "test-mode alert dispatch completed"
+                    "sim alert dispatch result from notifier-gateway"
                 );
             }
             normalized_alert = apply_dispatch_result_metadata(normalized_alert, &dispatch_result);
@@ -836,7 +886,7 @@ async fn persist_and_publish_alert(
         common::log_error!(warn, err, "failed to publish alert lifecycle stream event");
     }
     if is_test_mode_alert(alert) {
-        log_test_mode_alert_state("test-mode alert persisted and published", alert);
+        log_sim_alert_persisted(alert);
     }
 }
 
