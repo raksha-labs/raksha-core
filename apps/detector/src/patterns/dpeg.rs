@@ -354,6 +354,11 @@ struct DpegAlertState {
     pub trigger_floor_pct: Option<f64>,
     pub below_severity_blocks: i64,
     pub below_trigger_blocks: i64,
+    /// Highest event timestamp seen so far for this market key + replay scope.
+    /// Events arriving with a timestamp below this mark are late deliveries from
+    /// concurrent source streams and must not regress state transitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub high_water_mark: Option<DateTime<Utc>>,
 }
 
 // ─── Pattern impl ─────────────────────────────────────────────────────────────
@@ -460,6 +465,21 @@ impl DpegPattern {
             .cloned()
     }
 
+    fn accelerated_simulation_run(event: &UnifiedEvent) -> bool {
+        event
+            .payload
+            .get("simulation")
+            .and_then(Value::as_object)
+            .and_then(|simulation| simulation.get("speed_factor"))
+            .and_then(|value| match value {
+                Value::Number(number) => number.as_f64(),
+                Value::String(raw) => raw.trim().parse::<f64>().ok(),
+                _ => None,
+            })
+            .map(|speed_factor| speed_factor.is_finite() && speed_factor > 1.0)
+            .unwrap_or(false)
+    }
+
     fn classify_context(
         &self,
         policy: &DpegPolicy,
@@ -564,6 +584,8 @@ impl DetectionPattern for DpegPattern {
             return Ok(None);
         };
         let (is_simulated, simulation_run_id) = super::simulation_metadata_from_event(event);
+        let accelerated_simulation_run =
+            simulation_run_id.is_some() && Self::accelerated_simulation_run(event);
         let replay_scope = simulation_run_id
             .clone()
             .unwrap_or_else(|| "__live__".to_string());
@@ -606,16 +628,60 @@ impl DetectionPattern for DpegPattern {
             .await?
             .and_then(|v| serde_json::from_value::<DpegAlertState>(v).ok())
             .unwrap_or_default();
+
         let quotes = latest_quotes_for_time(market_quotes, evaluation_time);
         let classification =
             self.classify_context(&policy, &event.tenant_id, &replay_scope, evaluation_time);
-        let outcome = evaluate_policy(
+        let mut outcome = evaluate_policy(
             &policy,
             &quotes,
             &current_state,
             evaluation_time,
             classification,
         )?;
+
+        // Guard: events from concurrent source streams can arrive at Redis out of
+        // event-timestamp order (live jitter or simulation speed-factor collapse).
+        // The quote is already in the cache above; skip state transitions for late
+        // events so a stale delivery cannot clear breach_started_at or cooldown_until.
+        let late_delivery = current_state
+            .high_water_mark
+            .map(|hwm| evaluation_time < hwm)
+            .unwrap_or(false);
+        if late_delivery {
+            if accelerated_simulation_run {
+                if let Some(backfilled_state) =
+                    backfill_late_simulated_breach_start(&current_state, &outcome, evaluation_time)
+                {
+                    let state_value = serde_json::to_value(&backfilled_state)?;
+                    let _ = repo
+                        .upsert_pattern_state(&policy_key.0, PATTERN_ID, &state_key, state_value)
+                        .await;
+                    tracing::info!(
+                        pipeline_mode = "test",
+                        component = "detector",
+                        pattern_id = PATTERN_ID,
+                        tenant_id = %event.tenant_id,
+                        source_id = %event.source_id,
+                        event_id = %event.event_id,
+                        event_type = %event.event_type,
+                        market_key,
+                        simulation_run_id = simulation_run_id.as_deref(),
+                        evaluation_time = %evaluation_time,
+                        high_water_mark = ?current_state.high_water_mark,
+                        "backfilled late simulated dpeg breach start"
+                    );
+                }
+            }
+            return Ok(None);
+        }
+
+        // Advance high-water mark so state only moves forward in event time.
+        outcome.next_state.high_water_mark = Some(
+            current_state
+                .high_water_mark
+                .map_or(evaluation_time, |hwm| hwm.max(evaluation_time)),
+        );
         if is_simulated {
             log_test_mode_decision(
                 event,
@@ -1440,6 +1506,36 @@ fn dpeg_test_mode_reason(
     "breach_inactive"
 }
 
+fn backfill_late_simulated_breach_start(
+    current_state: &DpegAlertState,
+    outcome: &EvaluationOutcome,
+    evaluation_time: DateTime<Utc>,
+) -> Option<DpegAlertState> {
+    if !outcome.snapshot.breach_active || current_state.last_severity.is_some() {
+        return None;
+    }
+
+    let should_backfill = current_state
+        .breach_started_at
+        .map(|started_at| evaluation_time < started_at)
+        .unwrap_or(true);
+    if !should_backfill {
+        return None;
+    }
+
+    let mut next_state = current_state.clone();
+    next_state.breach_started_at = Some(evaluation_time);
+    next_state.last_divergence_pct = Some(outcome.snapshot.divergence_pct);
+    next_state.last_classification =
+        Some(context_classification_str(&outcome.snapshot.classification).to_string());
+    if next_state.trigger_floor_pct.is_none() {
+        next_state.trigger_floor_pct = Some(outcome.snapshot.trigger_floor_pct);
+    }
+    next_state.below_trigger_blocks = 0;
+    next_state.below_severity_blocks = 0;
+    Some(next_state)
+}
+
 fn recommended_actions_for_severity(severity: &Severity) -> Vec<String> {
     match severity {
         Severity::Critical => vec![
@@ -1595,6 +1691,72 @@ mod tests {
         assert!(!outcome.snapshot.oracle_confirmed);
         assert!(!outcome.snapshot.breach_active);
         assert!(!outcome.should_emit_alert);
+    }
+
+    #[test]
+    fn late_simulated_breach_start_is_backfilled_for_new_incidents() {
+        let now = Utc::now();
+        let state = DpegAlertState {
+            high_water_mark: Some(now + Duration::seconds(30)),
+            ..DpegAlertState::default()
+        };
+        let outcome = EvaluationOutcome {
+            snapshot: ConsensusSnapshot {
+                weighted_median_price: 0.88,
+                divergence_pct: 12.0,
+                source_count: 5,
+                eligible_source_count: 5,
+                quorum_met: true,
+                breach_active: true,
+                oracle_confirmed: true,
+                classification: ContextClassification::Isolated,
+                trigger_floor_pct: 0.5,
+                confidence_breakdown: HashMap::new(),
+                severity: Some(Severity::Critical),
+            },
+            should_emit_alert: false,
+            next_state: state.clone(),
+            transition: None,
+            emitted_severity: None,
+        };
+
+        let backfilled =
+            backfill_late_simulated_breach_start(&state, &outcome, now).expect("backfilled state");
+
+        assert_eq!(backfilled.breach_started_at, Some(now));
+        assert_eq!(backfilled.last_divergence_pct, Some(12.0));
+        assert_eq!(backfilled.last_classification.as_deref(), Some("isolated"));
+    }
+
+    #[test]
+    fn late_simulated_breach_start_does_not_overwrite_active_incident_state() {
+        let now = Utc::now();
+        let state = DpegAlertState {
+            breach_started_at: Some(now + Duration::seconds(10)),
+            last_severity: Some("critical".to_string()),
+            ..DpegAlertState::default()
+        };
+        let outcome = EvaluationOutcome {
+            snapshot: ConsensusSnapshot {
+                weighted_median_price: 0.88,
+                divergence_pct: 12.0,
+                source_count: 5,
+                eligible_source_count: 5,
+                quorum_met: true,
+                breach_active: true,
+                oracle_confirmed: true,
+                classification: ContextClassification::Isolated,
+                trigger_floor_pct: 0.5,
+                confidence_breakdown: HashMap::new(),
+                severity: Some(Severity::Critical),
+            },
+            should_emit_alert: false,
+            next_state: state.clone(),
+            transition: None,
+            emitted_severity: None,
+        };
+
+        assert!(backfill_late_simulated_breach_start(&state, &outcome, now).is_none());
     }
 
     #[test]
@@ -1786,6 +1948,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         for i in 1..=policy.deescalation_blocks {
@@ -1826,6 +1989,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         for i in 1..=policy.resolution_blocks {
@@ -1869,6 +2033,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let suppressed = evaluate_policy(
@@ -1921,6 +2086,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 1,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let suppressed = evaluate_policy(
@@ -2607,6 +2773,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let outcome = evaluate_policy(
@@ -2639,6 +2806,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let outcome = evaluate_policy(
@@ -2681,6 +2849,7 @@ mod tests {
             trigger_floor_pct: Some(0.01), // Systemic floor stored from trigger
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let outcome = evaluate_policy(
@@ -2714,6 +2883,7 @@ mod tests {
             trigger_floor_pct: Some(0.01),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let outcome = evaluate_policy(
@@ -2753,6 +2923,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let outcome = evaluate_policy(
@@ -2789,6 +2960,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let outcome = evaluate_policy(
@@ -2824,6 +2996,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         // Run 30 consecutive below-floor evaluations
@@ -2868,6 +3041,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 15, // Halfway through resolution
+            high_water_mark: None,
         };
 
         // Breach resumes — counter should reset
@@ -2903,6 +3077,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         // 15 blocks recovering
@@ -2969,6 +3144,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let quotes = make_quotes(recovery_price, None, None, 12, now);
@@ -3121,6 +3297,7 @@ mod tests {
             trigger_floor_pct: None,
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let quotes = make_quotes(
@@ -3161,6 +3338,7 @@ mod tests {
             trigger_floor_pct: None,
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let quotes = make_quotes(
@@ -3204,6 +3382,7 @@ mod tests {
             trigger_floor_pct: None,
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let quotes = make_quotes(
@@ -3246,6 +3425,7 @@ mod tests {
             trigger_floor_pct: None,
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let quotes = make_quotes(
@@ -3286,6 +3466,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         // 1 block at MEDIUM — not enough for deescalation (needs 5)
@@ -3350,6 +3531,7 @@ mod tests {
             trigger_floor_pct: Some(0.5),
             below_severity_blocks: 0,
             below_trigger_blocks: 0,
+            high_water_mark: None,
         };
 
         let mut s = state;

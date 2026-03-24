@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use chrono::Utc;
+use chrono::{DateTime, TimeZone, Utc};
 use event_schema::{SourceType, UnifiedEvent};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -227,6 +227,68 @@ fn effective_simulation_metadata(
             .map(ToOwned::to_owned)
     });
     (is_simulated || resolved_run_id.is_some(), resolved_run_id)
+}
+
+fn accelerated_simulation_timestamp(
+    payload: &Value,
+    simulation_run_id_hint: Option<&str>,
+) -> Option<DateTime<Utc>> {
+    let (is_simulated, simulation_run_id) =
+        effective_simulation_metadata(payload, simulation_run_id_hint);
+    if !is_simulated && simulation_run_id.is_none() {
+        return None;
+    }
+
+    let simulation = payload.get("simulation").and_then(Value::as_object)?;
+    let speed_factor = simulation
+        .get("speed_factor")
+        .and_then(|value| match value {
+            Value::Number(number) => number.as_f64(),
+            Value::String(raw) => raw.trim().parse::<f64>().ok(),
+            _ => None,
+        })
+        .unwrap_or(1.0);
+    if !speed_factor.is_finite() || speed_factor <= 1.0 {
+        return None;
+    }
+
+    simulation
+        .get("event_ts")
+        .and_then(parse_simulation_timestamp_value)
+        .or_else(|| {
+            simulation
+                .get("event_timestamp")
+                .and_then(parse_simulation_timestamp_value)
+        })
+        .or_else(|| {
+            simulation
+                .get("event_ts_ms")
+                .and_then(parse_simulation_timestamp_value)
+        })
+}
+
+fn parse_simulation_timestamp_value(value: &Value) -> Option<DateTime<Utc>> {
+    match value {
+        Value::String(raw) => chrono::DateTime::parse_from_rfc3339(raw.trim())
+            .ok()
+            .map(|ts| ts.with_timezone(&Utc)),
+        Value::Number(number) => number
+            .as_i64()
+            .and_then(|millis| Utc.timestamp_millis_opt(millis).single()),
+        _ => None,
+    }
+}
+
+fn apply_accelerated_simulation_timestamp(
+    parsed: &mut ParsedFeedEvent,
+    payload: &Value,
+    simulation_run_id_hint: Option<&str>,
+) {
+    let Some(replay_ts) = accelerated_simulation_timestamp(payload, simulation_run_id_hint) else {
+        return;
+    };
+    parsed.payload_event_ts.get_or_insert(replay_ts);
+    parsed.observed_at = replay_ts;
 }
 
 fn is_static_worker_config_error(error: &anyhow::Error) -> bool {
@@ -742,6 +804,11 @@ async fn process_payload(
             if parsed.chain_id.is_none() {
                 parsed.chain_id = payload_ctx.chain_id_hint;
             }
+            apply_accelerated_simulation_timestamp(
+                &mut parsed,
+                &payload,
+                payload_ctx.simulation_run_id_hint,
+            );
             let (is_simulated, simulation_run_id) =
                 effective_simulation_metadata(&payload, payload_ctx.simulation_run_id_hint);
             let mut payload_for_storage = payload.clone();
@@ -850,7 +917,9 @@ async fn process_payload(
             Ok(())
         }
         Err(parse_error) => {
-            let observed_at = Utc::now();
+            let observed_at =
+                accelerated_simulation_timestamp(&payload, payload_ctx.simulation_run_id_hint)
+                    .unwrap_or_else(Utc::now);
             let dedup_key = hash_payload_only(
                 config,
                 &payload,
@@ -2513,5 +2582,71 @@ mod tests {
             simulation.get("simulation_run_id").and_then(Value::as_str),
             Some("run-test-1")
         );
+    }
+
+    #[test]
+    fn apply_accelerated_simulation_timestamp_uses_replay_time_for_fast_runs() {
+        let replay_ts = Utc.timestamp_opt(1_678_521_760, 0).single().unwrap();
+        let mut parsed = ParsedFeedEvent {
+            event_type: "quote".to_string(),
+            event_id: Some("quote-1".to_string()),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSDT".to_string()),
+            price: Some(0.95),
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: None,
+            observed_at: Utc::now(),
+            normalized_fields: json!({}),
+        };
+        let payload = json!({
+            "simulation": {
+                "is_simulated": true,
+                "run_id": "run-fast",
+                "speed_factor": 1000,
+                "event_ts": replay_ts.to_rfc3339(),
+            }
+        });
+
+        apply_accelerated_simulation_timestamp(&mut parsed, &payload, None);
+
+        assert_eq!(parsed.payload_event_ts, Some(replay_ts));
+        assert_eq!(parsed.observed_at, replay_ts);
+    }
+
+    #[test]
+    fn apply_accelerated_simulation_timestamp_leaves_one_x_runs_unchanged() {
+        let original_observed_at = Utc.timestamp_opt(1_678_521_640, 0).single().unwrap();
+        let mut parsed = ParsedFeedEvent {
+            event_type: "quote".to_string(),
+            event_id: Some("quote-1".to_string()),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSDT".to_string()),
+            price: Some(0.95),
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: None,
+            observed_at: original_observed_at,
+            normalized_fields: json!({}),
+        };
+        let payload = json!({
+            "simulation": {
+                "is_simulated": true,
+                "run_id": "run-live-speed",
+                "speed_factor": 1,
+                "event_ts": "2023-03-11T08:02:40Z",
+            }
+        });
+
+        apply_accelerated_simulation_timestamp(&mut parsed, &payload, None);
+
+        assert_eq!(parsed.payload_event_ts, None);
+        assert_eq!(parsed.observed_at, original_observed_at);
     }
 }
