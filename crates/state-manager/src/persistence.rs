@@ -352,11 +352,22 @@ impl PostgresRepository {
             .execute(
                 r#"
                 INSERT INTO data_source_health (
-                    tenant_id, source_id, healthy, last_error, updated_at
+                    tenant_id, source_id, healthy, last_message_at, last_error, updated_at
                 )
-                VALUES ($1, $2, $3, $4, NOW())
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    CASE WHEN $3 THEN NOW() ELSE NULL END,
+                    $4,
+                    NOW()
+                )
                 ON CONFLICT (tenant_id, source_id) DO UPDATE
                 SET healthy = EXCLUDED.healthy,
+                    last_message_at = CASE
+                        WHEN EXCLUDED.healthy THEN NOW()
+                        ELSE data_source_health.last_message_at
+                    END,
                     last_error = EXCLUDED.last_error,
                     updated_at = NOW()
                 "#,

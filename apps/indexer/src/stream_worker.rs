@@ -32,6 +32,8 @@ const DEFAULT_RAW_LANDING_TIMEOUT_MS: u64 = 150;
 const TEST_MODE_MOCK_POLL_INTERVAL_MS: u64 = 200;
 const MIN_POLL_INTERVAL_MS: u64 = 200;
 const MAX_POLL_INTERVAL_MS: u64 = 60_000;
+const SOURCE_HEALTH_SUCCESS_REPORT_INTERVAL_SECS: u64 = 30;
+const SOURCE_HEALTH_FAILURE_REPORT_INTERVAL_SECS: u64 = 30;
 
 #[derive(Debug, Clone)]
 struct CachedFxRate {
@@ -115,11 +117,20 @@ struct TestModeLogState {
     unsimulated_warning_emitted: bool,
 }
 
+#[derive(Debug, Default)]
+struct SourceHealthReportState {
+    last_success_report_at: Option<tokio::time::Instant>,
+    last_failure_report_at: Option<tokio::time::Instant>,
+    last_failure_message: Option<String>,
+    last_reported_healthy: Option<bool>,
+}
+
 struct PayloadProcessingContext<'a> {
     stream: &'a RedisStreamPublisher,
     chain_id_hint: Option<i64>,
     simulation_run_id_hint: Option<&'a str>,
     fx_cache: &'a mut FxRateCache,
+    source_health_report_state: &'a mut SourceHealthReportState,
     test_mode_log_state: &'a mut TestModeLogState,
 }
 
@@ -305,6 +316,7 @@ pub async fn run_stream_worker(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut fx_cache = FxRateCache::default();
+    let mut source_health_report_state = SourceHealthReportState::default();
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(30);
 
@@ -331,6 +343,7 @@ pub async fn run_stream_worker(
                     &stream,
                     &mut shutdown,
                     &mut fx_cache,
+                    &mut source_health_report_state,
                 )
                 .await
             }
@@ -342,6 +355,7 @@ pub async fn run_stream_worker(
                     &stream,
                     &mut shutdown,
                     &mut fx_cache,
+                    &mut source_health_report_state,
                 )
                 .await
             }
@@ -353,6 +367,7 @@ pub async fn run_stream_worker(
                     &stream,
                     &mut shutdown,
                     &mut fx_cache,
+                    &mut source_health_report_state,
                 )
                 .await
             }
@@ -364,6 +379,7 @@ pub async fn run_stream_worker(
                     &stream,
                     &mut shutdown,
                     &mut fx_cache,
+                    &mut source_health_report_state,
                 )
                 .await
             }
@@ -375,6 +391,8 @@ pub async fn run_stream_worker(
         }
 
         if let Err(error) = result {
+            report_source_health_failure(&repo, &config, &mut source_health_report_state, &error)
+                .await;
             if is_static_worker_config_error(&error) {
                 common::log_error!(
                     warn,
@@ -421,6 +439,7 @@ async fn run_websocket_loop(
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
     fx_cache: &mut FxRateCache,
+    source_health_report_state: &mut SourceHealthReportState,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
@@ -448,6 +467,7 @@ async fn run_websocket_loop(
                     chain_id_hint: None,
                     simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
                     fx_cache,
+                    source_health_report_state,
                     test_mode_log_state: &mut test_mode_log_state,
                 };
                 process_payload(config, repo, raw_repo, payload, &mut payload_ctx).await?;
@@ -463,6 +483,7 @@ async fn run_rpc_logs_loop(
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
     fx_cache: &mut FxRateCache,
+    source_health_report_state: &mut SourceHealthReportState,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
@@ -496,6 +517,7 @@ async fn run_rpc_logs_loop(
                     chain_id_hint: connector.chain_id(),
                     simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
                     fx_cache,
+                    source_health_report_state,
                     test_mode_log_state: &mut test_mode_log_state,
                 };
                 process_payload(config, repo, raw_repo, payload, &mut payload_ctx).await?;
@@ -511,6 +533,7 @@ async fn run_http_poll_loop(
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
     fx_cache: &mut FxRateCache,
+    source_health_report_state: &mut SourceHealthReportState,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
@@ -552,6 +575,7 @@ async fn run_http_poll_loop(
                                 .simulation_run_id
                                 .as_deref(),
                             fx_cache,
+                            source_health_report_state,
                             test_mode_log_state: &mut test_mode_log_state,
                         },
                     };
@@ -580,6 +604,7 @@ async fn run_rpc_state_loop(
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
     fx_cache: &mut FxRateCache,
+    source_health_report_state: &mut SourceHealthReportState,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
@@ -613,6 +638,7 @@ async fn run_rpc_state_loop(
                     chain_id_hint: connector.chain_id(),
                     simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
                     fx_cache,
+                    source_health_report_state,
                     test_mode_log_state: &mut test_mode_log_state,
                 };
                 process_payload(config, repo, raw_repo, payload, &mut payload_ctx).await?;
@@ -927,6 +953,8 @@ async fn process_payload(
                 )
                 .await?;
             }
+            report_source_health_success(repo, config, payload_ctx.source_health_report_state)
+                .await;
             Ok(())
         }
         Err(parse_error) => {
@@ -1035,9 +1063,119 @@ async fn process_payload(
                     })
                     .await;
             }
+            report_source_health_success(repo, config, payload_ctx.source_health_report_state)
+                .await;
             Ok(())
         }
     }
+}
+
+fn should_skip_source_health_updates(config: &RuntimeStreamConfig) -> bool {
+    config.operating_mode_profile != "live" || config.tenant_targets.is_empty()
+}
+
+fn should_report_source_health_success(state: &SourceHealthReportState) -> bool {
+    if state.last_reported_healthy != Some(true) {
+        return true;
+    }
+
+    state
+        .last_success_report_at
+        .map(|reported_at| {
+            reported_at.elapsed() >= Duration::from_secs(SOURCE_HEALTH_SUCCESS_REPORT_INTERVAL_SECS)
+        })
+        .unwrap_or(true)
+}
+
+fn should_report_source_health_failure(
+    state: &SourceHealthReportState,
+    failure_message: &str,
+) -> bool {
+    if state.last_reported_healthy != Some(false) {
+        return true;
+    }
+    if state.last_failure_message.as_deref() != Some(failure_message) {
+        return true;
+    }
+
+    state
+        .last_failure_report_at
+        .map(|reported_at| {
+            reported_at.elapsed() >= Duration::from_secs(SOURCE_HEALTH_FAILURE_REPORT_INTERVAL_SECS)
+        })
+        .unwrap_or(true)
+}
+
+async fn report_source_health_success(
+    repo: &PostgresRepository,
+    config: &RuntimeStreamConfig,
+    state: &mut SourceHealthReportState,
+) {
+    if should_skip_source_health_updates(config) || !should_report_source_health_success(state) {
+        return;
+    }
+
+    for tenant_id in &config.tenant_targets {
+        if let Err(error) = repo
+            .update_source_health(tenant_id, &config.source_id, true, None)
+            .await
+        {
+            common::log_error!(
+                warn,
+                error,
+                "failed updating live source health after payload",
+                tenant_id = %tenant_id,
+                source_id = %config.source_id,
+                stream_config_id = %config.stream_config_id,
+            );
+        }
+    }
+
+    state.last_success_report_at = Some(tokio::time::Instant::now());
+    state.last_failure_report_at = None;
+    state.last_failure_message = None;
+    state.last_reported_healthy = Some(true);
+}
+
+async fn report_source_health_failure(
+    repo: &PostgresRepository,
+    config: &RuntimeStreamConfig,
+    state: &mut SourceHealthReportState,
+    error: &anyhow::Error,
+) {
+    if should_skip_source_health_updates(config) {
+        return;
+    }
+
+    let failure_message = error.to_string();
+    if !should_report_source_health_failure(state, &failure_message) {
+        return;
+    }
+
+    for tenant_id in &config.tenant_targets {
+        if let Err(update_error) = repo
+            .update_source_health(
+                tenant_id,
+                &config.source_id,
+                false,
+                Some(failure_message.clone()),
+            )
+            .await
+        {
+            common::log_error!(
+                warn,
+                update_error,
+                "failed updating live source health after stream failure",
+                tenant_id = %tenant_id,
+                source_id = %config.source_id,
+                stream_config_id = %config.stream_config_id,
+            );
+        }
+    }
+
+    state.last_failure_report_at = Some(tokio::time::Instant::now());
+    state.last_failure_message = Some(failure_message);
+    state.last_reported_healthy = Some(false);
 }
 
 fn maybe_log_test_mode_payload(
