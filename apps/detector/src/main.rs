@@ -2,7 +2,7 @@
 //! registered DetectionPattern against each event.
 //!
 //! Patterns are DB-configured: configs are loaded from tenant_pattern_configs at startup
-//! and refreshed every CONFIG_RELOAD_INTERVAL_SECS.
+//! and refreshed on LISTEN/NOTIFY, explicit reload requests, and a periodic fallback.
 
 use std::time::Duration;
 
@@ -26,8 +26,8 @@ const CONSUMER_GROUP: &str = "detector-workers";
 const STREAM_BATCH_SIZE: usize = 100;
 /// Max milliseconds to block waiting for new stream entries.
 const STREAM_BLOCK_MS: usize = 2_000;
-/// How often to reload pattern configs from the DB.
-const CONFIG_RELOAD_INTERVAL_SECS: u64 = 30;
+/// Default periodic fallback interval for pattern config reloads.
+const DEFAULT_CONFIG_RELOAD_INTERVAL_SECS: u64 = 30;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -40,6 +40,11 @@ async fn main() -> Result<()> {
 
     let redis_url = std::env::var("REDIS_URL").context("REDIS_URL not set")?;
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL not set")?;
+    let config_reload_interval_secs = std::env::var("DETECTOR_CONFIG_RELOAD_INTERVAL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_CONFIG_RELOAD_INTERVAL_SECS);
 
     info!(redis_url = %describe_redis_url(&redis_url), "attempting redis connection");
 
@@ -71,6 +76,7 @@ async fn main() -> Result<()> {
     info!(
         consumer = %consumer_name,
         group = CONSUMER_GROUP,
+        periodic_reload_interval_secs = config_reload_interval_secs,
         "detector started -- consuming unified-events stream"
     );
 
@@ -89,7 +95,7 @@ async fn main() -> Result<()> {
         Err(err) => common::log_error!(warn, err, "failed to load initial pattern configs"),
     }
 
-    let mut reload_ticker = interval(Duration::from_secs(CONFIG_RELOAD_INTERVAL_SECS));
+    let mut reload_ticker = interval(Duration::from_secs(config_reload_interval_secs));
     let mut notify_rx = spawn_pattern_config_notify_listener(database_url.clone());
 
     loop {

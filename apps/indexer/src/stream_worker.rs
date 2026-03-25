@@ -878,6 +878,19 @@ async fn process_payload(
                     raw_landing_error: raw_landing.error.as_deref(),
                 },
             );
+            maybe_log_live_mode_payload(
+                config,
+                payload_ctx.test_mode_log_state,
+                &TestModePayloadLogContext {
+                    inserted,
+                    is_simulated,
+                    simulation_run_id: simulation_run_id.as_deref(),
+                    parsed: &parsed,
+                    dedup_key: dedup_key.as_deref(),
+                    raw_landing_status: raw_landing.status,
+                    raw_landing_error: raw_landing.error.as_deref(),
+                },
+            );
             if !inserted {
                 debug!(
                     stream_config_id = %config.stream_config_id,
@@ -1072,6 +1085,39 @@ fn maybe_log_test_mode_payload(
         raw_landing_status = payload_log.raw_landing_status.as_str(),
         raw_landing_error = payload_log.raw_landing_error,
         "test-mode payload observed by indexer",
+    );
+}
+
+fn maybe_log_live_mode_payload(
+    config: &RuntimeStreamConfig,
+    test_mode_log_state: &mut TestModeLogState,
+    payload_log: &TestModePayloadLogContext<'_>,
+) {
+    if config.operating_mode_profile != "live" {
+        return;
+    }
+
+    if test_mode_log_state.payload_logs_emitted >= 5 {
+        return;
+    }
+    test_mode_log_state.payload_logs_emitted += 1;
+    info!(
+        stream_config_id = %config.stream_config_id,
+        source_id = %config.source_id,
+        stream_name = %config.stream_name,
+        connector_mode = %config.connector_mode,
+        tenant_target_count = config.tenant_targets.len(),
+        event_type = %payload_log.parsed.event_type,
+        event_id = payload_log.parsed.event_id.as_deref(),
+        market_key = payload_log.parsed.market_key.as_deref(),
+        asset_pair = payload_log.parsed.asset_pair.as_deref(),
+        payload_event_ts = ?payload_log.parsed.payload_event_ts,
+        observed_at = ?payload_log.parsed.observed_at,
+        dedup_key = payload_log.dedup_key,
+        ingest_inserted = payload_log.inserted,
+        raw_landing_status = payload_log.raw_landing_status.as_str(),
+        raw_landing_error = payload_log.raw_landing_error,
+        "live-mode payload observed by indexer",
     );
 }
 
