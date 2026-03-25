@@ -39,8 +39,8 @@ VALUES
             "cooldown_sec": 300,
             "stale_timeout_ms": 30000,
             "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 3.0},
-            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.5},
-            "toggles": {"contagion_detection": true}
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
           },
           {
             "market_key": "USDC/USD",
@@ -51,20 +51,20 @@ VALUES
             "cooldown_sec": 300,
             "stale_timeout_ms": 30000,
             "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 3.0},
-            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.5},
-            "toggles": {"contagion_detection": true}
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
           },
           {
             "market_key": "DAI/USD",
             "peg_target": 1.0,
-            "min_sources": 2,
+            "min_sources": 3,
             "quorum_pct": 0.5,
             "sustained_window_ms": 60000,
             "cooldown_sec": 300,
             "stale_timeout_ms": 30000,
             "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 3.0},
-            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.5},
-            "toggles": {"contagion_detection": true}
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
           }
         ]
     }'::jsonb),
@@ -117,8 +117,8 @@ VALUES
             "cooldown_sec": 300,
             "stale_timeout_ms": 30000,
             "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 3.0},
-            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.5},
-            "toggles": {"contagion_detection": true}
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
         },
         {
             "market_key": "USDC/USD",
@@ -129,20 +129,20 @@ VALUES
             "cooldown_sec": 300,
             "stale_timeout_ms": 30000,
             "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 3.0},
-            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.5},
-            "toggles": {"contagion_detection": true}
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
         },
         {
             "market_key": "DAI/USD",
             "peg_target": 1.0,
-            "min_sources": 2,
+            "min_sources": 3,
             "quorum_pct": 0.5,
             "sustained_window_ms": 60000,
             "cooldown_sec": 300,
             "stale_timeout_ms": 30000,
             "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 3.0},
-            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.5},
-            "toggles": {"contagion_detection": true}
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
         }
     ]'::jsonb),
 

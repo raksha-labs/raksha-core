@@ -1,7 +1,10 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use common::{init_logging, start_health_check_server, ShutdownSignal};
 use dotenvy::dotenv;
 use event_schema::{
@@ -9,9 +12,11 @@ use event_schema::{
     Severity,
 };
 use notifier::{GatewayDispatchResult, NotifierGatewayClient};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
 use state_manager::{
-    describe_redis_url, EntityExposureRecord, IncidentKey, IncidentRecord, PostgresRepository,
-    RedisStreamPublisher,
+    describe_redis_url, AlertEvidenceOperationalRow, AlertEvidenceSnapshotRecord,
+    EntityExposureRecord, IncidentKey, IncidentRecord, PostgresRepository, RedisStreamPublisher,
 };
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -22,6 +27,23 @@ const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "glider";
 const REDIS_STARTUP_RETRY_ATTEMPTS: usize = 30;
 const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 const ALL_NOTIFICATION_CHANNELS: [&str; 5] = ["webhook", "slack", "telegram", "discord", "email"];
+const ALERT_EVIDENCE_BUFFER_BEFORE_MS: i64 = 30_000;
+const ALERT_EVIDENCE_BUFFER_AFTER_MS: i64 = 10_000;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct EvidenceContributorTrace {
+    source_id: String,
+    source_kind: String,
+    price: f64,
+    observed_at: DateTime<Utc>,
+    age_ms: i64,
+    weight: f64,
+    divergence_pct: f64,
+    supports_alert_direction: bool,
+    contributes_to_quorum: bool,
+    confirms_oracle: bool,
+    contributes_to_breach: bool,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -871,11 +893,19 @@ async fn persist_and_publish_alert(
     stream: &RedisStreamPublisher,
 ) {
     if let Some(repo) = repository {
+        let mut persisted = false;
         if let Err(err) = repo.save_alert(alert).await {
             common::log_error!(warn, err, "failed to persist alert");
+        } else {
+            persisted = true;
         }
         if let Err(err) = repo.save_alert_lifecycle(alert).await {
             common::log_error!(warn, err, "failed to persist alert lifecycle event");
+        }
+        if persisted {
+            if let Err(err) = persist_alert_evidence_snapshot(alert, repo).await {
+                common::log_error!(warn, err, "failed to persist alert evidence snapshot");
+            }
         }
     }
 
@@ -1026,6 +1056,228 @@ fn extract_asset_symbol(subject_key: Option<&str>) -> Option<String> {
     } else {
         Some(symbol.to_string())
     }
+}
+
+fn extract_market_key(subject_key: Option<&str>, protocol: &str) -> Option<String> {
+    if let Some(key) = subject_key {
+        let market_part = key.rsplit(':').next().unwrap_or(key).trim();
+        if market_part.contains('/') {
+            return Some(market_part.to_string());
+        }
+    }
+
+    protocol
+        .strip_prefix("market:")
+        .map(str::trim)
+        .filter(|value| value.contains('/'))
+        .map(ToOwned::to_owned)
+}
+
+fn sustained_window_ms_from_alert(alert: &AlertEvent) -> i64 {
+    alert
+        .oracle_context
+        .get("sustained_window_ms")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+        .unwrap_or(60_000)
+}
+
+fn contributing_sources_from_alert(alert: &AlertEvent) -> Vec<EvidenceContributorTrace> {
+    alert
+        .oracle_context
+        .get("contributing_sources")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<EvidenceContributorTrace>>(value).ok())
+        .unwrap_or_default()
+}
+
+fn source_type_for_kind(source_kind: &str) -> String {
+    match source_kind {
+        "oracle" => "oracle_api",
+        "cex" => "cex_websocket",
+        "dex" => "dex_api",
+        _ => "custom_api",
+    }
+    .to_string()
+}
+
+fn event_type_for_kind(source_kind: &str) -> &'static str {
+    match source_kind {
+        "oracle" => "oracle_update",
+        _ => "quote",
+    }
+}
+
+fn same_operational_event(
+    row: &AlertEvidenceOperationalRow,
+    contributor: &EvidenceContributorTrace,
+) -> bool {
+    row.source_id == contributor.source_id
+        && row.observed_at == contributor.observed_at
+        && row
+            .price
+            .map(|price| (price - contributor.price).abs() < f64::EPSILON)
+            .unwrap_or(false)
+}
+
+fn annotate_evidence_fields(
+    normalized_fields: &Value,
+    contributor: Option<&EvidenceContributorTrace>,
+    decision_input: bool,
+) -> Value {
+    let mut fields = normalized_fields
+        .as_object()
+        .cloned()
+        .unwrap_or_else(Map::new);
+    let mut evidence = Map::new();
+    evidence.insert("sustain_window_event".to_string(), json!(true));
+    evidence.insert("decision_input".to_string(), json!(decision_input));
+    if let Some(trace) = contributor {
+        evidence.insert("source_kind".to_string(), json!(trace.source_kind));
+        evidence.insert("age_ms".to_string(), json!(trace.age_ms));
+        evidence.insert("weight".to_string(), json!(trace.weight));
+        evidence.insert("divergence_pct".to_string(), json!(trace.divergence_pct));
+        evidence.insert(
+            "supports_alert_direction".to_string(),
+            json!(trace.supports_alert_direction),
+        );
+        evidence.insert(
+            "contributes_to_quorum".to_string(),
+            json!(trace.contributes_to_quorum),
+        );
+        evidence.insert("confirms_oracle".to_string(), json!(trace.confirms_oracle));
+        evidence.insert(
+            "contributes_to_breach".to_string(),
+            json!(trace.contributes_to_breach),
+        );
+    }
+    fields.insert("__raksha_evidence".to_string(), Value::Object(evidence));
+    Value::Object(fields)
+}
+
+fn synthetic_evidence_record(
+    alert: &AlertEvent,
+    market_key: Option<&str>,
+    contributor: &EvidenceContributorTrace,
+) -> AlertEvidenceSnapshotRecord {
+    AlertEvidenceSnapshotRecord {
+        alert_id: alert.alert_id.to_string(),
+        incident_id: alert.incident_id.clone(),
+        tenant_id: resolve_alert_tenant_id(alert.tenant_id.clone()),
+        pattern_id: Some(alert.pattern_id.clone()),
+        source_id: contributor.source_id.clone(),
+        source_type: source_type_for_kind(&contributor.source_kind),
+        event_type: event_type_for_kind(&contributor.source_kind).to_string(),
+        market_key: market_key.map(ToOwned::to_owned),
+        price: Some(contributor.price),
+        observed_at: contributor.observed_at,
+        event_ts: Some(contributor.observed_at),
+        tx_hash: None,
+        block_number: None,
+        payload: json!({
+            "trace": contributor,
+            "captured_from": "detector.quote_cache"
+        }),
+        normalized_fields: annotate_evidence_fields(&json!({}), Some(contributor), true),
+        raw_ref_type: Some("detector.quote_cache".to_string()),
+        raw_ref_id: Some(format!(
+            "{}:{}",
+            contributor.source_id,
+            contributor.observed_at.to_rfc3339()
+        )),
+    }
+}
+
+async fn persist_alert_evidence_snapshot(
+    alert: &AlertEvent,
+    repo: &PostgresRepository,
+) -> Result<()> {
+    let contributors = contributing_sources_from_alert(alert);
+    if contributors.is_empty() {
+        return Ok(());
+    }
+
+    let tenant_id = resolve_alert_tenant_id(alert.tenant_id.clone());
+    let market_key = extract_market_key(alert.subject_key.as_deref(), &alert.protocol);
+    let sustained_window_ms = sustained_window_ms_from_alert(alert);
+    let window_start = alert.created_at
+        - ChronoDuration::milliseconds(sustained_window_ms + ALERT_EVIDENCE_BUFFER_BEFORE_MS);
+    let window_end =
+        alert.created_at + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS);
+    let source_ids = contributors
+        .iter()
+        .map(|contributor| contributor.source_id.clone())
+        .collect::<Vec<_>>();
+
+    let operational_rows = repo
+        .load_operational_events_for_alert_evidence(
+            &tenant_id,
+            market_key.as_deref(),
+            &source_ids,
+            window_start,
+            window_end,
+            alert.is_simulated,
+            alert.simulation_run_id.as_deref(),
+        )
+        .await?;
+
+    let mut records = Vec::new();
+    let mut matched_sources = HashSet::new();
+
+    for row in &operational_rows {
+        let matched_contributor = contributors
+            .iter()
+            .find(|contributor| same_operational_event(row, contributor));
+        if let Some(contributor) = matched_contributor {
+            matched_sources.insert(format!(
+                "{}:{}",
+                contributor.source_id,
+                contributor.observed_at.to_rfc3339()
+            ));
+        }
+
+        records.push(AlertEvidenceSnapshotRecord {
+            alert_id: alert.alert_id.to_string(),
+            incident_id: alert.incident_id.clone(),
+            tenant_id: tenant_id.clone(),
+            pattern_id: Some(alert.pattern_id.clone()),
+            source_id: row.source_id.clone(),
+            source_type: row.source_type.clone(),
+            event_type: row.event_type.clone(),
+            market_key: row.market_key.clone().or_else(|| market_key.clone()),
+            price: row.price,
+            observed_at: row.observed_at,
+            event_ts: row.event_ts,
+            tx_hash: row.tx_hash.clone(),
+            block_number: row.block_number,
+            payload: row.payload.clone(),
+            normalized_fields: annotate_evidence_fields(
+                &row.normalized_fields,
+                matched_contributor,
+                matched_contributor.is_some(),
+            ),
+            raw_ref_type: Some("catalog.ingest_operational_events".to_string()),
+            raw_ref_id: Some(row.ingest_event_id.clone()),
+        });
+    }
+
+    for contributor in &contributors {
+        let contributor_key = format!(
+            "{}:{}",
+            contributor.source_id,
+            contributor.observed_at.to_rfc3339()
+        );
+        if matched_sources.contains(&contributor_key) {
+            continue;
+        }
+        records.push(synthetic_evidence_record(
+            alert,
+            market_key.as_deref(),
+            contributor,
+        ));
+    }
+
+    repo.save_alert_evidence_snapshot_batch(&records).await
 }
 
 async fn init_stream_publisher() -> Option<RedisStreamPublisher> {
@@ -1340,6 +1592,44 @@ mod tests {
         );
         assert_eq!(extract_asset_symbol(None), None);
         assert_eq!(extract_asset_symbol(Some("")), None);
+    }
+
+    #[test]
+    fn extract_market_key_prefers_subject_key_and_falls_back_to_protocol() {
+        assert_eq!(
+            extract_market_key(Some("tenant-a:USDC/USD"), "market:ignored"),
+            Some("USDC/USD".to_string())
+        );
+        assert_eq!(
+            extract_market_key(None, "market:DAI/USD"),
+            Some("DAI/USD".to_string())
+        );
+    }
+
+    #[test]
+    fn contributing_sources_from_alert_reads_trace_from_oracle_context() {
+        let mut detection = mk_detection(Severity::Medium, IncidentTransition::Trigger);
+        detection.oracle_context.insert(
+            "contributing_sources".to_string(),
+            json!([{
+                "source_id": "pyth-eth-mainnet",
+                "source_kind": "oracle",
+                "price": 0.9998,
+                "observed_at": "2026-03-25T22:57:27Z",
+                "age_ms": 1200,
+                "weight": 1.0,
+                "divergence_pct": 0.02,
+                "supports_alert_direction": true,
+                "contributes_to_quorum": true,
+                "confirms_oracle": true,
+                "contributes_to_breach": true
+            }]),
+        );
+        let alert = alert_from_detection(&detection);
+        let contributors = contributing_sources_from_alert(&alert);
+        assert_eq!(contributors.len(), 1);
+        assert_eq!(contributors[0].source_id, "pyth-eth-mainnet");
+        assert!(contributors[0].confirms_oracle);
     }
 
     /// TC-D-1301: should_enforce_monthly_quota — Critical bypasses quota

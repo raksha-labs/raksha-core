@@ -11,8 +11,9 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use event_schema::{
-    AttackFamily, Chain, ContextClassification, DetectionResult, DetectionSignal,
-    IncidentTransition, LifecycleState, RiskScore, Severity, SignalType, UnifiedEvent,
+    apply_mappings, resolve_field_mappings, AttackFamily, Chain, ContextClassification,
+    DetectionResult, DetectionSignal, FieldMapping, IncidentTransition, LifecycleState, RiskScore,
+    Severity, SignalType, UnifiedEvent,
 };
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -61,7 +62,7 @@ fn default_true() -> bool {
 }
 
 fn default_min_healthy() -> usize {
-    1
+    3
 }
 
 impl Default for DpegSourceFilter {
@@ -71,7 +72,7 @@ impl Default for DpegSourceFilter {
             include_oracles: true,
             include_aggregators: true,
             include_dex: true,
-            min_healthy_sources: 1,
+            min_healthy_sources: 3,
         }
     }
 }
@@ -343,6 +344,21 @@ struct QuoteInput {
     observed_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct EvidenceContributor {
+    source_id: String,
+    source_kind: String,
+    price: f64,
+    observed_at: DateTime<Utc>,
+    age_ms: i64,
+    weight: f64,
+    divergence_pct: f64,
+    supports_alert_direction: bool,
+    contributes_to_quorum: bool,
+    confirms_oracle: bool,
+    contributes_to_breach: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct DpegAlertState {
     pub breach_started_at: Option<DateTime<Utc>>,
@@ -378,6 +394,14 @@ pub struct DpegPattern {
     quote_cache: HashMap<(String, String, String), HashMap<String, Vec<QuoteInput>>>,
     /// tenant_id → set of enabled source_ids (None = unrestricted)
     source_bindings: HashMap<String, HashSet<String>>,
+    /// tenant_id → source_id → gateway field mapping overrides
+    source_mapping_overrides: HashMap<String, HashMap<String, SourceBindingRuntimeOverride>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceBindingRuntimeOverride {
+    active_stream_ids: Vec<String>,
+    stream_field_mappings: HashMap<String, Vec<FieldMapping>>,
 }
 
 impl DpegPattern {
@@ -389,6 +413,160 @@ impl DpegPattern {
             .filter(|value| !value.is_empty())
             .map(|run_id| format!("{market_key}::{run_id}"))
             .unwrap_or_else(|| market_key.to_string())
+    }
+
+    fn parse_source_mapping_overrides(
+        config: &Value,
+    ) -> HashMap<String, SourceBindingRuntimeOverride> {
+        let mut overrides = HashMap::new();
+        let Some(bindings) = config.get("source_bindings").and_then(Value::as_array) else {
+            return overrides;
+        };
+
+        for binding in bindings {
+            if !binding
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            let Some(source_id) = binding
+                .get("source_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let binding_config = binding
+                .get("binding_config")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let active_stream_ids = binding_config
+                .get("active_stream_ids")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let mut stream_field_mappings = HashMap::new();
+            if let Some(streams) = binding_config.get("streams").and_then(Value::as_array) {
+                for stream in streams {
+                    let Some(stream_id) = stream
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    else {
+                        continue;
+                    };
+                    let Some(field_mapping_value) = stream.get("field_mappings") else {
+                        continue;
+                    };
+                    let Ok(field_mappings) =
+                        serde_json::from_value::<Vec<FieldMapping>>(field_mapping_value.clone())
+                    else {
+                        continue;
+                    };
+                    if field_mappings.is_empty() {
+                        continue;
+                    }
+                    stream_field_mappings.insert(stream_id.to_string(), field_mappings);
+                }
+            }
+            if active_stream_ids.is_empty() && stream_field_mappings.is_empty() {
+                continue;
+            }
+            overrides.insert(
+                source_id.to_string(),
+                SourceBindingRuntimeOverride {
+                    active_stream_ids,
+                    stream_field_mappings,
+                },
+            );
+        }
+
+        overrides
+    }
+
+    fn effective_event_fields(
+        &self,
+        event: &UnifiedEvent,
+    ) -> (Option<String>, Option<f64>, DateTime<Utc>) {
+        let mut market_key = event.market_key.clone();
+        let mut price = event.price;
+        let mut timestamp = event.timestamp;
+
+        let Some(tenant_overrides) = self.source_mapping_overrides.get(&event.tenant_id) else {
+            return (market_key, price, timestamp);
+        };
+        let Some(binding_override) = tenant_overrides.get(&event.source_id) else {
+            return (market_key, price, timestamp);
+        };
+
+        let stream_config_id = event
+            .payload
+            .get("stream_config_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let parser_name = event
+            .payload
+            .get("parser_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let mapping_override = stream_config_id
+            .and_then(|id| binding_override.stream_field_mappings.get(id))
+            .or_else(|| {
+                binding_override
+                    .active_stream_ids
+                    .iter()
+                    .find_map(|id| binding_override.stream_field_mappings.get(id))
+            })
+            .or_else(|| {
+                (binding_override.stream_field_mappings.len() == 1)
+                    .then(|| binding_override.stream_field_mappings.values().next())
+                    .flatten()
+            });
+
+        let Some(mappings) = mapping_override else {
+            return (market_key, price, timestamp);
+        };
+        let override_config = serde_json::json!({
+            "field_mappings": mappings,
+        });
+        let resolved = resolve_field_mappings(parser_name, Some(&override_config));
+        if resolved.is_empty() {
+            return (market_key, price, timestamp);
+        }
+        let mapped = apply_mappings(&resolved, &event.payload, Some(&override_config));
+        if let Some(mapped_market_key) = mapped
+            .market_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            market_key = Some(mapped_market_key.to_string());
+        }
+        if let Some(mapped_price) = mapped
+            .price
+            .filter(|value| value.is_finite() && *value > 0.0)
+        {
+            price = Some(mapped_price);
+        }
+        if let Some(mapped_timestamp) = mapped.timestamp {
+            timestamp = mapped_timestamp;
+        }
+
+        (market_key, price, timestamp)
     }
 
     fn normalized_policy_config(config: &Value) -> Value {
@@ -535,6 +713,7 @@ impl DetectionPattern for DpegPattern {
     async fn reload_config(&mut self, config_map: &HashMap<(String, String), Value>) -> Result<()> {
         let mut new_policies = HashMap::new();
         let mut next_bindings = HashMap::new();
+        let mut next_mapping_overrides = HashMap::new();
         for ((tenant_id, pattern_id), config) in config_map {
             if pattern_id != PATTERN_ID {
                 continue;
@@ -546,9 +725,14 @@ impl DetectionPattern for DpegPattern {
             if let Some(bound) = super::extract_bound_source_ids(config) {
                 next_bindings.insert(tenant_id.clone(), bound);
             }
+            let overrides = Self::parse_source_mapping_overrides(config);
+            if !overrides.is_empty() {
+                next_mapping_overrides.insert(tenant_id.clone(), overrides);
+            }
         }
         self.policies = new_policies;
         self.source_bindings = next_bindings;
+        self.source_mapping_overrides = next_mapping_overrides;
         tracing::info!(policy_count = self.policies.len(), "dpeg policies reloaded");
         Ok(())
     }
@@ -559,7 +743,8 @@ impl DetectionPattern for DpegPattern {
         _now: DateTime<Utc>,
         repo: &PostgresRepository,
     ) -> Result<Option<DetectionResult>> {
-        let evaluation_time = event.timestamp;
+        let (effective_market_key, effective_price, evaluation_time) =
+            self.effective_event_fields(event);
 
         // Enforce source bindings: only process events from sources the tenant has bound to
         // this pattern in the Gateway tab.  Mode switching (live ↔ test) is handled at the
@@ -572,7 +757,8 @@ impl DetectionPattern for DpegPattern {
         }
 
         // Only care about market price feed events.
-        let (Some(market_key), Some(price)) = (event.market_key.as_deref(), event.price) else {
+        let (Some(market_key), Some(price)) = (effective_market_key.as_deref(), effective_price)
+        else {
             return Ok(None);
         };
         if !(price.is_finite() && price > 0.0) {
@@ -617,7 +803,7 @@ impl DetectionPattern for DpegPattern {
                 source_id: event.source_id.clone(),
                 source_kind,
                 price,
-                observed_at: event.timestamp,
+                observed_at: evaluation_time,
             },
         );
 
@@ -639,6 +825,23 @@ impl DetectionPattern for DpegPattern {
             evaluation_time,
             classification,
         )?;
+        let min_healthy_sources = policy
+            .source_filter
+            .min_healthy_sources
+            .max(policy.min_sources)
+            .max(3);
+        if outcome.snapshot.source_count < min_healthy_sources {
+            tracing::warn!(
+                component = "detector",
+                pattern_id = PATTERN_ID,
+                tenant_id = %event.tenant_id,
+                market_key,
+                source_count = outcome.snapshot.source_count,
+                min_healthy_sources,
+                oracle_confirmed = outcome.snapshot.oracle_confirmed,
+                "dpeg source health below minimum; suppressing alert evaluation until enough sources recover"
+            );
+        }
 
         // Guard: events from concurrent source streams can arrive at Redis out of
         // event-timestamp order (live jitter or simulation speed-factor collapse).
@@ -708,6 +911,8 @@ impl DetectionPattern for DpegPattern {
             "confidence_breakdown": outcome.snapshot.confidence_breakdown,
             "incident_transition": outcome.transition,
             "peg_target": policy.peg_target,
+            "sustained_window_ms": policy.sustained_window_ms,
+            "contributing_sources": outcome.snapshot.contributors,
         });
         let severity_str = outcome
             .snapshot
@@ -722,7 +927,7 @@ impl DetectionPattern for DpegPattern {
                 data: append_snapshot_meta(event, snapshot_data),
                 score: Some(outcome.snapshot.divergence_pct),
                 severity: severity_str.as_deref(),
-                observed_at: event.timestamp,
+                observed_at: evaluation_time,
             })
             .await;
 
@@ -764,6 +969,7 @@ struct ConsensusSnapshot {
     trigger_floor_pct: f64,
     confidence_breakdown: HashMap<String, f64>,
     severity: Option<Severity>,
+    contributors: Vec<EvidenceContributor>,
 }
 
 struct EvaluationOutcome {
@@ -831,6 +1037,7 @@ fn evaluate_policy(
                 trigger_floor_pct,
                 confidence_breakdown: HashMap::new(),
                 severity: None,
+                contributors: Vec::new(),
             },
             should_emit_alert: false,
             next_state: DpegAlertState::default(),
@@ -844,6 +1051,7 @@ fn evaluate_policy(
     let divergence_pct =
         ((weighted_median_price - policy.peg_target).abs() / policy.peg_target) * 100.0;
     let severity = severity_for_divergence(divergence_pct, &selected_bands);
+    let alert_direction = (weighted_median_price - policy.peg_target).signum();
 
     let source_count = weighted_points.len();
     let enabled_source_count = policy.enabled_source_count().max(1);
@@ -873,6 +1081,15 @@ fn evaluate_policy(
         .copied()
         .unwrap_or_default();
     let threshold_breach = divergence_pct >= trigger_floor_pct && severity.is_some();
+    let contributors = build_evidence_contributors(
+        policy,
+        &eligible_quotes,
+        now,
+        policy.peg_target,
+        trigger_floor_pct,
+        alert_direction,
+        threshold_breach,
+    );
     let breach_active = quorum_met
         && threshold_breach
         && (!policy.toggles.oracle_confirmation || oracle_confirmed)
@@ -1005,6 +1222,7 @@ fn evaluate_policy(
             trigger_floor_pct,
             confidence_breakdown,
             severity,
+            contributors,
         },
         should_emit_alert,
         next_state,
@@ -1127,6 +1345,51 @@ fn compute_confidence_breakdown(
     breakdown.insert("volume_confirmation".to_string(), volume_score);
     breakdown.insert("total".to_string(), total);
     breakdown
+}
+
+fn build_evidence_contributors(
+    policy: &DpegPolicy,
+    eligible_quotes: &[QuoteInput],
+    now: DateTime<Utc>,
+    peg_target: f64,
+    trigger_floor_pct: f64,
+    alert_direction: f64,
+    threshold_breach: bool,
+) -> Vec<EvidenceContributor> {
+    let mut contributors = eligible_quotes
+        .iter()
+        .map(|quote| {
+            let age_ms = now
+                .signed_duration_since(quote.observed_at)
+                .num_milliseconds()
+                .max(0);
+            let divergence_pct = ((quote.price - peg_target).abs() / peg_target) * 100.0;
+            let supports_alert_direction =
+                alert_direction != 0.0 && (quote.price - peg_target).signum() == alert_direction;
+            let confirms_oracle =
+                quote.source_kind == "oracle" && divergence_pct >= trigger_floor_pct;
+            EvidenceContributor {
+                source_id: quote.source_id.clone(),
+                source_kind: quote.source_kind.clone(),
+                price: quote.price,
+                observed_at: quote.observed_at,
+                age_ms,
+                weight: policy.source_weight(&quote.source_id),
+                divergence_pct,
+                supports_alert_direction,
+                contributes_to_quorum: true,
+                confirms_oracle,
+                contributes_to_breach: threshold_breach
+                    && (supports_alert_direction || confirms_oracle),
+            }
+        })
+        .collect::<Vec<_>>();
+    contributors.sort_by(|left, right| {
+        left.observed_at
+            .cmp(&right.observed_at)
+            .then_with(|| left.source_id.cmp(&right.source_id))
+    });
+    contributors
 }
 
 fn weighted_median(points: &[(f64, f64)]) -> Option<f64> {
@@ -1296,6 +1559,22 @@ fn build_detection(
         "context_classification".to_string(),
         serde_json::json!(context_classification_str(&snapshot.classification)),
     );
+    oracle_context.insert(
+        "source_count".to_string(),
+        serde_json::json!(snapshot.source_count),
+    );
+    oracle_context.insert(
+        "eligible_source_count".to_string(),
+        serde_json::json!(snapshot.eligible_source_count),
+    );
+    oracle_context.insert(
+        "sustained_window_ms".to_string(),
+        serde_json::json!(policy.sustained_window_ms),
+    );
+    oracle_context.insert(
+        "contributing_sources".to_string(),
+        serde_json::json!(snapshot.contributors),
+    );
 
     let actions_recommended = recommended_actions_for_severity(&severity);
     DetectionResult {
@@ -1309,7 +1588,7 @@ fn build_detection(
         chain_slug: "offchain".to_string(),
         protocol: format!("market:{}", policy.market_key),
         lifecycle_state: LifecycleState::Confirmed,
-        requires_confirmation: false,
+        requires_confirmation: policy.toggles.oracle_confirmation,
         attack_family: AttackFamily::PegDeviation,
         severity,
         tx_hash: format!("dpeg-{}", Uuid::new_v4()),
@@ -1559,6 +1838,7 @@ fn recommended_actions_for_severity(severity: &Severity) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use event_schema::SourceType;
 
     fn base_policy() -> DpegPolicy {
         DpegPolicy {
@@ -1583,13 +1863,16 @@ mod tests {
             severity_bands_systemic: Some(DpegSeverityBands {
                 medium: 0.01,
                 high: 0.25,
-                critical: 0.5,
+                critical: 0.25,
             }),
             isolated_floor_pct: 0.5,
             systemic_floor_pct: 0.01,
             deescalation_blocks: 5,
             resolution_blocks: 30,
-            source_filter: DpegSourceFilter::default(),
+            source_filter: DpegSourceFilter {
+                min_healthy_sources: 1,
+                ..DpegSourceFilter::default()
+            },
             toggles: DpegToggles::default(),
             confidence_weights: DpegConfidenceWeights::default(),
             min_confidence_to_fire: 50.0,
@@ -1713,6 +1996,7 @@ mod tests {
                 trigger_floor_pct: 0.5,
                 confidence_breakdown: HashMap::new(),
                 severity: Some(Severity::Critical),
+                contributors: Vec::new(),
             },
             should_emit_alert: false,
             next_state: state.clone(),
@@ -1749,6 +2033,7 @@ mod tests {
                 trigger_floor_pct: 0.5,
                 confidence_breakdown: HashMap::new(),
                 severity: Some(Severity::Critical),
+                contributors: Vec::new(),
             },
             should_emit_alert: false,
             next_state: state.clone(),
@@ -1828,6 +2113,101 @@ mod tests {
         assert_eq!(tenant_a.min_sources, 1);
         assert_eq!(tenant_b.peg_target, 0.98);
         assert_eq!(tenant_b.min_sources, 3);
+    }
+
+    #[test]
+    fn parse_source_mapping_overrides_reads_gateway_stream_mappings() {
+        let config = serde_json::json!({
+            "source_bindings": [{
+                "source_id": "pyth-eth-mainnet",
+                "enabled": true,
+                "binding_config": {
+                    "active_stream_ids": ["stream-1"],
+                    "streams": [{
+                        "id": "stream-1",
+                        "field_mappings": [{
+                            "source_field": "$.custom_price",
+                            "canonical_field": "price",
+                            "transform": "to_f64"
+                        }]
+                    }]
+                }
+            }]
+        });
+
+        let overrides = DpegPattern::parse_source_mapping_overrides(&config);
+        let pyth = overrides.get("pyth-eth-mainnet").expect("override");
+        assert_eq!(pyth.active_stream_ids, vec!["stream-1".to_string()]);
+        assert_eq!(
+            pyth.stream_field_mappings.get("stream-1").map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn effective_event_fields_apply_gateway_mapping_override() {
+        let mut pattern = DpegPattern::default();
+        pattern.source_mapping_overrides.insert(
+            "tenant-a".to_string(),
+            HashMap::from([(
+                "pyth-eth-mainnet".to_string(),
+                SourceBindingRuntimeOverride {
+                    active_stream_ids: vec!["stream-1".to_string()],
+                    stream_field_mappings: HashMap::from([(
+                        "stream-1".to_string(),
+                        serde_json::from_value(serde_json::json!([
+                            {
+                                "source_field": "$.custom_market",
+                                "canonical_field": "market_key",
+                                "transform": "identity"
+                            },
+                            {
+                                "source_field": "$.custom_price",
+                                "canonical_field": "price",
+                                "transform": "to_f64"
+                            },
+                            {
+                                "source_field": "$.custom_ts",
+                                "canonical_field": "timestamp",
+                                "transform": "parse_ts_iso8601"
+                            }
+                        ]))
+                        .expect("field mappings"),
+                    )]),
+                },
+            )]),
+        );
+
+        let event = UnifiedEvent {
+            event_id: "evt-1".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            source_id: "pyth-eth-mainnet".to_string(),
+            source_type: SourceType::OracleApi,
+            event_type: "oracle_update".to_string(),
+            timestamp: Utc::now(),
+            payload: serde_json::json!({
+                "stream_config_id": "stream-1",
+                "parser_name": "pyth_hermes_v2",
+                "custom_market": "USDC/USD",
+                "custom_price": "0.9987",
+                "custom_ts": "2026-03-25T22:57:27Z"
+            }),
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            market_key: Some("WRONG/USD".to_string()),
+            price: Some(1.111),
+        };
+
+        let (market_key, price, timestamp) = pattern.effective_event_fields(&event);
+        assert_eq!(market_key.as_deref(), Some("USDC/USD"));
+        assert_eq!(price, Some(0.9987));
+        assert_eq!(
+            timestamp,
+            DateTime::parse_from_rfc3339("2026-03-25T22:57:27Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
     }
 
     #[test]
@@ -2588,8 +2968,8 @@ mod tests {
         assert_eq!(outcome.snapshot.severity, Some(Severity::Medium));
     }
 
-    /// TC-D-303: Systemic at 0.25% maps to HIGH under the approved systemic ladder
-    /// (medium=0.01, high=0.25, critical=0.5). Uses 0.26% to clear fp boundary.
+    /// TC-D-303: Systemic at 0.25% maps to CRITICAL under the compatibility ladder
+    /// (medium=0.01, high=0.25, critical=0.25). Uses 0.26% to clear fp boundary.
     #[test]
     fn tc_d_303_systemic_at_025_pct() {
         let now = Utc::now();
@@ -2601,7 +2981,7 @@ mod tests {
             now,
             ContextClassification::Systemic,
         );
-        assert_eq!(outcome.snapshot.severity, Some(Severity::High));
+        assert_eq!(outcome.snapshot.severity, Some(Severity::Critical));
     }
 
     /// TC-D-304: Systemic CRITICAL — large deviation (2.50%)
@@ -3642,6 +4022,9 @@ mod tests {
         assert!(detection
             .oracle_context
             .contains_key("context_classification"));
+        assert!(detection
+            .oracle_context
+            .contains_key("contributing_sources"));
         assert!(!detection.confidence_breakdown.is_empty());
         assert!(detection.description.is_some());
     }
@@ -3725,7 +4108,7 @@ mod tests {
         let bands = DpegSeverityBands {
             medium: 0.01,
             high: 0.25,
-            critical: 0.5,
+            critical: 0.25,
         };
         assert_eq!(severity_for_divergence(0.009, &bands), None);
         assert_eq!(
@@ -3736,8 +4119,14 @@ mod tests {
             severity_for_divergence(0.24, &bands),
             Some(Severity::Medium)
         );
-        assert_eq!(severity_for_divergence(0.25, &bands), Some(Severity::High));
-        assert_eq!(severity_for_divergence(0.49, &bands), Some(Severity::High));
+        assert_eq!(
+            severity_for_divergence(0.25, &bands),
+            Some(Severity::Critical)
+        );
+        assert_eq!(
+            severity_for_divergence(0.49, &bands),
+            Some(Severity::Critical)
+        );
         assert_eq!(
             severity_for_divergence(0.5, &bands),
             Some(Severity::Critical)

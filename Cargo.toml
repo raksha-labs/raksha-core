@@ -29,6 +29,8 @@ native-tls = "0.2"
 postgres-native-tls = "0.5"
 redis = { version = "0.27", features = ["tokio-native-tls-comp"] }
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+chainlink-data-streams-report = "1.2.1"
+chainlink-data-streams-sdk = { version = "1.2.1", default-features = false, features = ["rest", "tracing"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"

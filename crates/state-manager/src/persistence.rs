@@ -136,6 +136,43 @@ pub struct OperationalSourcePrice {
     pub observed_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AlertEvidenceOperationalRow {
+    pub ingest_event_id: String,
+    pub source_id: String,
+    pub source_type: String,
+    pub event_type: String,
+    pub market_key: Option<String>,
+    pub price: Option<f64>,
+    pub observed_at: DateTime<Utc>,
+    pub event_ts: Option<DateTime<Utc>>,
+    pub tx_hash: Option<String>,
+    pub block_number: Option<i64>,
+    pub payload: Value,
+    pub normalized_fields: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlertEvidenceSnapshotRecord {
+    pub alert_id: String,
+    pub incident_id: Option<String>,
+    pub tenant_id: String,
+    pub pattern_id: Option<String>,
+    pub source_id: String,
+    pub source_type: String,
+    pub event_type: String,
+    pub market_key: Option<String>,
+    pub price: Option<f64>,
+    pub observed_at: DateTime<Utc>,
+    pub event_ts: Option<DateTime<Utc>>,
+    pub tx_hash: Option<String>,
+    pub block_number: Option<i64>,
+    pub payload: Value,
+    pub normalized_fields: Value,
+    pub raw_ref_type: Option<String>,
+    pub raw_ref_id: Option<String>,
+}
+
 fn simulation_metadata_from_payload(payload: &Value) -> (bool, Option<String>) {
     let simulation = payload.get("simulation").and_then(Value::as_object);
     let run_id = simulation
@@ -1179,6 +1216,169 @@ impl PostgresRepository {
                 ],
             )
             .await?;
+        Ok(())
+    }
+
+    pub async fn load_operational_events_for_alert_evidence(
+        &self,
+        tenant_id: &str,
+        market_key: Option<&str>,
+        source_ids: &[String],
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+        is_simulated: bool,
+        simulation_run_id: Option<&str>,
+    ) -> Result<Vec<AlertEvidenceOperationalRow>> {
+        if source_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT
+                    ingest_event_id::text,
+                    source_id,
+                    source_type,
+                    event_type,
+                    market_key,
+                    price,
+                    observed_at,
+                    payload_event_ts,
+                    tx_hash,
+                    block_number,
+                    COALESCE(payload, '{}'::jsonb) AS payload,
+                    COALESCE(normalized_fields, '{}'::jsonb) AS normalized_fields
+                FROM catalog.ingest_operational_events
+                WHERE tenant_id = $1
+                  AND observed_at >= $2
+                  AND observed_at <= $3
+                  AND source_id = ANY($4)
+                  AND ($5::text IS NULL OR market_key = $5)
+                  AND is_simulated = $6
+                  AND (
+                    ($7::text IS NULL AND simulation_run_id IS NULL)
+                    OR simulation_run_id = $7
+                  )
+                ORDER BY observed_at ASC, ingest_event_id ASC
+                "#,
+                &[
+                    &tenant_id,
+                    &window_start,
+                    &window_end,
+                    &source_ids,
+                    &market_key,
+                    &is_simulated,
+                    &simulation_run_id,
+                ],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| AlertEvidenceOperationalRow {
+                ingest_event_id: row.get(0),
+                source_id: row.get(1),
+                source_type: row.get(2),
+                event_type: row.get(3),
+                market_key: row.get(4),
+                price: row.get(5),
+                observed_at: row.get(6),
+                event_ts: row.get(7),
+                tx_hash: row.get(8),
+                block_number: row.get(9),
+                payload: row.get(10),
+                normalized_fields: row.get(11),
+            })
+            .collect())
+    }
+
+    pub async fn save_alert_evidence_snapshot_batch(
+        &self,
+        records: &[AlertEvidenceSnapshotRecord],
+    ) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        self.client
+            .execute(
+                r#"
+                DELETE FROM detection.alert_evidence_snapshots
+                WHERE tenant_id = $1
+                  AND alert_id = $2
+                "#,
+                &[&records[0].tenant_id, &records[0].alert_id],
+            )
+            .await?;
+
+        for record in records {
+            self.client
+                .execute(
+                    r#"
+                    INSERT INTO detection.alert_evidence_snapshots (
+                        alert_id,
+                        incident_id,
+                        tenant_id,
+                        pattern_id,
+                        source_id,
+                        source_type,
+                        event_type,
+                        market_key,
+                        price,
+                        observed_at,
+                        event_ts,
+                        tx_hash,
+                        block_number,
+                        payload,
+                        normalized_fields,
+                        raw_ref_type,
+                        raw_ref_id
+                    )
+                    VALUES (
+                        $1,
+                        $2,
+                        $3,
+                        $4,
+                        $5,
+                        $6,
+                        $7,
+                        $8,
+                        $9,
+                        $10,
+                        $11,
+                        $12,
+                        $13,
+                        $14,
+                        $15,
+                        $16,
+                        $17
+                    )
+                    "#,
+                    &[
+                        &record.alert_id,
+                        &record.incident_id,
+                        &record.tenant_id,
+                        &record.pattern_id,
+                        &record.source_id,
+                        &record.source_type,
+                        &record.event_type,
+                        &record.market_key,
+                        &record.price,
+                        &record.observed_at,
+                        &record.event_ts,
+                        &record.tx_hash,
+                        &record.block_number,
+                        &record.payload,
+                        &record.normalized_fields,
+                        &record.raw_ref_type,
+                        &record.raw_ref_id,
+                    ],
+                )
+                .await?;
+        }
+
         Ok(())
     }
 

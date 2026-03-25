@@ -45,6 +45,10 @@ VALUES
      '{"rpc_url": "wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}", "chain_id": 1, "chain_slug": "ethereum"}'::jsonb,
      '{"market_symbols": ["USDC/USD", "USDT/USD", "DAI/USD"]}'::jsonb,
      'global', NULL, TRUE),
+    ('chainlink-data-streams', 'oracle_api', 'chainlink-data-streams',
+     '{"endpoint": "https://api.dataengine.chain.link", "ws_endpoint": "wss://ws.dataengine.chain.link"}'::jsonb,
+     '{"market_symbols": ["USDC/USD", "USDT/USD", "DAI/USD"]}'::jsonb,
+     'global', NULL, TRUE),
     ('uniswap-v2-eth-mainnet', 'dex_api', 'uniswap-v2',
      '{"rpc_url": "wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}", "chain_id": 1, "chain_slug": "ethereum"}'::jsonb,
      '{"market_symbols": ["USDC/USD", "USDT/USD", "DAI/USD"]}'::jsonb,
@@ -90,6 +94,7 @@ VALUES
     ('glider', 'bybit-spot', TRUE, '{}'::jsonb),
     ('glider', 'gemini-spot', TRUE, '{}'::jsonb),
     ('glider', 'chainlink-eth-mainnet', TRUE, '{}'::jsonb),
+    ('glider', 'chainlink-data-streams', TRUE, '{}'::jsonb),
     ('glider', 'uniswap-v2-eth-mainnet', TRUE, '{}'::jsonb),
     ('glider', 'uniswap-v3-eth-mainnet', TRUE, '{}'::jsonb),
     ('glider', 'sushi-v2-eth-mainnet', TRUE, '{}'::jsonb),
@@ -105,8 +110,8 @@ WITH desired_stream_configs AS (
     VALUES
       -- Binance (USDT quoted)
       ('binance-global','websocket','miniTicker','usdcusdt@miniTicker','quote','binance_miniticker_v1','USDC/USD','USDCUSDT','{"symbols":["USDCUSDT"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',NULL,TRUE,'glider'),
-      ('binance-global','websocket','miniTicker','usdtusdc@miniTicker','quote','binance_miniticker_v1','USDT/USD','USDTUSDC','{"symbols":["USDTUSDC"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',NULL,TRUE,'glider'),
-      ('binance-global','websocket','miniTicker','daiusdt@miniTicker','quote','binance_miniticker_v1','DAI/USD','DAIUSDT','{"symbols":["DAIUSDT"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',NULL,TRUE,'glider'),
+      ('binance-global','websocket','miniTicker','usdtusdc@miniTicker','quote','binance_miniticker_v1','USDT/USD','USDTUSDC','{"symbols":["USDTUSDC"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',NULL,FALSE,'glider'),
+      ('binance-global','websocket','miniTicker','daiusdt@miniTicker','quote','binance_miniticker_v1','DAI/USD','DAIUSDT','{"symbols":["DAIUSDT"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',NULL,FALSE,'glider'),
 
       -- Coinbase (USD direct)
       ('coinbase-advanced','websocket','ticker','USDC-USD','quote','coinbase_ticker_v1','USDC/USD','USDC-USD','{"subscribe_message":{"type":"subscribe","channel":"ticker","product_ids":["USDC-USD"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.timestamp','iso8601',NULL,TRUE,'glider'),
@@ -137,6 +142,16 @@ WITH desired_stream_configs AS (
       ('chainlink-eth-mainnet','rpc_logs','logs','usdc-usd-feed','oracle_update','chainlink_answer_updated_v1','USDC/USD','USDCUSD','{"addresses":["0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"],"topics":["0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"],"decimals":8}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
       ('chainlink-eth-mainnet','rpc_logs','logs','usdt-usd-feed','oracle_update','chainlink_answer_updated_v1','USDT/USD','USDTUSD','{"addresses":["0x3E7d1eAB13ad0104d2750B8863b489D65364e32D"],"topics":["0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"],"decimals":8}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
       ('chainlink-eth-mainnet','rpc_logs','logs','dai-usd-feed','oracle_update','chainlink_answer_updated_v1','DAI/USD','DAIUSD','{"addresses":["0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9"],"topics":["0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"],"decimals":8}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
+
+      -- Chainlink Data Streams (HTTP poll via Chainlink Rust SDK)
+      ('chainlink-data-streams','websocket','latest_report','usdc-usd-feed','oracle_update','chainlink_data_streams_v3','USDC/USD','USDCUSD','{"feed_id_env":"CHAINLINK_DATA_STREAMS_FEED_ID_USDC_USD","price_decimals":8}'::jsonb,NULL::text,'{"api_key_env":"CHAINLINK_DATA_STREAMS_API_KEY","user_secret_env":"CHAINLINK_DATA_STREAMS_USER_SECRET"}'::jsonb,NULL,'s',NULL,FALSE,'glider'),
+      ('chainlink-data-streams','websocket','latest_report','usdt-usd-feed','oracle_update','chainlink_data_streams_v3','USDT/USD','USDTUSD','{"feed_id_env":"CHAINLINK_DATA_STREAMS_FEED_ID_USDT_USD","price_decimals":8}'::jsonb,NULL::text,'{"api_key_env":"CHAINLINK_DATA_STREAMS_API_KEY","user_secret_env":"CHAINLINK_DATA_STREAMS_USER_SECRET"}'::jsonb,NULL,'s',NULL,FALSE,'glider'),
+      ('chainlink-data-streams','websocket','latest_report','dai-usd-feed','oracle_update','chainlink_data_streams_v3','DAI/USD','DAIUSD','{"feed_id_env":"CHAINLINK_DATA_STREAMS_FEED_ID_DAI_USD","price_decimals":8}'::jsonb,NULL::text,'{"api_key_env":"CHAINLINK_DATA_STREAMS_API_KEY","user_secret_env":"CHAINLINK_DATA_STREAMS_USER_SECRET"}'::jsonb,NULL,'s',NULL,FALSE,'glider'),
+
+      -- Pyth Hermes (HTTP poll every 2 seconds)
+      ('pyth-eth-mainnet','http_poll','latest_price','0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a','oracle_update','pyth_hermes_v2','USDC/USD','USDCUSD','{"use_spot_price":false}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
+      ('pyth-eth-mainnet','http_poll','latest_price','0x2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b','oracle_update','pyth_hermes_v2','USDT/USD','USDTUSD','{"use_spot_price":false}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
+      ('pyth-eth-mainnet','http_poll','latest_price','0xb0948a5e5313200c632b51bb5ca32f6de0d36e9950a942d19751e833f70dabfd','oracle_update','pyth_hermes_v2','DAI/USD','DAIUSD','{"use_spot_price":false}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
 
       -- Uniswap V2 (Ethereum mainnet logs)
       ('uniswap-v2-eth-mainnet','rpc_logs','logs','uni-v2-usdc-usdt','swap','uniswap_v2_swap_price_v1','USDC/USD','USDCUSDT','{"addresses":["0x3041CbD36888bECc7bbCBc0045E3B1f144466f5f"],"topics":["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"],"token0_symbol":"USDC","token1_symbol":"USDT","token0_decimals":6,"token1_decimals":6,"base_symbol":"USDC"}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
@@ -250,6 +265,9 @@ WITH desired_stream_refs AS (
       ('chainlink-eth-mainnet','logs','usdc-usd-feed','USDCUSD'),
       ('chainlink-eth-mainnet','logs','usdt-usd-feed','USDTUSD'),
       ('chainlink-eth-mainnet','logs','dai-usd-feed','DAIUSD'),
+      ('chainlink-data-streams','latest_report','usdc-usd-feed','USDCUSD'),
+      ('chainlink-data-streams','latest_report','usdt-usd-feed','USDTUSD'),
+      ('chainlink-data-streams','latest_report','dai-usd-feed','DAIUSD'),
       ('uniswap-v2-eth-mainnet','logs','uni-v2-usdc-usdt','USDCUSDT'),
       ('uniswap-v2-eth-mainnet','logs','uni-v2-usdt-usdc','USDTUSDC'),
       ('uniswap-v2-eth-mainnet','logs','uni-v2-dai-usdt','DAIUSDT'),

@@ -127,6 +127,23 @@ fn pyth_log_event_id(payload: &Value) -> Option<String> {
     })
 }
 
+fn pyth_stream_event_id(
+    feed: &Value,
+    feed_id: Option<&str>,
+    payload_event_ts: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<String> {
+    let feed_id = feed_id.map(str::trim).filter(|value| !value.is_empty())?;
+    let slot = feed
+        .get("metadata")
+        .and_then(|metadata| metadata.get("slot"))
+        .and_then(Value::as_i64);
+    if let Some(slot) = slot {
+        return Some(format!("{feed_id}:{slot}"));
+    }
+
+    payload_event_ts.map(|ts| format!("{feed_id}:{}", ts.timestamp()))
+}
+
 /// Derive a normalised `market_key` from the Pyth symbol string.
 ///
 /// Pyth symbols follow the pattern `"Asset.BASE/QUOTE"` (e.g. `"Crypto.USDC/USD"`).
@@ -257,6 +274,10 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         .get("id")
         .and_then(Value::as_str)
         .map(ToString::to_string);
+    let slot = feed
+        .get("metadata")
+        .and_then(|metadata| metadata.get("slot"))
+        .and_then(Value::as_i64);
 
     let market_key = input
         .market_key_hint
@@ -276,7 +297,8 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
 
     Ok(ParsedFeedEvent {
         event_type: input.event_type.to_string(),
-        event_id: feed_id.clone(),
+        event_id: pyth_stream_event_id(feed, feed_id.as_deref(), payload_event_ts)
+            .or_else(|| feed_id.clone()),
         market_key,
         asset_pair,
         price: Some(price),
@@ -290,6 +312,7 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         normalized_fields: json!({
             "decoded_by": "pyth_hermes_v2",
             "feed_id": feed_id,
+            "slot": slot,
             "raw_symbol": raw_symbol,
             "price_type": if use_spot { "spot" } else { "ema" },
             "ema_price_usd": ema_price,
@@ -334,7 +357,8 @@ mod tests {
             },
             "metadata": {
                 "symbol": "Crypto.USDC/USD",
-                "asset_type": "Crypto"
+                "asset_type": "Crypto",
+                "slot": 280932977
             }
         })
     }
@@ -383,6 +407,49 @@ mod tests {
     }
 
     #[test]
+    fn hermes_stream_uses_feed_id_and_slot_for_event_id() {
+        let filter = Value::Null;
+        let result = parse(&make_input(&filter), &hermes_payload()).expect("should parse");
+        assert_eq!(
+            result.event_id.as_deref(),
+            Some("0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace:280932977")
+        );
+        assert_eq!(
+            result.normalized_fields.get("slot").and_then(Value::as_i64),
+            Some(280932977)
+        );
+    }
+
+    #[test]
+    fn hermes_stream_falls_back_to_publish_time_for_event_id() {
+        let filter = Value::Null;
+        let payload = json!({
+            "id": "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+            "price": {
+                "price": "99990000",
+                "conf": "50000",
+                "expo": -8,
+                "publish_time": 1713984281_i64
+            },
+            "ema_price": {
+                "price": "99985000",
+                "conf": "48000",
+                "expo": -8,
+                "publish_time": 1713984281_i64
+            },
+            "metadata": {
+                "symbol": "Crypto.USDC/USD"
+            }
+        });
+
+        let result = parse(&make_input(&filter), &payload).expect("should parse");
+        assert_eq!(
+            result.event_id.as_deref(),
+            Some("0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace:1713984281")
+        );
+    }
+
+    #[test]
     fn pyth_log_uses_transaction_identity_for_event_id() {
         let filter = Value::Null;
         let payload = json!({
@@ -392,7 +459,7 @@ mod tests {
             "chainId": 1,
             "topics": [
                 "0xd06a6b7f4918494b3719217d1802786c1f5112a6c1d88fe2cfb5bef7fda2bc6f",
-                "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc3a1b6f9e3f75f2d5"
+                "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
             ],
             "data": "0x\
         00000000000000000000000000000000000000000000000000000000053ec600\

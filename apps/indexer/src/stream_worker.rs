@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, TimeZone, Utc};
-use event_schema::{SourceType, UnifiedEvent};
+use event_schema::{apply_mappings, resolve_field_mappings, SourceType, UnifiedEvent};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use state_manager::{
@@ -15,7 +15,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::stream_connector::{
-    http_poll::HttpPollConnector, rpc_logs::RpcLogsConnector, rpc_state::RpcStateConnector,
+    chainlink_data_streams::ChainlinkDataStreamsConnector, http_poll::HttpPollConnector,
+    http_sse::HttpSseConnector, rpc_logs::RpcLogsConnector, rpc_state::RpcStateConnector,
     websocket::WebsocketStreamConnector,
 };
 use crate::stream_parser::{parse_payload, ParsedFeedEvent, ParserInput};
@@ -302,6 +303,44 @@ fn apply_accelerated_simulation_timestamp(
     parsed.observed_at = replay_ts;
 }
 
+fn apply_runtime_field_mapping_overrides(
+    config: &RuntimeStreamConfig,
+    payload: &Value,
+    parsed: &mut ParsedFeedEvent,
+) {
+    let mappings = resolve_field_mappings(&config.parser_name, Some(&config.filter_config));
+    if mappings.is_empty() {
+        return;
+    }
+
+    let mapped = apply_mappings(&mappings, payload, Some(&config.filter_config));
+    if let Some(market_key) = mapped.market_key {
+        let trimmed = market_key.trim();
+        if !trimmed.is_empty() {
+            parsed.market_key = Some(trimmed.to_string());
+        }
+    }
+    if let Some(price) = mapped
+        .price
+        .filter(|value| value.is_finite() && *value > 0.0)
+    {
+        parsed.price = Some(price);
+    }
+    if let Some(timestamp) = mapped.timestamp {
+        parsed.payload_event_ts = Some(timestamp);
+        parsed.observed_at = timestamp;
+    }
+    if let Some(block_number) = mapped
+        .block_number
+        .and_then(|value| i64::try_from(value).ok())
+    {
+        parsed.block_number = Some(block_number);
+    }
+    if let Some(tx_hash) = mapped.tx_hash.filter(|value| !value.trim().is_empty()) {
+        parsed.tx_hash = Some(tx_hash);
+    }
+}
+
 fn is_static_worker_config_error(error: &anyhow::Error) -> bool {
     let message = error.to_string();
     message.contains("rpc_state connector missing calls configuration")
@@ -383,6 +422,18 @@ pub async fn run_stream_worker(
                 )
                 .await
             }
+            "http_sse" => {
+                run_http_sse_loop(
+                    &config,
+                    &repo,
+                    raw_repo.as_ref(),
+                    &stream,
+                    &mut shutdown,
+                    &mut fx_cache,
+                    &mut source_health_report_state,
+                )
+                .await
+            }
             mode => Err(anyhow!("unsupported_connector_mode:{mode}")),
         };
 
@@ -443,6 +494,51 @@ async fn run_websocket_loop(
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
+    if config.parser_name == "chainlink_data_streams_v3" && !endpoint_log_context.is_mock_endpoint {
+        let mut connector = ChainlinkDataStreamsConnector::new(
+            &config.connection_config,
+            &config.auth_config,
+            &config.filter_config,
+            config.market_key.as_deref(),
+            config.asset_pair.as_deref(),
+        )?;
+        connector.connect_stream().await?;
+        log_test_mode_connector_connected(config, &endpoint_log_context);
+        let mut test_mode_log_state = TestModeLogState::default();
+
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_ok() && *shutdown.borrow() {
+                        if let Err(error) = connector.close_stream().await {
+                            common::log_error!(
+                                warn,
+                                error,
+                                "failed closing Chainlink Data Streams websocket stream",
+                                stream_config_id = %config.stream_config_id,
+                                source_id = %config.source_id,
+                                endpoint = %connector.endpoint()
+                            );
+                        }
+                        return Ok(());
+                    }
+                }
+                raw = connector.next_payload() => {
+                    let payload = raw?;
+                    let mut payload_ctx = PayloadProcessingContext {
+                        stream,
+                        chain_id_hint: None,
+                        simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
+                        fx_cache,
+                        source_health_report_state,
+                        test_mode_log_state: &mut test_mode_log_state,
+                    };
+                    process_payload(config, repo, raw_repo, payload, &mut payload_ctx).await?;
+                }
+            }
+        }
+    }
+
     let mut connector = WebsocketStreamConnector::new(
         endpoint,
         config.stream_name.clone(),
@@ -542,27 +638,34 @@ async fn run_http_poll_loop(
         &endpoint_log_context,
         DEFAULT_HTTP_POLL_INTERVAL_MS,
     );
-    let mut connector = HttpPollConnector::new(endpoint, poll_interval);
-    connector.connect().await?;
-    log_test_mode_connector_connected(config, &endpoint_log_context);
-    let mut test_mode_log_state = TestModeLogState::default();
-    let mut fetch_due = true;
 
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_ok() && *shutdown.borrow() {
-                    return Ok(());
+    if config.parser_name == "chainlink_data_streams_v3" {
+        let mut connector = ChainlinkDataStreamsConnector::new(
+            &config.connection_config,
+            &config.auth_config,
+            &config.filter_config,
+            config.market_key.as_deref(),
+            config.asset_pair.as_deref(),
+        )?;
+        connector.connect().await?;
+        log_test_mode_connector_connected(config, &endpoint_log_context);
+        let mut test_mode_log_state = TestModeLogState::default();
+        let mut first_fetch = true;
+
+        loop {
+            if !first_fetch {
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_ok() && *shutdown.borrow() {
+                            return Ok(());
+                        }
+                    }
+                    _ = tokio::time::sleep(poll_interval) => {}
                 }
             }
-            _ = tokio::time::sleep(poll_interval), if !fetch_due => {
-                fetch_due = true;
-            }
-        }
 
-        if fetch_due {
-            fetch_due = false;
-            match connector.fetch_payload(connector.endpoint()).await {
+            first_fetch = false;
+            match connector.fetch_payload().await {
                 Ok(Some(payload)) => {
                     let mut processing_ctx = HttpPollProcessingContext {
                         config,
@@ -586,12 +689,108 @@ async fn run_http_poll_loop(
                     common::log_error!(
                         warn,
                         error,
-                        "http_poll connector returned error",
+                        "chainlink_data_streams connector returned error",
                         stream_config_id = %config.stream_config_id,
                         source_id = %config.source_id,
                         endpoint = %connector.endpoint()
                     );
                 }
+            }
+        }
+    }
+
+    let mut connector = HttpPollConnector::new(endpoint, poll_interval);
+    connector.connect().await?;
+    log_test_mode_connector_connected(config, &endpoint_log_context);
+    let mut test_mode_log_state = TestModeLogState::default();
+    let mut first_fetch = true;
+
+    loop {
+        if !first_fetch {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_ok() && *shutdown.borrow() {
+                        return Ok(());
+                    }
+                }
+                _ = tokio::time::sleep(poll_interval) => {}
+            }
+        }
+
+        first_fetch = false;
+        match connector.fetch_payload(connector.endpoint()).await {
+            Ok(Some(payload)) => {
+                let mut processing_ctx = HttpPollProcessingContext {
+                    config,
+                    repo,
+                    raw_repo,
+                    payload_ctx: PayloadProcessingContext {
+                        stream,
+                        chain_id_hint: None,
+                        simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
+                        fx_cache,
+                        source_health_report_state,
+                        test_mode_log_state: &mut test_mode_log_state,
+                    },
+                };
+                process_http_poll_payload(&mut processing_ctx, payload).await?;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                common::log_error!(
+                    warn,
+                    error,
+                    "http_poll connector returned error",
+                    stream_config_id = %config.stream_config_id,
+                    source_id = %config.source_id,
+                    endpoint = %connector.endpoint()
+                );
+            }
+        }
+    }
+}
+
+async fn run_http_sse_loop(
+    config: &RuntimeStreamConfig,
+    repo: &PostgresRepository,
+    raw_repo: Option<&PostgresRawRepository>,
+    stream: &RedisStreamPublisher,
+    shutdown: &mut watch::Receiver<bool>,
+    fx_cache: &mut FxRateCache,
+    source_health_report_state: &mut SourceHealthReportState,
+) -> Result<()> {
+    let endpoint = endpoint_from_runtime_config(config)?;
+    let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
+    let mut connector = HttpSseConnector::new(endpoint);
+    connector.connect().await?;
+    log_test_mode_connector_connected(config, &endpoint_log_context);
+    let mut test_mode_log_state = TestModeLogState::default();
+
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_ok() && *shutdown.borrow() {
+                    return Ok(());
+                }
+            }
+            raw = connector.next_payload() => {
+                let payload = raw?;
+                let mut processing_ctx = HttpPollProcessingContext {
+                    config,
+                    repo,
+                    raw_repo,
+                    payload_ctx: PayloadProcessingContext {
+                        stream,
+                        chain_id_hint: None,
+                        simulation_run_id_hint: endpoint_log_context
+                            .simulation_run_id
+                            .as_deref(),
+                        fx_cache,
+                        source_health_report_state,
+                        test_mode_log_state: &mut test_mode_log_state,
+                    },
+                };
+                process_http_poll_payload(&mut processing_ctx, payload).await?;
             }
         }
     }
@@ -796,6 +995,21 @@ async fn process_http_poll_payload(
         }
         Value::Null => Ok(()),
         other => {
+            if is_pyth_hermes_parser(processing_ctx.config.parser_name.as_str()) {
+                if let Some(items) = other.get("parsed").and_then(Value::as_array) {
+                    for item in items {
+                        process_payload(
+                            processing_ctx.config,
+                            processing_ctx.repo,
+                            processing_ctx.raw_repo,
+                            item.clone(),
+                            &mut processing_ctx.payload_ctx,
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                }
+            }
             process_payload(
                 processing_ctx.config,
                 processing_ctx.repo,
@@ -806,6 +1020,10 @@ async fn process_http_poll_payload(
             .await
         }
     }
+}
+
+fn is_pyth_hermes_parser(parser_name: &str) -> bool {
+    matches!(parser_name, "pyth_hermes_v2" | "pyth_price_update_v1")
 }
 
 async fn process_payload(
@@ -830,6 +1048,7 @@ async fn process_payload(
             if parsed.chain_id.is_none() {
                 parsed.chain_id = payload_ctx.chain_id_hint;
             }
+            apply_runtime_field_mapping_overrides(config, &payload, &mut parsed);
             apply_accelerated_simulation_timestamp(
                 &mut parsed,
                 &payload,
@@ -1909,11 +2128,32 @@ fn enrich_payload_for_unified(
 
 fn endpoint_from_runtime_config(config: &RuntimeStreamConfig) -> Result<String> {
     let endpoint_template = endpoint_from_connection_config(&config.connection_config)?;
-    resolve_endpoint_template(
+    let endpoint = resolve_endpoint_template(
         &endpoint_template,
         &config.auth_config,
         config.auth_secret_ref.as_deref(),
-    )
+    )?;
+
+    if config.connector_mode == "websocket" {
+        return Ok(endpoint);
+    }
+
+    if endpoint.contains("{subscription_key}") {
+        let subscription_key = config
+            .subscription_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "missing subscription_key for endpoint template placeholder in stream_config_id={}",
+                    config.stream_config_id
+                )
+            })?;
+        return Ok(endpoint.replace("{subscription_key}", subscription_key));
+    }
+
+    Ok(endpoint)
 }
 
 fn endpoint_log_context(endpoint: &str) -> EndpointLogContext {
@@ -2361,6 +2601,75 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_from_runtime_config_resolves_subscription_placeholder_for_http_sse() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "pyth-eth-mainnet".to_string(),
+            source_type: "oracle_api".to_string(),
+            source_name: "Pyth".to_string(),
+            connection_config: json!({
+                "http_url": "https://hermes.pyth.network/v2/updates/price/stream?ids[]={subscription_key}"
+            }),
+            operating_mode_profile: "live".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "http_sse".to_string(),
+            stream_name: "price_stream".to_string(),
+            subscription_key: Some(
+                "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a".to_string(),
+            ),
+            event_type: "oracle_update".to_string(),
+            parser_name: "pyth_hermes_v2".to_string(),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSD".to_string()),
+            filter_config: json!({}),
+            payload_ts_path: None,
+            payload_ts_unit: "s".to_string(),
+            poll_interval_ms: None,
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+
+        let endpoint = endpoint_from_runtime_config(&config).expect("endpoint should resolve");
+        assert_eq!(
+            endpoint,
+            "https://hermes.pyth.network/v2/updates/price/stream?ids[]=0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
+        );
+    }
+
+    #[test]
+    fn endpoint_from_runtime_config_errors_when_http_placeholder_has_no_subscription_key() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "pyth-eth-mainnet".to_string(),
+            source_type: "oracle_api".to_string(),
+            source_name: "Pyth".to_string(),
+            connection_config: json!({
+                "http_url": "https://hermes.pyth.network/v2/updates/price/stream?ids[]={subscription_key}"
+            }),
+            operating_mode_profile: "live".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "http_sse".to_string(),
+            stream_name: "price_stream".to_string(),
+            subscription_key: None,
+            event_type: "oracle_update".to_string(),
+            parser_name: "pyth_hermes_v2".to_string(),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDCUSD".to_string()),
+            filter_config: json!({}),
+            payload_ts_path: None,
+            payload_ts_unit: "s".to_string(),
+            poll_interval_ms: None,
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+
+        let error = endpoint_from_runtime_config(&config).expect_err("missing key should error");
+        assert!(error
+            .to_string()
+            .contains("missing subscription_key for endpoint template placeholder"));
+    }
+
+    #[test]
     fn resolve_endpoint_template_errors_on_missing_auth_placeholder() {
         let error = resolve_endpoint_template(
             "wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}",
@@ -2684,6 +2993,115 @@ mod tests {
         };
 
         assert_eq!(fallback_usdt_usd_rate(&parsed, Some("USDT")), None);
+    }
+
+    #[test]
+    fn runtime_field_mapping_overrides_apply_pyth_defaults() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "pyth-eth-mainnet".to_string(),
+            source_type: "oracle_api".to_string(),
+            source_name: "Pyth".to_string(),
+            connection_config: json!({"endpoint": "https://hermes.pyth.network"}),
+            operating_mode_profile: "live".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "http_sse".to_string(),
+            stream_name: "price_stream".to_string(),
+            subscription_key: Some("feed-1".to_string()),
+            event_type: "oracle_update".to_string(),
+            parser_name: "pyth_hermes_v2".to_string(),
+            market_key: None,
+            asset_pair: None,
+            filter_config: json!({}),
+            payload_ts_path: None,
+            payload_ts_unit: "s".to_string(),
+            poll_interval_ms: None,
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+        let mut parsed = ParsedFeedEvent {
+            event_type: "oracle_update".to_string(),
+            event_id: Some("evt-1".to_string()),
+            market_key: None,
+            asset_pair: None,
+            price: None,
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: None,
+            observed_at: Utc.timestamp_opt(1_678_521_640, 0).single().unwrap(),
+            normalized_fields: json!({}),
+        };
+        let payload = json!({
+            "metadata": { "symbol": "Crypto.USDC/USD" },
+            "ema_price": { "price": "99985000", "expo": -8, "publish_time": 1710000000i64 }
+        });
+
+        apply_runtime_field_mapping_overrides(&config, &payload, &mut parsed);
+
+        assert_eq!(parsed.market_key.as_deref(), Some("USDC/USD"));
+        assert_eq!(parsed.price, Some(0.99985));
+        assert_eq!(
+            parsed.payload_event_ts,
+            Utc.timestamp_opt(1710000000, 0).single()
+        );
+    }
+
+    #[test]
+    fn runtime_field_mapping_overrides_apply_chainlink_defaults() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-2".to_string(),
+            source_id: "chainlink-data-streams".to_string(),
+            source_type: "oracle_api".to_string(),
+            source_name: "Chainlink".to_string(),
+            connection_config: json!({"endpoint": "wss://ws.dataengine.chain.link"}),
+            operating_mode_profile: "live".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "websocket".to_string(),
+            stream_name: "latest_report".to_string(),
+            subscription_key: Some("feed-2".to_string()),
+            event_type: "oracle_update".to_string(),
+            parser_name: "chainlink_data_streams_v3".to_string(),
+            market_key: None,
+            asset_pair: None,
+            filter_config: json!({"price_decimals": 8}),
+            payload_ts_path: None,
+            payload_ts_unit: "s".to_string(),
+            poll_interval_ms: None,
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+        let mut parsed = ParsedFeedEvent {
+            event_type: "oracle_update".to_string(),
+            event_id: Some("evt-2".to_string()),
+            market_key: None,
+            asset_pair: None,
+            price: None,
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: None,
+            observed_at: Utc.timestamp_opt(1_678_521_640, 0).single().unwrap(),
+            normalized_fields: json!({}),
+        };
+        let payload = json!({
+            "market_key": "USDT/USD",
+            "benchmark_price": "99992000",
+            "observations_timestamp": 1710000010i64
+        });
+
+        apply_runtime_field_mapping_overrides(&config, &payload, &mut parsed);
+
+        assert_eq!(parsed.market_key.as_deref(), Some("USDT/USD"));
+        assert_eq!(parsed.price, Some(0.99992));
+        assert_eq!(
+            parsed.payload_event_ts,
+            Utc.timestamp_opt(1710000010, 0).single()
+        );
     }
 
     #[test]
