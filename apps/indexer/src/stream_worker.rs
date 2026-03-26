@@ -30,6 +30,7 @@ const DEFAULT_RPC_LOGS_POLL_INTERVAL_MS: u64 = 2_000;
 const DEFAULT_RPC_STATE_POLL_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_HTTP_POLL_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_RAW_LANDING_TIMEOUT_MS: u64 = 150;
+const DEFAULT_GEMINI_DUPLICATE_QUOTE_WINDOW_MS: u64 = 250;
 const TEST_MODE_MOCK_POLL_INTERVAL_MS: u64 = 200;
 const MIN_POLL_INTERVAL_MS: u64 = 200;
 const MAX_POLL_INTERVAL_MS: u64 = 60_000;
@@ -126,11 +127,18 @@ struct SourceHealthReportState {
     last_reported_healthy: Option<bool>,
 }
 
+#[derive(Debug, Default)]
+struct RecentQuoteState {
+    last_price_bits: Option<u64>,
+    last_emitted_at_ms: Option<i64>,
+}
+
 struct PayloadProcessingContext<'a> {
     stream: &'a RedisStreamPublisher,
     chain_id_hint: Option<i64>,
     simulation_run_id_hint: Option<&'a str>,
     fx_cache: &'a mut FxRateCache,
+    recent_quote_state: &'a mut RecentQuoteState,
     source_health_report_state: &'a mut SourceHealthReportState,
     test_mode_log_state: &'a mut TestModeLogState,
 }
@@ -140,6 +148,12 @@ struct HttpPollProcessingContext<'a> {
     repo: &'a PostgresRepository,
     raw_repo: Option<&'a PostgresRawRepository>,
     payload_ctx: PayloadProcessingContext<'a>,
+}
+
+struct StreamLoopState<'a> {
+    fx_cache: &'a mut FxRateCache,
+    recent_quote_state: &'a mut RecentQuoteState,
+    source_health_report_state: &'a mut SourceHealthReportState,
 }
 
 struct TestModePayloadLogContext<'a> {
@@ -355,6 +369,7 @@ pub async fn run_stream_worker(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut fx_cache = FxRateCache::default();
+    let mut recent_quote_state = RecentQuoteState::default();
     let mut source_health_report_state = SourceHealthReportState::default();
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(30);
@@ -373,6 +388,11 @@ pub async fn run_stream_worker(
             break;
         }
 
+        let mut loop_state = StreamLoopState {
+            fx_cache: &mut fx_cache,
+            recent_quote_state: &mut recent_quote_state,
+            source_health_report_state: &mut source_health_report_state,
+        };
         let result = match config.connector_mode.as_str() {
             "websocket" => {
                 run_websocket_loop(
@@ -381,8 +401,7 @@ pub async fn run_stream_worker(
                     raw_repo.as_ref(),
                     &stream,
                     &mut shutdown,
-                    &mut fx_cache,
-                    &mut source_health_report_state,
+                    &mut loop_state,
                 )
                 .await
             }
@@ -393,8 +412,7 @@ pub async fn run_stream_worker(
                     raw_repo.as_ref(),
                     &stream,
                     &mut shutdown,
-                    &mut fx_cache,
-                    &mut source_health_report_state,
+                    &mut loop_state,
                 )
                 .await
             }
@@ -405,8 +423,7 @@ pub async fn run_stream_worker(
                     raw_repo.as_ref(),
                     &stream,
                     &mut shutdown,
-                    &mut fx_cache,
-                    &mut source_health_report_state,
+                    &mut loop_state,
                 )
                 .await
             }
@@ -417,8 +434,7 @@ pub async fn run_stream_worker(
                     raw_repo.as_ref(),
                     &stream,
                     &mut shutdown,
-                    &mut fx_cache,
-                    &mut source_health_report_state,
+                    &mut loop_state,
                 )
                 .await
             }
@@ -429,8 +445,7 @@ pub async fn run_stream_worker(
                     raw_repo.as_ref(),
                     &stream,
                     &mut shutdown,
-                    &mut fx_cache,
-                    &mut source_health_report_state,
+                    &mut loop_state,
                 )
                 .await
             }
@@ -489,8 +504,7 @@ async fn run_websocket_loop(
     raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
-    fx_cache: &mut FxRateCache,
-    source_health_report_state: &mut SourceHealthReportState,
+    loop_state: &mut StreamLoopState<'_>,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
@@ -529,8 +543,9 @@ async fn run_websocket_loop(
                         stream,
                         chain_id_hint: None,
                         simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
-                        fx_cache,
-                        source_health_report_state,
+                        fx_cache: loop_state.fx_cache,
+                        recent_quote_state: loop_state.recent_quote_state,
+                        source_health_report_state: loop_state.source_health_report_state,
                         test_mode_log_state: &mut test_mode_log_state,
                     };
                     process_payload(config, repo, raw_repo, payload, &mut payload_ctx).await?;
@@ -562,8 +577,9 @@ async fn run_websocket_loop(
                     stream,
                     chain_id_hint: None,
                     simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
-                    fx_cache,
-                    source_health_report_state,
+                    fx_cache: loop_state.fx_cache,
+                    recent_quote_state: loop_state.recent_quote_state,
+                    source_health_report_state: loop_state.source_health_report_state,
                     test_mode_log_state: &mut test_mode_log_state,
                 };
                 process_payload(config, repo, raw_repo, payload, &mut payload_ctx).await?;
@@ -578,8 +594,7 @@ async fn run_rpc_logs_loop(
     raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
-    fx_cache: &mut FxRateCache,
-    source_health_report_state: &mut SourceHealthReportState,
+    loop_state: &mut StreamLoopState<'_>,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
@@ -612,8 +627,9 @@ async fn run_rpc_logs_loop(
                     stream,
                     chain_id_hint: connector.chain_id(),
                     simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
-                    fx_cache,
-                    source_health_report_state,
+                    fx_cache: loop_state.fx_cache,
+                    recent_quote_state: loop_state.recent_quote_state,
+                    source_health_report_state: loop_state.source_health_report_state,
                     test_mode_log_state: &mut test_mode_log_state,
                 };
                 process_payload(config, repo, raw_repo, payload, &mut payload_ctx).await?;
@@ -628,8 +644,7 @@ async fn run_http_poll_loop(
     raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
-    fx_cache: &mut FxRateCache,
-    source_health_report_state: &mut SourceHealthReportState,
+    loop_state: &mut StreamLoopState<'_>,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
@@ -677,8 +692,9 @@ async fn run_http_poll_loop(
                             simulation_run_id_hint: endpoint_log_context
                                 .simulation_run_id
                                 .as_deref(),
-                            fx_cache,
-                            source_health_report_state,
+                            fx_cache: loop_state.fx_cache,
+                            recent_quote_state: loop_state.recent_quote_state,
+                            source_health_report_state: loop_state.source_health_report_state,
                             test_mode_log_state: &mut test_mode_log_state,
                         },
                     };
@@ -728,8 +744,9 @@ async fn run_http_poll_loop(
                         stream,
                         chain_id_hint: None,
                         simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
-                        fx_cache,
-                        source_health_report_state,
+                        fx_cache: loop_state.fx_cache,
+                        recent_quote_state: loop_state.recent_quote_state,
+                        source_health_report_state: loop_state.source_health_report_state,
                         test_mode_log_state: &mut test_mode_log_state,
                     },
                 };
@@ -756,8 +773,7 @@ async fn run_http_sse_loop(
     raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
-    fx_cache: &mut FxRateCache,
-    source_health_report_state: &mut SourceHealthReportState,
+    loop_state: &mut StreamLoopState<'_>,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
@@ -785,8 +801,9 @@ async fn run_http_sse_loop(
                         simulation_run_id_hint: endpoint_log_context
                             .simulation_run_id
                             .as_deref(),
-                        fx_cache,
-                        source_health_report_state,
+                        fx_cache: loop_state.fx_cache,
+                        recent_quote_state: loop_state.recent_quote_state,
+                        source_health_report_state: loop_state.source_health_report_state,
                         test_mode_log_state: &mut test_mode_log_state,
                     },
                 };
@@ -802,8 +819,7 @@ async fn run_rpc_state_loop(
     raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     shutdown: &mut watch::Receiver<bool>,
-    fx_cache: &mut FxRateCache,
-    source_health_report_state: &mut SourceHealthReportState,
+    loop_state: &mut StreamLoopState<'_>,
 ) -> Result<()> {
     let endpoint = endpoint_from_runtime_config(config)?;
     let endpoint_log_context = log_test_mode_connector_endpoint(config, &endpoint);
@@ -836,8 +852,9 @@ async fn run_rpc_state_loop(
                     stream,
                     chain_id_hint: connector.chain_id(),
                     simulation_run_id_hint: endpoint_log_context.simulation_run_id.as_deref(),
-                    fx_cache,
-                    source_health_report_state,
+                    fx_cache: loop_state.fx_cache,
+                    recent_quote_state: loop_state.recent_quote_state,
+                    source_health_report_state: loop_state.source_health_report_state,
                     test_mode_log_state: &mut test_mode_log_state,
                 };
                 process_payload(config, repo, raw_repo, payload, &mut payload_ctx).await?;
@@ -859,6 +876,61 @@ fn raw_landing_required() -> bool {
         .ok()
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+fn duplicate_quote_window_ms(config: &RuntimeStreamConfig) -> Option<u64> {
+    if let Some(configured_ms) = config
+        .filter_config
+        .get("dedupe_same_price_window_ms")
+        .and_then(|value| value.as_u64())
+    {
+        return (configured_ms > 0).then_some(configured_ms);
+    }
+
+    if config.operating_mode_profile == "live" && config.parser_name == "gemini_marketdata_v1" {
+        return Some(DEFAULT_GEMINI_DUPLICATE_QUOTE_WINDOW_MS);
+    }
+
+    None
+}
+
+fn should_skip_duplicate_quote(
+    config: &RuntimeStreamConfig,
+    parsed: &ParsedFeedEvent,
+    state: &mut RecentQuoteState,
+) -> bool {
+    let Some(window_ms) = duplicate_quote_window_ms(config) else {
+        return false;
+    };
+    if parsed.event_type != "quote" {
+        return false;
+    }
+
+    let Some(price) = parsed
+        .price
+        .filter(|value| value.is_finite() && *value > 0.0)
+    else {
+        return false;
+    };
+    let observed_at_ms = parsed.observed_at.timestamp_millis();
+    let price_bits = price.to_bits();
+
+    let should_skip = match (state.last_price_bits, state.last_emitted_at_ms) {
+        (Some(last_price_bits), Some(last_emitted_at_ms))
+            if last_price_bits == price_bits && observed_at_ms >= last_emitted_at_ms =>
+        {
+            (observed_at_ms - last_emitted_at_ms) < i64::try_from(window_ms).unwrap_or(i64::MAX)
+        }
+        _ => false,
+    };
+
+    if should_skip {
+        return true;
+    }
+
+    state.last_price_bits = Some(price_bits);
+    state.last_emitted_at_ms = Some(observed_at_ms);
+    false
 }
 
 async fn persist_raw_envelope(
@@ -1043,6 +1115,9 @@ async fn process_payload(
                 &payload,
                 payload_ctx.simulation_run_id_hint,
             );
+            if should_skip_duplicate_quote(config, &parsed, payload_ctx.recent_quote_state) {
+                return Ok(());
+            }
             let (is_simulated, simulation_run_id) =
                 effective_simulation_metadata(&payload, payload_ctx.simulation_run_id_hint);
             let mut payload_for_storage = payload.clone();
@@ -3269,5 +3344,133 @@ mod tests {
 
         assert_eq!(parsed.payload_event_ts, None);
         assert_eq!(parsed.observed_at, original_observed_at);
+    }
+
+    #[test]
+    fn duplicate_quote_window_defaults_for_live_gemini() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "gemini-spot".to_string(),
+            source_type: "cex_api".to_string(),
+            source_name: "Gemini".to_string(),
+            connection_config: json!({"endpoint": "wss://api.gemini.com/v1/marketdata"}),
+            operating_mode_profile: "live".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "websocket".to_string(),
+            stream_name: "marketdata-btcusd".to_string(),
+            subscription_key: Some("BTCUSD".to_string()),
+            event_type: "quote".to_string(),
+            parser_name: "gemini_marketdata_v1".to_string(),
+            market_key: Some("BTC/USD".to_string()),
+            asset_pair: Some("BTCUSD".to_string()),
+            filter_config: json!({}),
+            payload_ts_path: Some("$.timestampms".to_string()),
+            payload_ts_unit: "ms".to_string(),
+            poll_interval_ms: None,
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+
+        assert_eq!(
+            duplicate_quote_window_ms(&config),
+            Some(DEFAULT_GEMINI_DUPLICATE_QUOTE_WINDOW_MS)
+        );
+    }
+
+    #[test]
+    fn duplicate_quote_window_can_be_disabled_explicitly() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "gemini-spot".to_string(),
+            source_type: "cex_api".to_string(),
+            source_name: "Gemini".to_string(),
+            connection_config: json!({"endpoint": "wss://api.gemini.com/v1/marketdata"}),
+            operating_mode_profile: "live".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "websocket".to_string(),
+            stream_name: "marketdata-btcusd".to_string(),
+            subscription_key: Some("BTCUSD".to_string()),
+            event_type: "quote".to_string(),
+            parser_name: "gemini_marketdata_v1".to_string(),
+            market_key: Some("BTC/USD".to_string()),
+            asset_pair: Some("BTCUSD".to_string()),
+            filter_config: json!({"dedupe_same_price_window_ms": 0}),
+            payload_ts_path: Some("$.timestampms".to_string()),
+            payload_ts_unit: "ms".to_string(),
+            poll_interval_ms: None,
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+
+        assert_eq!(duplicate_quote_window_ms(&config), None);
+    }
+
+    #[test]
+    fn should_skip_duplicate_quote_only_within_window() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "gemini-spot".to_string(),
+            source_type: "cex_api".to_string(),
+            source_name: "Gemini".to_string(),
+            connection_config: json!({"endpoint": "wss://api.gemini.com/v1/marketdata"}),
+            operating_mode_profile: "live".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "websocket".to_string(),
+            stream_name: "marketdata-btcusd".to_string(),
+            subscription_key: Some("BTCUSD".to_string()),
+            event_type: "quote".to_string(),
+            parser_name: "gemini_marketdata_v1".to_string(),
+            market_key: Some("BTC/USD".to_string()),
+            asset_pair: Some("BTCUSD".to_string()),
+            filter_config: json!({}),
+            payload_ts_path: Some("$.timestampms".to_string()),
+            payload_ts_unit: "ms".to_string(),
+            poll_interval_ms: None,
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+        let base_ts = Utc
+            .timestamp_millis_opt(1_710_000_000_000)
+            .single()
+            .unwrap();
+        let duplicate_ts = Utc
+            .timestamp_millis_opt(1_710_000_000_100)
+            .single()
+            .unwrap();
+        let later_ts = Utc
+            .timestamp_millis_opt(1_710_000_000_300)
+            .single()
+            .unwrap();
+        let mut state = RecentQuoteState::default();
+
+        let first = ParsedFeedEvent {
+            event_type: "quote".to_string(),
+            event_id: None,
+            market_key: Some("BTC/USD".to_string()),
+            asset_pair: Some("BTCUSD".to_string()),
+            price: Some(62_000.0),
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: Some(base_ts),
+            observed_at: base_ts,
+            normalized_fields: json!({}),
+        };
+        let duplicate = ParsedFeedEvent {
+            observed_at: duplicate_ts,
+            payload_event_ts: Some(duplicate_ts),
+            ..first.clone()
+        };
+        let later = ParsedFeedEvent {
+            observed_at: later_ts,
+            payload_event_ts: Some(later_ts),
+            ..first.clone()
+        };
+
+        assert!(!should_skip_duplicate_quote(&config, &first, &mut state));
+        assert!(should_skip_duplicate_quote(&config, &duplicate, &mut state));
+        assert!(!should_skip_duplicate_quote(&config, &later, &mut state));
     }
 }
