@@ -152,6 +152,17 @@ pub struct AlertEvidenceOperationalRow {
     pub normalized_fields: Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct AlertEvidenceSimulationRow {
+    pub run_event_id: String,
+    pub source_id: String,
+    pub source_table: String,
+    pub event_type: String,
+    pub observed_at: DateTime<Utc>,
+    pub original_payload: Value,
+    pub published_payload: Value,
+}
+
 pub struct AlertEvidenceOperationalQuery<'a> {
     pub tenant_id: &'a str,
     pub market_key: Option<&'a str>,
@@ -160,6 +171,13 @@ pub struct AlertEvidenceOperationalQuery<'a> {
     pub window_end: DateTime<Utc>,
     pub is_simulated: bool,
     pub simulation_run_id: Option<&'a str>,
+}
+
+pub struct AlertEvidenceSimulationQuery<'a> {
+    pub simulation_run_id: &'a str,
+    pub source_ids: &'a [String],
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -1227,6 +1245,87 @@ impl PostgresRepository {
             )
             .await?;
         Ok(())
+    }
+
+    pub async fn load_simulation_events_for_alert_evidence(
+        &self,
+        query: AlertEvidenceSimulationQuery<'_>,
+    ) -> Result<Vec<AlertEvidenceSimulationRow>> {
+        if query.source_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = match self
+            .client
+            .query(
+                r#"
+                SELECT
+                    id::text,
+                    NULLIF(
+                        BTRIM(
+                            COALESCE(
+                                published_payload_json->>'source_id',
+                                original_payload_json->>'source_id',
+                                ''
+                            )
+                        ),
+                        ''
+                    ) AS source_id,
+                    source_table,
+                    event_type,
+                    event_ts,
+                    COALESCE(original_payload_json, '{}'::jsonb) AS original_payload_json,
+                    COALESCE(published_payload_json, '{}'::jsonb) AS published_payload_json
+                FROM workbench.simulation_run_events
+                WHERE run_id = $1
+                  AND event_ts >= $2
+                  AND event_ts <= $3
+                  AND NULLIF(
+                        BTRIM(
+                            COALESCE(
+                                published_payload_json->>'source_id',
+                                original_payload_json->>'source_id',
+                                ''
+                            )
+                        ),
+                        ''
+                      ) = ANY($4)
+                ORDER BY event_ts ASC, id ASC
+                "#,
+                &[
+                    &query.simulation_run_id,
+                    &query.window_start,
+                    &query.window_end,
+                    &query.source_ids,
+                ],
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
+                    warn!("simulation_run_events table not found; skipping simulation evidence lookup");
+                    return Ok(vec![]);
+                }
+                return Err(error.into());
+            }
+        };
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let source_id: Option<String> = row.get(1);
+                Some(AlertEvidenceSimulationRow {
+                    run_event_id: row.get(0),
+                    source_id: source_id?,
+                    source_table: row.get(2),
+                    event_type: row.get(3),
+                    observed_at: row.get(4),
+                    original_payload: row.get(5),
+                    published_payload: row.get(6),
+                })
+            })
+            .collect())
     }
 
     pub async fn load_operational_events_for_alert_evidence(

@@ -1074,15 +1074,6 @@ fn extract_market_key(subject_key: Option<&str>, protocol: &str) -> Option<Strin
         .map(ToOwned::to_owned)
 }
 
-fn sustained_window_ms_from_alert(alert: &AlertEvent) -> i64 {
-    alert
-        .oracle_context
-        .get("sustained_window_ms")
-        .and_then(Value::as_i64)
-        .filter(|value| *value > 0)
-        .unwrap_or(60_000)
-}
-
 fn contributing_sources_from_alert(alert: &AlertEvent) -> Vec<EvidenceContributorTrace> {
     alert
         .oracle_context
@@ -1189,6 +1180,36 @@ fn synthetic_evidence_record(
     }
 }
 
+fn evidence_lookup_window(
+    alert: &AlertEvent,
+    contributors: &[EvidenceContributorTrace],
+) -> (DateTime<Utc>, DateTime<Utc>) {
+    let fallback_start =
+        alert.created_at - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS);
+    let fallback_end =
+        alert.created_at + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS);
+
+    let Some(first_seen) = contributors
+        .iter()
+        .map(|contributor| contributor.observed_at)
+        .min()
+    else {
+        return (fallback_start, fallback_end);
+    };
+    let Some(last_seen) = contributors
+        .iter()
+        .map(|contributor| contributor.observed_at)
+        .max()
+    else {
+        return (fallback_start, fallback_end);
+    };
+
+    (
+        first_seen - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS),
+        last_seen + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS),
+    )
+}
+
 async fn persist_alert_evidence_snapshot(
     alert: &AlertEvent,
     repo: &PostgresRepository,
@@ -1200,11 +1221,7 @@ async fn persist_alert_evidence_snapshot(
 
     let tenant_id = resolve_alert_tenant_id(alert.tenant_id.clone());
     let market_key = extract_market_key(alert.subject_key.as_deref(), &alert.protocol);
-    let sustained_window_ms = sustained_window_ms_from_alert(alert);
-    let window_start = alert.created_at
-        - ChronoDuration::milliseconds(sustained_window_ms + ALERT_EVIDENCE_BUFFER_BEFORE_MS);
-    let window_end =
-        alert.created_at + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS);
+    let (window_start, window_end) = evidence_lookup_window(alert, &contributors);
     let source_ids = contributors
         .iter()
         .map(|contributor| contributor.source_id.clone())
@@ -1631,6 +1648,73 @@ mod tests {
         assert_eq!(contributors.len(), 1);
         assert_eq!(contributors[0].source_id, "pyth-eth-mainnet");
         assert!(contributors[0].confirms_oracle);
+    }
+
+    #[test]
+    fn evidence_lookup_window_uses_contributor_timestamps() {
+        let alert =
+            alert_from_detection(&mk_detection(Severity::Medium, IncidentTransition::Trigger));
+        let contributors = vec![
+            EvidenceContributorTrace {
+                source_id: "chainlink-data-streams".to_string(),
+                source_kind: "oracle".to_string(),
+                price: 0.9985,
+                observed_at: DateTime::parse_from_rfc3339("2026-03-05T14:00:40Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                age_ms: 0,
+                weight: 1.0,
+                divergence_pct: 0.15,
+                supports_alert_direction: true,
+                contributes_to_quorum: true,
+                confirms_oracle: true,
+                contributes_to_breach: true,
+            },
+            EvidenceContributorTrace {
+                source_id: "kraken-spot".to_string(),
+                source_kind: "cex".to_string(),
+                price: 0.9984,
+                observed_at: DateTime::parse_from_rfc3339("2026-03-05T14:01:10Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                age_ms: 0,
+                weight: 1.0,
+                divergence_pct: 0.16,
+                supports_alert_direction: true,
+                contributes_to_quorum: true,
+                confirms_oracle: false,
+                contributes_to_breach: true,
+            },
+        ];
+
+        let (window_start, window_end) = evidence_lookup_window(&alert, &contributors);
+        assert_eq!(
+            window_start,
+            DateTime::parse_from_rfc3339("2026-03-05T14:00:10Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(
+            window_end,
+            DateTime::parse_from_rfc3339("2026-03-05T14:01:20Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn evidence_lookup_window_falls_back_to_alert_time_without_contributors() {
+        let alert =
+            alert_from_detection(&mk_detection(Severity::Medium, IncidentTransition::Trigger));
+        let (window_start, window_end) = evidence_lookup_window(&alert, &[]);
+        assert_eq!(
+            window_start,
+            alert.created_at - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS)
+        );
+        assert_eq!(
+            window_end,
+            alert.created_at + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS)
+        );
     }
 
     /// TC-D-1301: should_enforce_monthly_quota — Critical bypasses quota
