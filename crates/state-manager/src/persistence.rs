@@ -152,6 +152,16 @@ pub struct AlertEvidenceOperationalRow {
     pub normalized_fields: Value,
 }
 
+pub struct AlertEvidenceOperationalQuery<'a> {
+    pub tenant_id: &'a str,
+    pub market_key: Option<&'a str>,
+    pub source_ids: &'a [String],
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub is_simulated: bool,
+    pub simulation_run_id: Option<&'a str>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AlertEvidenceSnapshotRecord {
     pub alert_id: String,
@@ -1221,15 +1231,9 @@ impl PostgresRepository {
 
     pub async fn load_operational_events_for_alert_evidence(
         &self,
-        tenant_id: &str,
-        market_key: Option<&str>,
-        source_ids: &[String],
-        window_start: DateTime<Utc>,
-        window_end: DateTime<Utc>,
-        is_simulated: bool,
-        simulation_run_id: Option<&str>,
+        query: AlertEvidenceOperationalQuery<'_>,
     ) -> Result<Vec<AlertEvidenceOperationalRow>> {
-        if source_ids.is_empty() {
+        if query.source_ids.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -1264,13 +1268,13 @@ impl PostgresRepository {
                 ORDER BY observed_at ASC, ingest_event_id ASC
                 "#,
                 &[
-                    &tenant_id,
-                    &window_start,
-                    &window_end,
-                    &source_ids,
-                    &market_key,
-                    &is_simulated,
-                    &simulation_run_id,
+                    &query.tenant_id,
+                    &query.window_start,
+                    &query.window_end,
+                    &query.source_ids,
+                    &query.market_key,
+                    &query.is_simulated,
+                    &query.simulation_run_id,
                 ],
             )
             .await?;

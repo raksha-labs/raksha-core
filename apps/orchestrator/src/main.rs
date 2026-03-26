@@ -15,8 +15,9 @@ use notifier::{GatewayDispatchResult, NotifierGatewayClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use state_manager::{
-    describe_redis_url, AlertEvidenceOperationalRow, AlertEvidenceSnapshotRecord,
-    EntityExposureRecord, IncidentKey, IncidentRecord, PostgresRepository, RedisStreamPublisher,
+    describe_redis_url, AlertEvidenceOperationalQuery, AlertEvidenceOperationalRow,
+    AlertEvidenceSnapshotRecord, EntityExposureRecord, IncidentKey, IncidentRecord,
+    PostgresRepository, RedisStreamPublisher,
 };
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -1210,15 +1211,15 @@ async fn persist_alert_evidence_snapshot(
         .collect::<Vec<_>>();
 
     let operational_rows = repo
-        .load_operational_events_for_alert_evidence(
-            &tenant_id,
-            market_key.as_deref(),
-            &source_ids,
+        .load_operational_events_for_alert_evidence(AlertEvidenceOperationalQuery {
+            tenant_id: &tenant_id,
+            market_key: market_key.as_deref(),
+            source_ids: &source_ids,
             window_start,
             window_end,
-            alert.is_simulated,
-            alert.simulation_run_id.as_deref(),
-        )
+            is_simulated: alert.is_simulated,
+            simulation_run_id: alert.simulation_run_id.as_deref(),
+        })
         .await?;
 
     let mut records = Vec::new();
