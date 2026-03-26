@@ -979,45 +979,34 @@ async fn process_http_poll_payload(
     processing_ctx: &mut HttpPollProcessingContext<'_>,
     payload: Value,
 ) -> Result<()> {
+    for item in http_poll_payload_items(processing_ctx.config.parser_name.as_str(), payload) {
+        process_payload(
+            processing_ctx.config,
+            processing_ctx.repo,
+            processing_ctx.raw_repo,
+            item,
+            &mut processing_ctx.payload_ctx,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+fn http_poll_payload_items(parser_name: &str, payload: Value) -> Vec<Value> {
     match payload {
-        Value::Array(items) => {
-            for item in items {
-                process_payload(
-                    processing_ctx.config,
-                    processing_ctx.repo,
-                    processing_ctx.raw_repo,
-                    item,
-                    &mut processing_ctx.payload_ctx,
-                )
-                .await?;
-            }
-            Ok(())
-        }
-        Value::Null => Ok(()),
+        Value::Array(items) => items,
+        Value::Null => Vec::new(),
         other => {
-            if is_pyth_hermes_parser(processing_ctx.config.parser_name.as_str()) {
+            if let Some(items) = other.get("events").and_then(Value::as_array) {
+                return items.to_vec();
+            }
+            if is_pyth_hermes_parser(parser_name) {
                 if let Some(items) = other.get("parsed").and_then(Value::as_array) {
-                    for item in items {
-                        process_payload(
-                            processing_ctx.config,
-                            processing_ctx.repo,
-                            processing_ctx.raw_repo,
-                            item.clone(),
-                            &mut processing_ctx.payload_ctx,
-                        )
-                        .await?;
-                    }
-                    return Ok(());
+                    return items.to_vec();
                 }
             }
-            process_payload(
-                processing_ctx.config,
-                processing_ctx.repo,
-                processing_ctx.raw_repo,
-                other,
-                &mut processing_ctx.payload_ctx,
-            )
-            .await
+            vec![other]
         }
     }
 }
@@ -3102,6 +3091,36 @@ mod tests {
             parsed.payload_event_ts,
             Utc.timestamp_opt(1710000010, 0).single()
         );
+    }
+
+    #[test]
+    fn http_poll_payload_items_unwrap_events_wrapper() {
+        let payload = json!({
+            "events": [
+                {"id": "evt-1"},
+                {"id": "evt-2"}
+            ]
+        });
+
+        let items = http_poll_payload_items("pyth_hermes_v2", payload);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].get("id").and_then(Value::as_str), Some("evt-1"));
+        assert_eq!(items[1].get("id").and_then(Value::as_str), Some("evt-2"));
+    }
+
+    #[test]
+    fn http_poll_payload_items_unwrap_pyth_parsed_wrapper() {
+        let payload = json!({
+            "parsed": [
+                {"id": "wrapped"}
+            ]
+        });
+
+        let items = http_poll_payload_items("pyth_hermes_v2", payload);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].get("id").and_then(Value::as_str), Some("wrapped"));
     }
 
     #[test]
