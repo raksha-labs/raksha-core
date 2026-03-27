@@ -18,6 +18,9 @@ fn extract_kraken_last(value: Option<&Value>) -> Option<f64> {
             return extract_kraken_last(Some(price));
         }
     }
+    if let Some(items) = raw.as_array() {
+        return extract_kraken_last(items.first());
+    }
     None
 }
 
@@ -42,6 +45,29 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
                 if price.is_none() {
                     price = extract_kraken_last(
                         item.get("last")
+                            .or_else(|| item.get("last_price"))
+                            .or_else(|| item.get("price")),
+                    );
+                }
+                if symbol.is_some() && price.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+
+    if (symbol.is_none() || price.is_none())
+        && payload.get("result").and_then(Value::as_object).is_some()
+    {
+        if let Some(result) = payload.get("result").and_then(Value::as_object) {
+            for (pair, item) in result {
+                if symbol.is_none() {
+                    symbol = Some(pair.to_string());
+                }
+                if price.is_none() {
+                    price = extract_kraken_last(
+                        item.get("last")
+                            .or_else(|| item.get("c"))
                             .or_else(|| item.get("last_price"))
                             .or_else(|| item.get("price")),
                     );
@@ -89,4 +115,37 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
             "quote_asset": quote_asset
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn parse_supports_rest_result_payload() {
+        let input = ParserInput {
+            parser_name: "kraken_ticker_v2",
+            event_type: "quote",
+            market_key_hint: Some("USDC/USD"),
+            asset_pair_hint: Some("USDC/USD"),
+            payload_ts_path: None,
+            payload_ts_unit: "ms",
+            filter_config: &json!({}),
+        };
+        let payload = json!({
+            "error": [],
+            "result": {
+                "USDCUSD": {
+                    "c": ["0.99980000", "57.00000000"]
+                }
+            }
+        });
+
+        let parsed = parse(&input, &payload).expect("parsed kraken rest ticker");
+
+        assert_eq!(parsed.asset_pair.as_deref(), Some("USDCUSD"));
+        assert_eq!(parsed.price, Some(0.9998));
+    }
 }

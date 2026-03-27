@@ -22,6 +22,8 @@ on:
         required: true
       tf_backend_kms_key_id:
         required: false
+      public_certificate_arn:
+        required: false
 
 permissions:
   id-token: write
@@ -56,6 +58,7 @@ jobs:
           TF_BACKEND_BUCKET: ${{ secrets.tf_backend_bucket }}
           TF_BACKEND_DYNAMODB_TABLE: ${{ secrets.tf_backend_dynamodb_table }}
           TF_BACKEND_KMS_KEY_ID: ${{ secrets.tf_backend_kms_key_id }}
+          TF_VAR_public_certificate_arn: ${{ secrets.public_certificate_arn }}
         run: |
           scripts/ci/terraform_plan.sh "${{ inputs.environment }}" "${{ inputs.image_tag }}"
 

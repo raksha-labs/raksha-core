@@ -39,6 +39,30 @@ VALUES
      '{"ws_endpoint": "wss://api.gemini.com/v1/marketdata/{subscription_key}"}'::jsonb,
      '{"market_symbols": ["usdcusd", "usdtusd", "daiusd"]}'::jsonb,
      'global', NULL, TRUE),
+    ('binance-global-http', 'cex_websocket', 'binance-http',
+     '{"http_url": "https://api.binance.com/api/v3/ticker/24hr?symbol={subscription_key}"}'::jsonb,
+     '{"market_symbols": ["USDCUSDT", "USDTUSDC", "DAIUSDT"]}'::jsonb,
+     'global', NULL, TRUE),
+    ('kraken-spot-http', 'cex_websocket', 'kraken-http',
+     '{"http_url": "https://api.kraken.com/0/public/Ticker?pair={subscription_key}"}'::jsonb,
+     '{"market_symbols": ["USDCUSD", "USDTUSD", "DAIUSD"]}'::jsonb,
+     'global', NULL, TRUE),
+    ('okx-global-http', 'cex_websocket', 'okx-http',
+     '{"http_url": "https://www.okx.com/api/v5/market/ticker?instId={subscription_key}"}'::jsonb,
+     '{"market_symbols": ["USDC-USDT", "USDT-USDC", "DAI-USDT"]}'::jsonb,
+     'global', NULL, TRUE),
+    ('bybit-spot-http', 'cex_websocket', 'bybit-http',
+     '{"http_url": "https://api.bybit.com/v5/market/tickers?category=spot&symbol={subscription_key}"}'::jsonb,
+     '{"market_symbols": ["USDCUSDT", "USDTUSDC", "DAIUSDT"]}'::jsonb,
+     'global', NULL, TRUE),
+    ('gemini-spot-http', 'cex_websocket', 'gemini-http',
+     '{"http_url": "https://api.gemini.com/v1/pubticker/{subscription_key}"}'::jsonb,
+     '{"market_symbols": ["usdcusd", "usdtusd", "daiusd"]}'::jsonb,
+     'global', NULL, TRUE),
+    ('gate-spot-http', 'cex_websocket', 'gate-http',
+     '{"http_url": "https://api.gateio.ws/api/v4/spot/tickers?currency_pair={subscription_key}"}'::jsonb,
+     '{"market_symbols": ["USDC_USDT", "USDT_USDC", "DAI_USDT"]}'::jsonb,
+     'global', NULL, TRUE),
 
     -- Oracle + DEX Log Sources (Ethereum mainnet)
     ('chainlink-eth-mainnet', 'oracle_api', 'chainlink',
@@ -70,6 +94,10 @@ VALUES
     ('arbitrum-one', 'evm_chain', 'arbitrum',
      '{"chain_id": 42161, "chain_slug": "arbitrum", "rpc_url": "wss://arb-mainnet.g.alchemy.com/v2/{alchemy_api_key}"}'::jsonb,
      NULL,
+     'global', NULL, TRUE),
+    ('defillama-http', 'custom_api', 'defillama',
+     '{"http_base_url": "https://api.llama.fi"}'::jsonb,
+     NULL,
      'global', NULL, TRUE)
 ON CONFLICT (source_id) DO NOTHING;
 
@@ -93,13 +121,20 @@ VALUES
     ('glider', 'okx-global', TRUE, '{}'::jsonb),
     ('glider', 'bybit-spot', TRUE, '{}'::jsonb),
     ('glider', 'gemini-spot', TRUE, '{}'::jsonb),
+    ('glider', 'binance-global-http', TRUE, '{}'::jsonb),
+    ('glider', 'kraken-spot-http', TRUE, '{}'::jsonb),
+    ('glider', 'okx-global-http', TRUE, '{}'::jsonb),
+    ('glider', 'bybit-spot-http', TRUE, '{}'::jsonb),
+    ('glider', 'gemini-spot-http', TRUE, '{}'::jsonb),
+    ('glider', 'gate-spot-http', TRUE, '{}'::jsonb),
     ('glider', 'chainlink-eth-mainnet', TRUE, '{}'::jsonb),
     ('glider', 'chainlink-data-streams', TRUE, '{}'::jsonb),
     ('glider', 'uniswap-v2-eth-mainnet', TRUE, '{}'::jsonb),
     ('glider', 'uniswap-v3-eth-mainnet', TRUE, '{}'::jsonb),
     ('glider', 'sushi-v2-eth-mainnet', TRUE, '{}'::jsonb),
     ('glider', 'ethereum-mainnet', TRUE, '{}'::jsonb),
-    ('glider', 'arbitrum-one', TRUE, '{}'::jsonb)
+    ('glider', 'arbitrum-one', TRUE, '{}'::jsonb),
+    ('glider', 'defillama-http', TRUE, '{}'::jsonb)
 ON CONFLICT (tenant_id, source_id) DO NOTHING;
 
 -- ─── Default Stream Configs (created by glider) ────────────────────────────
@@ -137,6 +172,26 @@ WITH desired_stream_configs AS (
       ('gemini-spot','websocket','marketdata','usdcusd','quote','gemini_marketdata_v1','USDC/USD','USDCUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.timestampms','ms',NULL,TRUE,'glider'),
       ('gemini-spot','websocket','marketdata','usdtusd','quote','gemini_marketdata_v1','USDT/USD','USDTUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.timestampms','ms',NULL,TRUE,'glider'),
       ('gemini-spot','websocket','marketdata','daiusd','quote','gemini_marketdata_v1','DAI/USD','DAIUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.timestampms','ms',NULL,TRUE,'glider'),
+
+      -- Public CEX HTTP polls
+      ('binance-global-http','http_poll','ticker_24hr','USDCUSDT','quote','binance_miniticker_v1','USDC/USD','USDCUSDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.closeTime','ms',5000,TRUE,'glider'),
+      ('binance-global-http','http_poll','ticker_24hr','USDTUSDC','quote','binance_miniticker_v1','USDT/USD','USDTUSDC','{}'::jsonb,NULL::text,'{}'::jsonb,'$.closeTime','ms',5000,TRUE,'glider'),
+      ('binance-global-http','http_poll','ticker_24hr','DAIUSDT','quote','binance_miniticker_v1','DAI/USD','DAIUSDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.closeTime','ms',5000,TRUE,'glider'),
+      ('kraken-spot-http','http_poll','ticker','USDCUSD','quote','kraken_ticker_v2','USDC/USD','USDC/USD','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
+      ('kraken-spot-http','http_poll','ticker','USDTUSD','quote','kraken_ticker_v2','USDT/USD','USDT/USD','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
+      ('kraken-spot-http','http_poll','ticker','DAIUSD','quote','kraken_ticker_v2','DAI/USD','DAI/USD','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
+      ('okx-global-http','http_poll','ticker','USDC-USDT','quote','okx_tickers_v5','USDC/USD','USDC-USDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',5000,TRUE,'glider'),
+      ('okx-global-http','http_poll','ticker','USDT-USDC','quote','okx_tickers_v5','USDT/USD','USDT-USDC','{}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',5000,TRUE,'glider'),
+      ('okx-global-http','http_poll','ticker','DAI-USDT','quote','okx_tickers_v5','DAI/USD','DAI-USDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',5000,TRUE,'glider'),
+      ('bybit-spot-http','http_poll','ticker','USDCUSDT','quote','bybit_tickers_v5','USDC/USD','USDCUSDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.time','ms',5000,TRUE,'glider'),
+      ('bybit-spot-http','http_poll','ticker','USDTUSDC','quote','bybit_tickers_v5','USDT/USD','USDTUSDC','{}'::jsonb,NULL::text,'{}'::jsonb,'$.time','ms',5000,TRUE,'glider'),
+      ('bybit-spot-http','http_poll','ticker','DAIUSDT','quote','bybit_tickers_v5','DAI/USD','DAIUSDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.time','ms',5000,TRUE,'glider'),
+      ('gemini-spot-http','http_poll','pubticker','usdcusd','quote','gemini_marketdata_v1','USDC/USD','USDCUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.volume.timestamp','ms',5000,TRUE,'glider'),
+      ('gemini-spot-http','http_poll','pubticker','usdtusd','quote','gemini_marketdata_v1','USDT/USD','USDTUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.volume.timestamp','ms',5000,TRUE,'glider'),
+      ('gemini-spot-http','http_poll','pubticker','daiusd','quote','gemini_marketdata_v1','DAI/USD','DAIUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.volume.timestamp','ms',5000,TRUE,'glider'),
+      ('gate-spot-http','http_poll','tickers','USDC_USDT','quote','gate_ticker_v4','USDC/USD','USDC_USDT','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
+      ('gate-spot-http','http_poll','tickers','USDT_USDC','quote','gate_ticker_v4','USDT/USD','USDT_USDC','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
+      ('gate-spot-http','http_poll','tickers','DAI_USDT','quote','gate_ticker_v4','DAI/USD','DAI_USDT','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
 
       -- Chainlink (Ethereum mainnet logs)
       ('chainlink-eth-mainnet','rpc_logs','logs','usdc-usd-feed','oracle_update','chainlink_answer_updated_v1','USDC/USD','USDCUSD','{"addresses":["0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"],"topics":["0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"],"decimals":8}'::jsonb,NULL::text,'{}'::jsonb,NULL,'s',2000,FALSE,'glider'),
@@ -262,6 +317,24 @@ WITH desired_stream_refs AS (
       ('gemini-spot','marketdata','usdcusd','USDCUSD'),
       ('gemini-spot','marketdata','usdtusd','USDTUSD'),
       ('gemini-spot','marketdata','daiusd','DAIUSD'),
+      ('binance-global-http','ticker_24hr','USDCUSDT','USDCUSDT'),
+      ('binance-global-http','ticker_24hr','USDTUSDC','USDTUSDC'),
+      ('binance-global-http','ticker_24hr','DAIUSDT','DAIUSDT'),
+      ('kraken-spot-http','ticker','USDCUSD','USDC/USD'),
+      ('kraken-spot-http','ticker','USDTUSD','USDT/USD'),
+      ('kraken-spot-http','ticker','DAIUSD','DAI/USD'),
+      ('okx-global-http','ticker','USDC-USDT','USDC-USDT'),
+      ('okx-global-http','ticker','USDT-USDC','USDT-USDC'),
+      ('okx-global-http','ticker','DAI-USDT','DAI-USDT'),
+      ('bybit-spot-http','ticker','USDCUSDT','USDCUSDT'),
+      ('bybit-spot-http','ticker','USDTUSDC','USDTUSDC'),
+      ('bybit-spot-http','ticker','DAIUSDT','DAIUSDT'),
+      ('gemini-spot-http','pubticker','usdcusd','USDCUSD'),
+      ('gemini-spot-http','pubticker','usdtusd','USDTUSD'),
+      ('gemini-spot-http','pubticker','daiusd','DAIUSD'),
+      ('gate-spot-http','tickers','USDC_USDT','USDC_USDT'),
+      ('gate-spot-http','tickers','USDT_USDC','USDT_USDC'),
+      ('gate-spot-http','tickers','DAI_USDT','DAI_USDT'),
       ('chainlink-eth-mainnet','logs','usdc-usd-feed','USDCUSD'),
       ('chainlink-eth-mainnet','logs','usdt-usd-feed','USDTUSD'),
       ('chainlink-eth-mainnet','logs','dai-usd-feed','DAIUSD'),
@@ -296,6 +369,110 @@ JOIN desired_stream_refs ds
  AND ds.stream_name = ssc.stream_name
  AND COALESCE(ds.subscription_key, '') = COALESCE(ssc.subscription_key, '')
  AND COALESCE(ds.asset_pair, '') = COALESCE(ssc.asset_pair, '')
+ON CONFLICT (stream_config_id, tenant_id) DO NOTHING;
+
+-- ─── DefiLlama HTTP TVL Streams ──────────────────────────────────────────────
+WITH protocol_stream_configs AS (
+  SELECT *
+  FROM (
+    VALUES
+      ('defillama-http','http_poll','protocol_tvl','aave_v3::ethereum',    'tvl_snapshot','protocol_tvl_v1',NULL,NULL,'{"protocol_id":"aave_v3","chain_slug":"ethereum"}'::jsonb,    NULL,'{}'::jsonb,NULL,'s',60000,TRUE,'glider'),
+      ('defillama-http','http_poll','protocol_tvl','aave_v3::base',        'tvl_snapshot','protocol_tvl_v1',NULL,NULL,'{"protocol_id":"aave_v3","chain_slug":"base"}'::jsonb,        NULL,'{}'::jsonb,NULL,'s',60000,TRUE,'glider'),
+      ('defillama-http','http_poll','protocol_tvl','aave_v3::arbitrum',    'tvl_snapshot','protocol_tvl_v1',NULL,NULL,'{"protocol_id":"aave_v3","chain_slug":"arbitrum"}'::jsonb,    NULL,'{}'::jsonb,NULL,'s',60000,TRUE,'glider'),
+      ('defillama-http','http_poll','protocol_tvl','morpho_blue::ethereum','tvl_snapshot','protocol_tvl_v1',NULL,NULL,'{"protocol_id":"morpho_blue","chain_slug":"ethereum"}'::jsonb,NULL,'{}'::jsonb,NULL,'s',60000,TRUE,'glider'),
+      ('defillama-http','http_poll','protocol_tvl','compound_v3::ethereum','tvl_snapshot','protocol_tvl_v1',NULL,NULL,'{"protocol_id":"compound_v3","chain_slug":"ethereum"}'::jsonb,NULL,'{}'::jsonb,NULL,'s',60000,TRUE,'glider'),
+      ('defillama-http','http_poll','protocol_tvl','curve::ethereum',      'tvl_snapshot','protocol_tvl_v1',NULL,NULL,'{"protocol_id":"curve","chain_slug":"ethereum"}'::jsonb,      NULL,'{}'::jsonb,NULL,'s',60000,TRUE,'glider'),
+      ('defillama-http','http_poll','protocol_tvl','maker::ethereum',      'tvl_snapshot','protocol_tvl_v1',NULL,NULL,'{"protocol_id":"maker","chain_slug":"ethereum"}'::jsonb,      NULL,'{}'::jsonb,NULL,'s',60000,TRUE,'glider'),
+      ('defillama-http','http_poll','protocol_tvl','uniswap_v3::ethereum', 'tvl_snapshot','protocol_tvl_v1',NULL,NULL,'{"protocol_id":"uniswap_v3","chain_slug":"ethereum"}'::jsonb, NULL,'{}'::jsonb,NULL,'s',60000,TRUE,'glider')
+  ) AS t(
+    source_id,
+    connector_mode,
+    stream_name,
+    subscription_key,
+    event_type,
+    parser_name,
+    market_key,
+    asset_pair,
+    filter_config,
+    auth_secret_ref,
+    auth_config,
+    payload_ts_path,
+    payload_ts_unit,
+    poll_interval_ms,
+    enabled,
+    created_by
+  )
+)
+INSERT INTO catalog.source_stream_configs (
+  source_id,
+  connector_mode,
+  stream_name,
+  subscription_key,
+  event_type,
+  parser_name,
+  market_key,
+  asset_pair,
+  filter_config,
+  auth_secret_ref,
+  auth_config,
+  payload_ts_path,
+  payload_ts_unit,
+  poll_interval_ms,
+  enabled,
+  created_by
+)
+SELECT
+  psc.source_id,
+  psc.connector_mode,
+  psc.stream_name,
+  psc.subscription_key,
+  psc.event_type,
+  psc.parser_name,
+  psc.market_key,
+  psc.asset_pair,
+  psc.filter_config,
+  psc.auth_secret_ref,
+  psc.auth_config,
+  psc.payload_ts_path,
+  psc.payload_ts_unit,
+  psc.poll_interval_ms,
+  psc.enabled,
+  psc.created_by
+FROM protocol_stream_configs psc
+WHERE EXISTS (
+  SELECT 1 FROM catalog.data_sources src WHERE src.source_id = psc.source_id
+)
+AND NOT EXISTS (
+  SELECT 1
+  FROM catalog.source_stream_configs ssc
+  WHERE ssc.source_id = psc.source_id
+    AND ssc.stream_name = psc.stream_name
+    AND COALESCE(ssc.subscription_key, '') = COALESCE(psc.subscription_key, '')
+);
+
+UPDATE catalog.source_stream_configs
+SET connection_config_override = jsonb_build_object(
+  'http_url',
+  format('https://api.llama.fi/tvl/%s', REPLACE(filter_config->>'protocol_id', '_', '-'))
+)
+WHERE source_id = 'defillama-http'
+  AND operating_mode_profile = 'live'
+  AND (connection_config_override IS NULL OR connection_config_override->>'http_url' IS NULL);
+
+INSERT INTO catalog.source_stream_tenant_targets (
+  stream_config_id,
+  tenant_id,
+  enabled,
+  created_by
+)
+SELECT
+  ssc.stream_config_id,
+  'glider',
+  TRUE,
+  'glider'
+FROM catalog.source_stream_configs ssc
+WHERE ssc.source_id = 'defillama-http'
+  AND ssc.operating_mode_profile = 'live'
 ON CONFLICT (stream_config_id, tenant_id) DO NOTHING;
 
 -- ─── Default Tenant Operating Mode (local/dev bootstrap) ───────────────────

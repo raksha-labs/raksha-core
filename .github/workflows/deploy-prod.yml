@@ -1,16 +1,8 @@
-name: Deploy Stage/Prod
+name: Deploy Prod Environment
 
 on:
   workflow_dispatch:
     inputs:
-      target_environment:
-        description: Deployment environment
-        required: true
-        default: stage
-        type: choice
-        options:
-          - stage
-          - prod
       image_tag:
         description: Image tag to deploy
         required: true
@@ -35,13 +27,13 @@ jobs:
   deploy:
     uses: ./.github/workflows/reusable-ecs-rollout.yml
     with:
-      environment: ${{ inputs.target_environment }}
+      environment: prod
       image_tag: ${{ inputs.image_tag }}
       apply_infra: ${{ inputs.apply_infra }}
       service_filter: ${{ inputs.service_filter }}
       aws_region: eu-west-1
     secrets:
-      aws_role_arn: ${{ inputs.target_environment == 'prod' && secrets.AWS_PROD_DEPLOY_ROLE_ARN || secrets.AWS_STAGE_DEPLOY_ROLE_ARN }}
+      aws_role_arn: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
       tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET }}
       tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
       tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}

@@ -50,6 +50,12 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
                 parse_ts_value(value, "ms").or_else(|| parse_ts_value(value, "s"))
             })
         });
+    let payload_event_ts = payload_event_ts.or_else(|| {
+        payload
+            .get("volume")
+            .and_then(|value| value.get("timestamp"))
+            .and_then(|value| parse_ts_value(value, "ms"))
+    });
     let observed_at = observed_at(payload_event_ts);
 
     let market_key = input
@@ -77,4 +83,46 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
             "quote_asset": quote_asset
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn parse_supports_rest_pubticker_timestamp() {
+        let input = ParserInput {
+            parser_name: "gemini_marketdata_v1",
+            event_type: "quote",
+            market_key_hint: Some("USDC/USD"),
+            asset_pair_hint: Some("USDCUSD"),
+            payload_ts_path: None,
+            payload_ts_unit: "ms",
+            filter_config: &json!({}),
+        };
+        let payload = json!({
+            "bid": "0.99987",
+            "ask": "0.9999",
+            "last": "0.99988",
+            "volume": {
+                "USDC": "8576030.49156",
+                "USD": "8575001.3679010128",
+                "timestamp": 1774600302000_i64
+            }
+        });
+
+        let parsed = parse(&input, &payload).expect("parsed gemini pubticker");
+
+        assert_eq!(parsed.asset_pair.as_deref(), Some("USDCUSD"));
+        assert_eq!(parsed.price, Some(0.99988));
+        assert_eq!(
+            parsed
+                .payload_event_ts
+                .expect("payload event ts")
+                .timestamp_millis(),
+            1774600302000
+        );
+    }
 }
