@@ -8,7 +8,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tracing::info;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum HealthCommand {
+    TriggerReload,
+}
 
 /// Health check status information
 #[derive(Debug, Clone)]
@@ -41,6 +47,8 @@ impl Default for HealthStatus {
 pub struct HealthCheckServer {
     addr: SocketAddr,
     status: Arc<tokio::sync::RwLock<HealthStatus>>,
+    command_tx: Option<mpsc::Sender<HealthCommand>>,
+    command_token: Option<String>,
 }
 
 impl HealthCheckServer {
@@ -53,7 +61,26 @@ impl HealthCheckServer {
                 service_name: service_name.into(),
                 ..Default::default()
             })),
+            command_tx: None,
+            command_token: None,
         }
+    }
+
+    pub fn with_command_channel(
+        mut self,
+        command_tx: mpsc::Sender<HealthCommand>,
+        command_token: Option<String>,
+    ) -> Self {
+        self.command_tx = Some(command_tx);
+        self.command_token = command_token.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        self
     }
 
     /// Get a handle to update health status
@@ -73,6 +100,8 @@ impl HealthCheckServer {
         loop {
             let (mut socket, _) = listener.accept().await?;
             let status = self.status.clone();
+            let command_tx = self.command_tx.clone();
+            let command_token = self.command_token.clone();
 
             tokio::spawn(async move {
                 let mut buffer = [0u8; 1024];
@@ -80,13 +109,16 @@ impl HealthCheckServer {
                 match socket.read(&mut buffer).await {
                     Ok(n) if n > 0 => {
                         let request = String::from_utf8_lossy(&buffer[..n]);
+                        let request_line = request.lines().next().unwrap_or_default();
 
-                        let response = if request.starts_with("GET /health") {
+                        let response = if request_line.starts_with("GET /health") {
                             Self::health_response()
-                        } else if request.starts_with("GET /ready") {
+                        } else if request_line.starts_with("GET /ready") {
                             Self::ready_response(&status).await
-                        } else if request.starts_with("GET /metrics") {
+                        } else if request_line.starts_with("GET /metrics") {
                             Self::metrics_response(&status).await
+                        } else if request_line.starts_with("POST /reload") {
+                            Self::reload_response(&request, command_tx, command_token).await
                         } else {
                             Self::not_found_response()
                         };
@@ -166,7 +198,7 @@ impl HealthCheckServer {
     fn not_found_response() -> String {
         let body = json!({
             "error": "not found",
-            "available_endpoints": ["/health", "/ready", "/metrics"]
+            "available_endpoints": ["/health", "/ready", "/metrics", "/reload"]
         });
 
         format!(
@@ -174,6 +206,76 @@ impl HealthCheckServer {
             body.to_string().len(),
             body
         )
+    }
+
+    async fn reload_response(
+        request: &str,
+        command_tx: Option<mpsc::Sender<HealthCommand>>,
+        command_token: Option<String>,
+    ) -> String {
+        let Some(command_tx) = command_tx else {
+            let body = json!({
+                "error": "reload_not_supported",
+            });
+            return format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.to_string().len(),
+                body
+            );
+        };
+
+        if let Some(expected_token) = command_token {
+            let provided_token = Self::request_header(request, "x-internal-service-token");
+            if provided_token.as_deref() != Some(expected_token.as_str()) {
+                let body = json!({
+                    "error": "unauthorized",
+                });
+                return format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.to_string().len(),
+                    body
+                );
+            }
+        }
+
+        if command_tx.send(HealthCommand::TriggerReload).await.is_err() {
+            let body = json!({
+                "error": "reload_unavailable",
+            });
+            return format!(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.to_string().len(),
+                body
+            );
+        }
+
+        let body = json!({
+            "status": "accepted",
+            "message": "reload requested",
+        });
+        format!(
+            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.to_string().len(),
+            body
+        )
+    }
+
+    fn request_header(request: &str, header_name: &str) -> Option<String> {
+        let prefix = format!("{}:", header_name.to_ascii_lowercase());
+        request
+            .lines()
+            .skip(1)
+            .take_while(|line| !line.trim().is_empty())
+            .find_map(|line| {
+                let trimmed = line.trim();
+                let lower = trimmed.to_ascii_lowercase();
+                if !lower.starts_with(&prefix) {
+                    return None;
+                }
+                trimmed
+                    .split_once(':')
+                    .map(|(_, value)| value.trim().to_string())
+            })
     }
 }
 
@@ -197,6 +299,35 @@ pub fn start_health_check_server(
     }
 
     let server = HealthCheckServer::new(port, service_name);
+    let status = server.status_handle();
+
+    server.start();
+
+    Some(status)
+}
+
+pub fn start_health_check_server_with_commands(
+    service_name: impl Into<String>,
+    command_tx: mpsc::Sender<HealthCommand>,
+    command_token: Option<String>,
+) -> Option<Arc<tokio::sync::RwLock<HealthStatus>>> {
+    let port = std::env::var("HEALTH_CHECK_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8080);
+
+    let enabled = std::env::var("HEALTH_CHECK_ENABLED")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+
+    if !enabled {
+        info!("health check server disabled");
+        return None;
+    }
+
+    let server =
+        HealthCheckServer::new(port, service_name).with_command_channel(command_tx, command_token);
     let status = server.status_handle();
 
     server.start();

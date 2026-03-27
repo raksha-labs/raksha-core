@@ -270,8 +270,6 @@ pub struct DetectionResult {
     pub is_simulated: bool,
     #[serde(default)]
     pub simulation_run_id: Option<String>,
-    #[serde(default)]
-    pub simulation_operating_mode: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -310,8 +308,6 @@ pub struct AlertEvent {
     pub is_simulated: bool,
     #[serde(default)]
     pub simulation_run_id: Option<String>,
-    #[serde(default)]
-    pub simulation_operating_mode: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

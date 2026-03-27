@@ -1,28 +1,48 @@
 -- ============================================================================
--- Raksha - Clean Bootstrap Schema (Create-Only)
+-- Raksha Core — Bootstrap Schema (Create-Only)
 -- ============================================================================
--- Fresh-install schema for local/dev bootstrap.
+-- Shared schema for raksha-core (Rust engine) and raksha-platform (control plane).
+-- Both services connect to the SAME PostgreSQL database and use the SAME schemas.
 -- No migration-style ALTER/UPDATE blocks are included here.
 --
--- Pipeline order:
---   1) Source catalog + stream configs
---   2) Operational ingestion event bus
---   3) Pattern catalog/config + runtime state
---   4) Detections -> Alerts -> Alert lifecycle
---   5) Finality + analytics/support tables
+-- Data flow:
+--   Workbench (platform) authors patterns → pattern.tenant_pattern_rule_versions
+--   Core (Rust)          reads published rules  ← pattern.tenant_pattern_rule_versions
+--   Core (Rust)          writes detections      → detection.detections / detection.alerts
+--   Platform             reads detections        ← detection.detections / detection.alerts
+--
+-- Schema layout:
+--   catalog   — source catalog, stream configs, sharing, health, schema catalog
+--                 + pattern_source_schema_catalog (Workbench→Core field validation)
+--   pattern   — pattern catalog, tenant bindings, runtime state
+--                 + rule_versions (Workbench authors, Core reads)
+--                 + rule_execution_audit / rule_runtime_health (Core writes, Workbench reads)
+--                 + rule_tests (Workbench authors, Core replays)
+--   detection — detections, alerts, incidents, delivery, usage
+--   ingest    — operational ingest support, dead-letter queue
+--   ml        — feature vectors
+--   workbench — simulation lineage row-map
+--   history   — case intelligence, replay catalog (kept at end)
 --
 -- Simlab cleanup contract:
 --   Key pipeline tables keep is_simulated + simulation_run_id.
---   Detailed lineage is stored in simulation_row_map.
+--   Detailed lineage is stored in workbench.simulation_row_map.
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+CREATE SCHEMA IF NOT EXISTS catalog;
+CREATE SCHEMA IF NOT EXISTS pattern;
+CREATE SCHEMA IF NOT EXISTS detection;
+CREATE SCHEMA IF NOT EXISTS ingest;
+CREATE SCHEMA IF NOT EXISTS ml;
+CREATE SCHEMA IF NOT EXISTS workbench;
+
 -- ─────────────────────────────────────────────────────────────────────────────
--- 1) Source Catalog + Stream Configuration
+-- 1) Source Catalog + Stream Configuration  [catalog schema]
 -- ─────────────────────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS data_sources (
+CREATE TABLE IF NOT EXISTS catalog.data_sources (
     source_id         TEXT PRIMARY KEY,
     source_type       TEXT NOT NULL,        -- evm_chain | cex_websocket | dex_api | oracle_api | custom_api
     source_name       TEXT NOT NULL,
@@ -30,7 +50,12 @@ CREATE TABLE IF NOT EXISTS data_sources (
     filters           JSONB,
     scope             TEXT NOT NULL DEFAULT 'global'
         CHECK (scope IN ('global', 'tenant')),
+    scope_kind        TEXT NOT NULL DEFAULT 'platform'
+        CHECK (scope_kind IN ('platform', 'tenant')),
     owner_tenant_id   TEXT,
+    forked_from_source_id TEXT REFERENCES catalog.data_sources(source_id) ON DELETE SET NULL,
+    status            TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('draft', 'active', 'archived')),
     promoted_at       TIMESTAMPTZ,
     promoted_from_tenant_id TEXT,
     active_sharing_offer_id UUID,
@@ -39,15 +64,32 @@ CREATE TABLE IF NOT EXISTS data_sources (
     CHECK (
         (scope = 'global' AND owner_tenant_id IS NULL)
         OR (scope = 'tenant' AND owner_tenant_id IS NOT NULL)
+    ),
+    CHECK (
+        (scope = 'global' AND scope_kind = 'platform')
+        OR (scope = 'tenant' AND scope_kind = 'tenant')
     )
 );
 
 CREATE INDEX IF NOT EXISTS idx_data_sources_scope_owner
-    ON data_sources (scope, owner_tenant_id);
+    ON catalog.data_sources (scope, owner_tenant_id);
 
-CREATE TABLE IF NOT EXISTS tenant_data_sources (
+ALTER TABLE catalog.data_sources
+    ADD COLUMN IF NOT EXISTS scope_kind TEXT,
+    ADD COLUMN IF NOT EXISTS forked_from_source_id TEXT,
+    ADD COLUMN IF NOT EXISTS status TEXT;
+
+UPDATE catalog.data_sources
+SET scope_kind = CASE WHEN scope = 'tenant' THEN 'tenant' ELSE 'platform' END
+WHERE scope_kind IS NULL;
+
+UPDATE catalog.data_sources
+SET status = 'active'
+WHERE status IS NULL;
+
+CREATE TABLE IF NOT EXISTS catalog.tenant_data_sources (
     tenant_id       TEXT NOT NULL,
-    source_id       TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
+    source_id       TEXT NOT NULL REFERENCES catalog.data_sources(source_id) ON DELETE CASCADE,
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     override_config JSONB,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -55,11 +97,12 @@ CREATE TABLE IF NOT EXISTS tenant_data_sources (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenant_data_sources_tenant
-    ON tenant_data_sources (tenant_id);
+    ON catalog.tenant_data_sources (tenant_id);
 
-CREATE TABLE IF NOT EXISTS source_stream_configs (
+CREATE TABLE IF NOT EXISTS catalog.source_stream_configs (
     stream_config_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source_id        TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
+    source_id        TEXT NOT NULL REFERENCES catalog.data_sources(source_id) ON DELETE CASCADE,
+    external_stream_id TEXT,
     connector_mode   TEXT NOT NULL CHECK (connector_mode IN ('websocket', 'rpc_logs', 'rpc_state', 'http_poll')),
     operating_mode_profile TEXT NOT NULL DEFAULT 'live'
         CHECK (operating_mode_profile IN ('live', 'test', 'both')),
@@ -86,39 +129,46 @@ CREATE TABLE IF NOT EXISTS source_stream_configs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_source_stream_configs_source_enabled
-    ON source_stream_configs (source_id, enabled);
+    ON catalog.source_stream_configs (source_id, enabled);
 CREATE INDEX IF NOT EXISTS idx_source_stream_configs_event_type
-    ON source_stream_configs (event_type);
+    ON catalog.source_stream_configs (event_type);
 CREATE INDEX IF NOT EXISTS idx_source_stream_configs_operating_mode
-    ON source_stream_configs (operating_mode_profile, enabled);
+    ON catalog.source_stream_configs (operating_mode_profile, enabled);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_source_stream_configs_natural
-    ON source_stream_configs (source_id, stream_name, COALESCE(asset_pair, ''), COALESCE(subscription_key, ''));
+    ON catalog.source_stream_configs (source_id, stream_name, COALESCE(asset_pair, ''), COALESCE(subscription_key, ''));
+
+ALTER TABLE catalog.source_stream_configs
+    ADD COLUMN IF NOT EXISTS external_stream_id TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_stream_configs_external_stream_id
+    ON catalog.source_stream_configs (source_id, external_stream_id)
+    WHERE external_stream_id IS NOT NULL;
 
 DO $$
 BEGIN
     IF EXISTS (
         SELECT 1
         FROM information_schema.tables
-        WHERE table_schema = 'public' AND table_name = 'source_stream_configs'
+        WHERE table_schema = 'catalog' AND table_name = 'source_stream_configs'
     ) THEN
-        ALTER TABLE source_stream_configs
+        ALTER TABLE catalog.source_stream_configs
             DROP CONSTRAINT IF EXISTS source_stream_configs_connector_mode_check;
-        ALTER TABLE source_stream_configs
+        ALTER TABLE catalog.source_stream_configs
             ADD CONSTRAINT source_stream_configs_connector_mode_check
             CHECK (connector_mode IN ('websocket', 'rpc_logs', 'rpc_state', 'http_poll'));
-        ALTER TABLE source_stream_configs
+        ALTER TABLE catalog.source_stream_configs
             DROP CONSTRAINT IF EXISTS source_stream_configs_operating_mode_profile_check;
-        ALTER TABLE source_stream_configs
+        ALTER TABLE catalog.source_stream_configs
             ADD CONSTRAINT source_stream_configs_operating_mode_profile_check
             CHECK (operating_mode_profile IN ('live', 'test', 'both'));
     END IF;
 END $$;
 
-ALTER TABLE source_stream_configs
+ALTER TABLE catalog.source_stream_configs
     ADD COLUMN IF NOT EXISTS connection_config_override JSONB;
 
-CREATE TABLE IF NOT EXISTS source_stream_tenant_targets (
-    stream_config_id UUID NOT NULL REFERENCES source_stream_configs(stream_config_id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS catalog.source_stream_tenant_targets (
+    stream_config_id UUID NOT NULL REFERENCES catalog.source_stream_configs(stream_config_id) ON DELETE CASCADE,
     tenant_id        TEXT NOT NULL,
     enabled          BOOLEAN NOT NULL DEFAULT TRUE,
     created_by       TEXT NOT NULL,
@@ -129,9 +179,9 @@ CREATE TABLE IF NOT EXISTS source_stream_tenant_targets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_source_stream_tenant_targets_tenant_enabled
-    ON source_stream_tenant_targets (tenant_id, enabled);
+    ON catalog.source_stream_tenant_targets (tenant_id, enabled);
 
-CREATE TABLE IF NOT EXISTS tenant_operating_mode (
+CREATE TABLE IF NOT EXISTS catalog.tenant_operating_mode (
     tenant_id          TEXT PRIMARY KEY,
     mode               TEXT NOT NULL CHECK (mode IN ('live', 'test')),
     mode_note          TEXT,
@@ -141,20 +191,20 @@ CREATE TABLE IF NOT EXISTS tenant_operating_mode (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenant_operating_mode_mode
-    ON tenant_operating_mode (mode, updated_at DESC);
+    ON catalog.tenant_operating_mode (mode, updated_at DESC);
 
-CREATE TABLE IF NOT EXISTS tenant_mode_stream_snapshot (
+CREATE TABLE IF NOT EXISTS catalog.tenant_mode_stream_snapshot (
     tenant_id          TEXT NOT NULL,
-    stream_config_id   UUID NOT NULL REFERENCES source_stream_configs(stream_config_id) ON DELETE CASCADE,
+    stream_config_id   UUID NOT NULL REFERENCES catalog.source_stream_configs(stream_config_id) ON DELETE CASCADE,
     enabled_before     BOOLEAN NOT NULL,
     captured_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, stream_config_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenant_mode_stream_snapshot_tenant
-    ON tenant_mode_stream_snapshot (tenant_id, captured_at DESC);
+    ON catalog.tenant_mode_stream_snapshot (tenant_id, captured_at DESC);
 
-CREATE TABLE IF NOT EXISTS source_requests (
+CREATE TABLE IF NOT EXISTS catalog.source_requests (
     request_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     requesting_tenant_id  TEXT NOT NULL,
     requested_source_type TEXT NOT NULL,
@@ -162,7 +212,7 @@ CREATE TABLE IF NOT EXISTS source_requests (
     justification         TEXT,
     status                TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'approved_private', 'approved_global', 'rejected', 'cancelled')),
-    resolved_source_id    TEXT REFERENCES data_sources(source_id) ON DELETE SET NULL,
+    resolved_source_id    TEXT REFERENCES catalog.data_sources(source_id) ON DELETE SET NULL,
     review_notes          TEXT,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -170,13 +220,13 @@ CREATE TABLE IF NOT EXISTS source_requests (
 );
 
 CREATE INDEX IF NOT EXISTS idx_source_requests_tenant_status
-    ON source_requests (requesting_tenant_id, status);
+    ON catalog.source_requests (requesting_tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_source_requests_status_created
-    ON source_requests (status, created_at DESC);
+    ON catalog.source_requests (status, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS source_sharing_offers (
+CREATE TABLE IF NOT EXISTS catalog.source_sharing_offers (
     offer_id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source_id                      TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
+    source_id                      TEXT NOT NULL REFERENCES catalog.data_sources(source_id) ON DELETE CASCADE,
     offering_tenant_id             TEXT NOT NULL,
     status                         TEXT NOT NULL DEFAULT 'draft'
         CHECK (status IN ('draft', 'active', 'paused', 'closed', 'promoted', 'cancelled')),
@@ -190,16 +240,16 @@ CREATE TABLE IF NOT EXISTS source_sharing_offers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_source_sharing_offers_source
-    ON source_sharing_offers (source_id);
+    ON catalog.source_sharing_offers (source_id);
 CREATE INDEX IF NOT EXISTS idx_source_sharing_offers_status_published
-    ON source_sharing_offers (status, published_at DESC);
+    ON catalog.source_sharing_offers (status, published_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_source_sharing_offers_active_source
-    ON source_sharing_offers (source_id)
+    ON catalog.source_sharing_offers (source_id)
     WHERE status = 'active';
 
-CREATE TABLE IF NOT EXISTS source_sharing_consents (
+CREATE TABLE IF NOT EXISTS catalog.source_sharing_consents (
     consent_id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    offer_id                UUID NOT NULL REFERENCES source_sharing_offers(offer_id) ON DELETE CASCADE,
+    offer_id                UUID NOT NULL REFERENCES catalog.source_sharing_offers(offer_id) ON DELETE CASCADE,
     subscribing_tenant_id   TEXT NOT NULL,
     status                  TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'revoked', 'blocked')),
@@ -211,11 +261,11 @@ CREATE TABLE IF NOT EXISTS source_sharing_consents (
 );
 
 CREATE INDEX IF NOT EXISTS idx_source_sharing_consents_tenant_status
-    ON source_sharing_consents (subscribing_tenant_id, status);
+    ON catalog.source_sharing_consents (subscribing_tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_source_sharing_consents_offer_status
-    ON source_sharing_consents (offer_id, status);
+    ON catalog.source_sharing_consents (offer_id, status);
 
-CREATE TABLE IF NOT EXISTS source_sharing_offer_audit_log (
+CREATE TABLE IF NOT EXISTS catalog.source_sharing_offer_audit_log (
     audit_id          BIGSERIAL PRIMARY KEY,
     entity_type       TEXT NOT NULL CHECK (entity_type IN ('offer', 'consent', 'request', 'promotion')),
     entity_id         TEXT NOT NULL,
@@ -229,12 +279,12 @@ CREATE TABLE IF NOT EXISTS source_sharing_offer_audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_source_sharing_offer_audit_entity
-    ON source_sharing_offer_audit_log (entity_type, entity_id, created_at DESC);
+    ON catalog.source_sharing_offer_audit_log (entity_type, entity_id, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS source_promotion_outbox (
+CREATE TABLE IF NOT EXISTS catalog.source_promotion_outbox (
     event_id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    offer_id              UUID NOT NULL REFERENCES source_sharing_offers(offer_id) ON DELETE CASCADE,
-    source_id             TEXT NOT NULL REFERENCES data_sources(source_id) ON DELETE CASCADE,
+    offer_id              UUID NOT NULL REFERENCES catalog.source_sharing_offers(offer_id) ON DELETE CASCADE,
+    source_id             TEXT NOT NULL REFERENCES catalog.data_sources(source_id) ON DELETE CASCADE,
     old_owner_tenant_id   TEXT,
     event_type            TEXT NOT NULL DEFAULT 'source_promoted'
         CHECK (event_type IN ('source_promoted')),
@@ -248,11 +298,11 @@ CREATE TABLE IF NOT EXISTS source_promotion_outbox (
 );
 
 CREATE INDEX IF NOT EXISTS idx_source_promotion_outbox_status_created
-    ON source_promotion_outbox (status, created_at);
+    ON catalog.source_promotion_outbox (status, created_at);
 
 -- Idempotent column migration: add active_sharing_offer_id to data_sources if
 -- the table was created before this column was introduced.
-ALTER TABLE data_sources
+ALTER TABLE catalog.data_sources
     ADD COLUMN IF NOT EXISTS active_sharing_offer_id UUID;
 
 DO $$
@@ -262,23 +312,101 @@ BEGIN
         FROM pg_constraint
         WHERE conname = 'fk_data_sources_active_sharing_offer'
     ) THEN
-        ALTER TABLE data_sources
+        ALTER TABLE catalog.data_sources
             ADD CONSTRAINT fk_data_sources_active_sharing_offer
             FOREIGN KEY (active_sharing_offer_id)
-            REFERENCES source_sharing_offers(offer_id)
+            REFERENCES catalog.source_sharing_offers(offer_id)
             ON DELETE SET NULL;
     END IF;
 END $$;
 
-CREATE OR REPLACE FUNCTION fn_source_sharing_set_updated_at()
+CREATE TABLE IF NOT EXISTS catalog.source_required_pairs (
+    source_id             TEXT        NOT NULL,
+    market_key            TEXT        NOT NULL,
+    source_symbol         TEXT        NOT NULL,
+    required_tenant_count INTEGER     NOT NULL DEFAULT 0,
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (source_id, market_key, source_symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_required_pairs_source_market
+    ON catalog.source_required_pairs (source_id, market_key);
+
+CREATE TABLE IF NOT EXISTS catalog.data_source_health (
+    tenant_id       TEXT        NOT NULL,
+    source_id       TEXT        NOT NULL,
+    healthy         BOOLEAN     NOT NULL,
+    last_message_at TIMESTAMPTZ,
+    last_error      TEXT,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, source_id)
+);
+
+-- Ingestion operational bus (lean envelope + raw pointers)
+CREATE TABLE IF NOT EXISTS catalog.ingest_operational_events (
+    ingest_event_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    stream_id           UUID,
+    source_id           TEXT        NOT NULL,
+    source_type         TEXT        NOT NULL,
+    tenant_id           TEXT,
+    event_type          TEXT        NOT NULL,
+    event_id            TEXT,
+    market_key          TEXT,
+    asset_pair          TEXT,
+    chain_id            BIGINT,
+    block_number        BIGINT,
+    tx_hash             TEXT,
+    log_index           BIGINT,
+    topic0              TEXT,
+    price               DOUBLE PRECISION,
+    payload_event_ts    TIMESTAMPTZ,
+    observed_at         TIMESTAMPTZ NOT NULL,
+    parse_status        TEXT        NOT NULL CHECK (parse_status IN ('parsed', 'partial', 'raw_only', 'error')),
+    parse_error         TEXT,
+    payload             JSONB       NOT NULL,
+    normalized_fields   JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    dedup_key           TEXT,
+    raw_ref_type        TEXT,
+    raw_ref_id          TEXT,
+    raw_s3_uri          TEXT,
+    is_simulated        BOOLEAN NOT NULL DEFAULT FALSE,
+    simulation_run_id   TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_source_observed
+    ON catalog.ingest_operational_events (source_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_market_observed
+    ON catalog.ingest_operational_events (market_key, observed_at DESC)
+    WHERE market_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_event_type_observed
+    ON catalog.ingest_operational_events (event_type, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_stream_observed
+    ON catalog.ingest_operational_events (stream_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_tx
+    ON catalog.ingest_operational_events (tx_hash, log_index)
+    WHERE tx_hash IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_operational_event_id
+    ON catalog.ingest_operational_events (event_id)
+    WHERE event_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_operational_dedup
+    ON catalog.ingest_operational_events (dedup_key)
+    WHERE dedup_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ingest_operational_simulation_run
+    ON catalog.ingest_operational_events (simulation_run_id, observed_at DESC)
+    WHERE is_simulated;
+
+-- ─── Source sharing functions (all in catalog schema) ─────────────────────────
+
+CREATE OR REPLACE FUNCTION catalog.fn_source_sharing_set_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
     NEW.updated_at := NOW();
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = catalog, public;
 
-CREATE OR REPLACE FUNCTION fn_validate_source_sharing_offer_owner()
+CREATE OR REPLACE FUNCTION catalog.fn_validate_source_sharing_offer_owner()
 RETURNS TRIGGER AS $$
 DECLARE
     source_owner TEXT;
@@ -310,9 +438,9 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = catalog, public;
 
-CREATE OR REPLACE FUNCTION fn_sync_data_source_active_offer_pointer()
+CREATE OR REPLACE FUNCTION catalog.fn_sync_data_source_active_offer_pointer()
 RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.status = 'active' THEN
@@ -327,9 +455,9 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = catalog, public;
 
-CREATE OR REPLACE FUNCTION fn_log_source_sharing_offer_status_change()
+CREATE OR REPLACE FUNCTION catalog.fn_log_source_sharing_offer_status_change()
 RETURNS TRIGGER AS $$
 BEGIN
     IF TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM NEW.status THEN
@@ -352,9 +480,9 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = catalog, public;
 
-CREATE OR REPLACE FUNCTION fn_validate_source_sharing_consent()
+CREATE OR REPLACE FUNCTION catalog.fn_validate_source_sharing_consent()
 RETURNS TRIGGER AS $$
 DECLARE
     offer_owner TEXT;
@@ -384,9 +512,9 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = catalog, public;
 
-CREATE OR REPLACE FUNCTION fn_log_source_sharing_consent_status_change()
+CREATE OR REPLACE FUNCTION catalog.fn_log_source_sharing_consent_status_change()
 RETURNS TRIGGER AS $$
 BEGIN
     IF TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM NEW.status THEN
@@ -409,12 +537,12 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = catalog, public;
 
-CREATE OR REPLACE FUNCTION fn_promote_source_to_global(p_offer_id UUID)
+CREATE OR REPLACE FUNCTION catalog.fn_promote_source_to_global(p_offer_id UUID)
 RETURNS BOOLEAN AS $$
 DECLARE
-    v_offer source_sharing_offers%ROWTYPE;
+    v_offer catalog.source_sharing_offers%ROWTYPE;
     v_old_owner TEXT;
 BEGIN
     SELECT *
@@ -488,9 +616,9 @@ BEGIN
 
     RETURN TRUE;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = catalog, public;
 
-CREATE OR REPLACE FUNCTION fn_sync_tenant_subscription_from_consent()
+CREATE OR REPLACE FUNCTION catalog.fn_sync_tenant_subscription_from_consent()
 RETURNS TRIGGER AS $$
 DECLARE
     v_source_id TEXT;
@@ -540,7 +668,7 @@ BEGIN
               AND status = 'active';
 
             IF v_active_count >= v_threshold THEN
-                PERFORM fn_promote_source_to_global(NEW.offer_id);
+                PERFORM catalog.fn_promote_source_to_global(NEW.offer_id);
             END IF;
         END IF;
     ELSIF TG_OP = 'UPDATE' AND OLD.status = 'active' AND NEW.status <> 'active' THEN
@@ -562,152 +690,79 @@ BEGIN
     PERFORM pg_notify('source_stream_config_changed', 'source-sharing');
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = catalog, public;
 
-CREATE OR REPLACE FUNCTION fn_source_sharing_block_audit_mutation()
+CREATE OR REPLACE FUNCTION catalog.fn_source_sharing_block_audit_mutation()
 RETURNS TRIGGER AS $$
 BEGIN
     RAISE EXCEPTION 'source_sharing_offer_audit_log is append-only';
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = catalog, public;
 
-DROP TRIGGER IF EXISTS trg_source_requests_set_updated_at ON source_requests;
+DROP TRIGGER IF EXISTS trg_source_requests_set_updated_at ON catalog.source_requests;
 CREATE TRIGGER trg_source_requests_set_updated_at
-    BEFORE UPDATE ON source_requests
+    BEFORE UPDATE ON catalog.source_requests
     FOR EACH ROW
-    EXECUTE FUNCTION fn_source_sharing_set_updated_at();
+    EXECUTE FUNCTION catalog.fn_source_sharing_set_updated_at();
 
-DROP TRIGGER IF EXISTS trg_source_sharing_offers_set_updated_at ON source_sharing_offers;
+DROP TRIGGER IF EXISTS trg_source_sharing_offers_set_updated_at ON catalog.source_sharing_offers;
 CREATE TRIGGER trg_source_sharing_offers_set_updated_at
-    BEFORE UPDATE ON source_sharing_offers
+    BEFORE UPDATE ON catalog.source_sharing_offers
     FOR EACH ROW
-    EXECUTE FUNCTION fn_source_sharing_set_updated_at();
+    EXECUTE FUNCTION catalog.fn_source_sharing_set_updated_at();
 
-DROP TRIGGER IF EXISTS trg_source_sharing_offers_validate_owner ON source_sharing_offers;
+DROP TRIGGER IF EXISTS trg_source_sharing_offers_validate_owner ON catalog.source_sharing_offers;
 CREATE TRIGGER trg_source_sharing_offers_validate_owner
-    BEFORE INSERT OR UPDATE ON source_sharing_offers
+    BEFORE INSERT OR UPDATE ON catalog.source_sharing_offers
     FOR EACH ROW
-    EXECUTE FUNCTION fn_validate_source_sharing_offer_owner();
+    EXECUTE FUNCTION catalog.fn_validate_source_sharing_offer_owner();
 
-DROP TRIGGER IF EXISTS trg_source_sharing_offers_sync_pointer ON source_sharing_offers;
+DROP TRIGGER IF EXISTS trg_source_sharing_offers_sync_pointer ON catalog.source_sharing_offers;
 CREATE TRIGGER trg_source_sharing_offers_sync_pointer
-    AFTER INSERT OR UPDATE ON source_sharing_offers
+    AFTER INSERT OR UPDATE ON catalog.source_sharing_offers
     FOR EACH ROW
-    EXECUTE FUNCTION fn_sync_data_source_active_offer_pointer();
+    EXECUTE FUNCTION catalog.fn_sync_data_source_active_offer_pointer();
 
-DROP TRIGGER IF EXISTS trg_source_sharing_offers_audit ON source_sharing_offers;
+DROP TRIGGER IF EXISTS trg_source_sharing_offers_audit ON catalog.source_sharing_offers;
 CREATE TRIGGER trg_source_sharing_offers_audit
-    AFTER INSERT OR UPDATE ON source_sharing_offers
+    AFTER INSERT OR UPDATE ON catalog.source_sharing_offers
     FOR EACH ROW
-    EXECUTE FUNCTION fn_log_source_sharing_offer_status_change();
+    EXECUTE FUNCTION catalog.fn_log_source_sharing_offer_status_change();
 
-DROP TRIGGER IF EXISTS trg_source_sharing_consents_set_updated_at ON source_sharing_consents;
+DROP TRIGGER IF EXISTS trg_source_sharing_consents_set_updated_at ON catalog.source_sharing_consents;
 CREATE TRIGGER trg_source_sharing_consents_set_updated_at
-    BEFORE UPDATE ON source_sharing_consents
+    BEFORE UPDATE ON catalog.source_sharing_consents
     FOR EACH ROW
-    EXECUTE FUNCTION fn_source_sharing_set_updated_at();
+    EXECUTE FUNCTION catalog.fn_source_sharing_set_updated_at();
 
-DROP TRIGGER IF EXISTS trg_source_sharing_consents_validate ON source_sharing_consents;
+DROP TRIGGER IF EXISTS trg_source_sharing_consents_validate ON catalog.source_sharing_consents;
 CREATE TRIGGER trg_source_sharing_consents_validate
-    BEFORE INSERT OR UPDATE ON source_sharing_consents
+    BEFORE INSERT OR UPDATE ON catalog.source_sharing_consents
     FOR EACH ROW
-    EXECUTE FUNCTION fn_validate_source_sharing_consent();
+    EXECUTE FUNCTION catalog.fn_validate_source_sharing_consent();
 
-DROP TRIGGER IF EXISTS trg_source_sharing_consents_audit ON source_sharing_consents;
+DROP TRIGGER IF EXISTS trg_source_sharing_consents_audit ON catalog.source_sharing_consents;
 CREATE TRIGGER trg_source_sharing_consents_audit
-    AFTER INSERT OR UPDATE ON source_sharing_consents
+    AFTER INSERT OR UPDATE ON catalog.source_sharing_consents
     FOR EACH ROW
-    EXECUTE FUNCTION fn_log_source_sharing_consent_status_change();
+    EXECUTE FUNCTION catalog.fn_log_source_sharing_consent_status_change();
 
-DROP TRIGGER IF EXISTS trg_source_sharing_consents_sync ON source_sharing_consents;
+DROP TRIGGER IF EXISTS trg_source_sharing_consents_sync ON catalog.source_sharing_consents;
 CREATE TRIGGER trg_source_sharing_consents_sync
-    AFTER INSERT OR UPDATE OF status ON source_sharing_consents
+    AFTER INSERT OR UPDATE OF status ON catalog.source_sharing_consents
     FOR EACH ROW
-    EXECUTE FUNCTION fn_sync_tenant_subscription_from_consent();
+    EXECUTE FUNCTION catalog.fn_sync_tenant_subscription_from_consent();
 
-DROP TRIGGER IF EXISTS trg_source_sharing_audit_block_update ON source_sharing_offer_audit_log;
+DROP TRIGGER IF EXISTS trg_source_sharing_audit_block_update ON catalog.source_sharing_offer_audit_log;
 CREATE TRIGGER trg_source_sharing_audit_block_update
-    BEFORE UPDATE OR DELETE ON source_sharing_offer_audit_log
+    BEFORE UPDATE OR DELETE ON catalog.source_sharing_offer_audit_log
     FOR EACH ROW
-    EXECUTE FUNCTION fn_source_sharing_block_audit_mutation();
+    EXECUTE FUNCTION catalog.fn_source_sharing_block_audit_mutation();
 
-CREATE TABLE IF NOT EXISTS source_required_pairs (
-    source_id             TEXT        NOT NULL,
-    market_key            TEXT        NOT NULL,
-    source_symbol         TEXT        NOT NULL,
-    required_tenant_count INTEGER     NOT NULL DEFAULT 0,
-    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (source_id, market_key, source_symbol)
-);
+-- ─── Catalog views ────────────────────────────────────────────────────────────
 
-CREATE INDEX IF NOT EXISTS idx_source_required_pairs_source_market
-    ON source_required_pairs (source_id, market_key);
-
-CREATE TABLE IF NOT EXISTS data_source_health (
-    tenant_id       TEXT        NOT NULL,
-    source_id       TEXT        NOT NULL,
-    healthy         BOOLEAN     NOT NULL,
-    last_message_at TIMESTAMPTZ,
-    last_error      TEXT,
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (tenant_id, source_id)
-);
-
--- Ingestion operational bus (lean envelope + raw pointers)
-CREATE TABLE IF NOT EXISTS ingest_operational_events (
-    ingest_event_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    stream_id           UUID,
-    source_id           TEXT        NOT NULL,
-    source_type         TEXT        NOT NULL,
-    tenant_id           TEXT,
-    event_type          TEXT        NOT NULL,
-    event_id            TEXT,
-    market_key          TEXT,
-    asset_pair          TEXT,
-    chain_id            BIGINT,
-    block_number        BIGINT,
-    tx_hash             TEXT,
-    log_index           BIGINT,
-    topic0              TEXT,
-    price               DOUBLE PRECISION,
-    payload_event_ts    TIMESTAMPTZ,
-    observed_at         TIMESTAMPTZ NOT NULL,
-    parse_status        TEXT        NOT NULL CHECK (parse_status IN ('parsed', 'partial', 'raw_only', 'error')),
-    parse_error         TEXT,
-    payload             JSONB       NOT NULL,
-    normalized_fields   JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    dedup_key           TEXT,
-    raw_ref_type        TEXT,
-    raw_ref_id          TEXT,
-    raw_s3_uri          TEXT,
-    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
-    simulation_run_id  TEXT,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_ingest_operational_source_observed
-    ON ingest_operational_events (source_id, observed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_ingest_operational_market_observed
-    ON ingest_operational_events (market_key, observed_at DESC)
-    WHERE market_key IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_ingest_operational_event_type_observed
-    ON ingest_operational_events (event_type, observed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_ingest_operational_stream_observed
-    ON ingest_operational_events (stream_id, observed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_ingest_operational_tx
-    ON ingest_operational_events (tx_hash, log_index)
-    WHERE tx_hash IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_operational_event_id
-    ON ingest_operational_events (event_id)
-    WHERE event_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_operational_dedup
-    ON ingest_operational_events (dedup_key)
-    WHERE dedup_key IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_ingest_operational_simulation_run
-    ON ingest_operational_events (simulation_run_id, observed_at DESC)
-    WHERE is_simulated;
-
-CREATE OR REPLACE VIEW source_registry AS
+DROP VIEW IF EXISTS catalog.source_registry;
+CREATE OR REPLACE VIEW catalog.source_registry AS
 SELECT
     ds.source_id,
     ds.source_type,
@@ -715,14 +770,19 @@ SELECT
     ds.connection_config,
     ds.filters,
     ds.scope,
+    ds.scope_kind,
     ds.owner_tenant_id,
+    ds.forked_from_source_id,
+    ds.status,
     ds.enabled,
     ds.created_at
-FROM data_sources ds;
+FROM catalog.data_sources ds;
 
-CREATE OR REPLACE VIEW source_stream_registry AS
+DROP VIEW IF EXISTS catalog.source_stream_registry;
+CREATE OR REPLACE VIEW catalog.source_stream_registry AS
 SELECT
     ssc.stream_config_id AS stream_id,
+    ssc.external_stream_id,
     ssc.source_id,
     ssc.connector_mode,
     ssc.operating_mode_profile,
@@ -744,9 +804,9 @@ SELECT
     ssc.created_at,
     ssc.updated_by,
     ssc.updated_at
-FROM source_stream_configs ssc;
+FROM catalog.source_stream_configs ssc;
 
-CREATE OR REPLACE VIEW tenant_stream_targets AS
+CREATE OR REPLACE VIEW catalog.tenant_stream_targets AS
 SELECT
     stt.stream_config_id AS stream_id,
     stt.tenant_id,
@@ -755,9 +815,9 @@ SELECT
     stt.created_at,
     stt.updated_by,
     stt.updated_at
-FROM source_stream_tenant_targets stt;
+FROM catalog.source_stream_tenant_targets stt;
 
-CREATE OR REPLACE VIEW ingest_activity_1m AS
+CREATE OR REPLACE VIEW catalog.ingest_activity_1m AS
 SELECT
     ioe.source_id,
     ioe.market_key,
@@ -765,10 +825,10 @@ SELECT
     date_trunc('minute', ioe.observed_at) AS bucket_1m,
     COUNT(*)::bigint AS events_count,
     MAX(ioe.observed_at) AS last_observed_at
-FROM ingest_operational_events ioe
+FROM catalog.ingest_operational_events ioe
 GROUP BY ioe.source_id, ioe.market_key, ioe.event_type, date_trunc('minute', ioe.observed_at);
 
-CREATE OR REPLACE VIEW ingest_latest_samples AS
+CREATE OR REPLACE VIEW catalog.ingest_latest_samples AS
 SELECT DISTINCT ON (ioe.source_id, COALESCE(ioe.market_key, ''), ioe.event_type)
     ioe.source_id,
     ioe.market_key,
@@ -780,30 +840,54 @@ SELECT DISTINCT ON (ioe.source_id, COALESCE(ioe.market_key, ''), ioe.event_type)
     ioe.raw_ref_type,
     ioe.raw_ref_id,
     ioe.raw_s3_uri
-FROM ingest_operational_events ioe
+FROM catalog.ingest_operational_events ioe
 ORDER BY ioe.source_id, COALESCE(ioe.market_key, ''), ioe.event_type, ioe.observed_at DESC;
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 3) Pattern Catalog, Tenant Bindings, and Runtime State
+-- 2) Pattern Catalog, Tenant Bindings, and Runtime State  [pattern schema]
 -- ─────────────────────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS patterns (
+CREATE TABLE IF NOT EXISTS pattern.patterns (
     pattern_id   TEXT PRIMARY KEY,
     pattern_name TEXT NOT NULL,
     description  TEXT,
+    scope_kind   TEXT NOT NULL DEFAULT 'platform'
+        CHECK (scope_kind IN ('platform', 'tenant')),
+    owner_tenant_id TEXT,
+    forked_from_pattern_id TEXT REFERENCES pattern.patterns(pattern_id) ON DELETE SET NULL,
+    status       TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('draft', 'active', 'archived')),
     enabled      BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (
+        (scope_kind = 'platform' AND owner_tenant_id IS NULL)
+        OR (scope_kind = 'tenant' AND owner_tenant_id IS NOT NULL)
+    )
 );
 
-CREATE TABLE IF NOT EXISTS pattern_configs (
-    pattern_id TEXT PRIMARY KEY REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+ALTER TABLE pattern.patterns
+    ADD COLUMN IF NOT EXISTS scope_kind TEXT,
+    ADD COLUMN IF NOT EXISTS owner_tenant_id TEXT,
+    ADD COLUMN IF NOT EXISTS forked_from_pattern_id TEXT,
+    ADD COLUMN IF NOT EXISTS status TEXT;
+
+UPDATE pattern.patterns
+SET scope_kind = 'platform'
+WHERE scope_kind IS NULL;
+
+UPDATE pattern.patterns
+SET status = 'active'
+WHERE status IS NULL;
+
+CREATE TABLE IF NOT EXISTS pattern.pattern_configs (
+    pattern_id TEXT PRIMARY KEY REFERENCES pattern.patterns(pattern_id) ON DELETE CASCADE,
     config     JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS tenant_pattern_configs (
+CREATE TABLE IF NOT EXISTS pattern.tenant_pattern_configs (
     tenant_id  TEXT NOT NULL,
-    pattern_id TEXT NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    pattern_id TEXT NOT NULL REFERENCES pattern.patterns(pattern_id) ON DELETE CASCADE,
     enabled    BOOLEAN NOT NULL DEFAULT TRUE,
     config     JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -811,11 +895,11 @@ CREATE TABLE IF NOT EXISTS tenant_pattern_configs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenant_pattern_configs_tenant
-    ON tenant_pattern_configs (tenant_id);
+    ON pattern.tenant_pattern_configs (tenant_id);
 
-CREATE TABLE IF NOT EXISTS tenant_pattern_source_bindings (
+CREATE TABLE IF NOT EXISTS pattern.tenant_pattern_source_bindings (
     tenant_id      TEXT        NOT NULL,
-    pattern_id     TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    pattern_id     TEXT        NOT NULL REFERENCES pattern.patterns(pattern_id) ON DELETE CASCADE,
     source_id      TEXT        NOT NULL,
     enabled        BOOLEAN     NOT NULL DEFAULT TRUE,
     binding_config JSONB       NOT NULL DEFAULT '{}'::jsonb,
@@ -823,16 +907,124 @@ CREATE TABLE IF NOT EXISTS tenant_pattern_source_bindings (
     updated_at     TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, pattern_id, source_id),
     FOREIGN KEY (tenant_id, source_id)
-      REFERENCES tenant_data_sources(tenant_id, source_id)
+      REFERENCES catalog.tenant_data_sources(tenant_id, source_id)
       ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenant_pattern_source_bindings_tenant_pattern
-    ON tenant_pattern_source_bindings (tenant_id, pattern_id);
+    ON pattern.tenant_pattern_source_bindings (tenant_id, pattern_id);
 
-CREATE TABLE IF NOT EXISTS tenant_pattern_required_assets (
+-- ─── Workbench rule authoring tables (written by Workbench, read by core) ────
+
+-- Compiled rule versions authored via Workbench. Core reads published versions
+-- to load active detection rules at startup and on hot-reload.
+CREATE TABLE IF NOT EXISTS pattern.tenant_pattern_rule_versions (
+    id                BIGSERIAL   PRIMARY KEY,
+    tenant_id         TEXT        NOT NULL,
+    pattern_id        TEXT        NOT NULL REFERENCES pattern.patterns(pattern_id) ON DELETE CASCADE,
+    rule_id           TEXT        NOT NULL,
+    version           INTEGER     NOT NULL,
+    status            TEXT        NOT NULL DEFAULT 'draft',
+    language          TEXT        NOT NULL DEFAULT 'cel',
+    runtime_contract_version TEXT NOT NULL DEFAULT 'v1',
+    runtime_policy_version   TEXT,
+    template_version  TEXT        NOT NULL DEFAULT 'v1',
+    authoring_model   JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    dsl_text          TEXT        NOT NULL DEFAULT '',
+    compiled_artifact JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    schema_version    TEXT        NOT NULL DEFAULT 'v1',
+    compile_hash      TEXT        NOT NULL,
+    created_by        TEXT,
+    approved_by       TEXT,
+    published_at      TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ,
+    UNIQUE (tenant_id, pattern_id, rule_id, version),
+    CHECK (status IN ('draft', 'in_review', 'approved', 'published', 'archived')),
+    CHECK (language IN ('cel', 'python', 'javascript'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_rule_versions_tenant_pattern_rule
+    ON pattern.tenant_pattern_rule_versions (tenant_id, pattern_id, rule_id, version DESC);
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_rule_versions_status
+    ON pattern.tenant_pattern_rule_versions (tenant_id, pattern_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_rule_versions_language
+    ON pattern.tenant_pattern_rule_versions (tenant_id, pattern_id, language, created_at DESC);
+
+-- Execution audit written by core for each rule evaluation.
+CREATE TABLE IF NOT EXISTS pattern.tenant_pattern_rule_execution_audit (
+    id          BIGSERIAL   PRIMARY KEY,
+    tenant_id   TEXT        NOT NULL,
+    pattern_id  TEXT        NOT NULL REFERENCES pattern.patterns(pattern_id) ON DELETE CASCADE,
+    rule_id     TEXT        NOT NULL,
+    rule_version INTEGER,
+    engine      TEXT        NOT NULL,
+    status      TEXT        NOT NULL,
+    error_code  TEXT,
+    latency_ms  INTEGER     NOT NULL DEFAULT 0,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_rule_execution_audit_lookup
+    ON pattern.tenant_pattern_rule_execution_audit (tenant_id, pattern_id, rule_id, created_at DESC);
+
+-- Per-rule runtime health written by core; read by Workbench to surface degradation.
+CREATE TABLE IF NOT EXISTS pattern.tenant_pattern_rule_runtime_health (
+    tenant_id        TEXT        NOT NULL,
+    pattern_id       TEXT        NOT NULL REFERENCES pattern.patterns(pattern_id) ON DELETE CASCADE,
+    rule_id          TEXT        NOT NULL,
+    engine           TEXT        NOT NULL,
+    degraded         BOOLEAN     NOT NULL DEFAULT FALSE,
+    last_error_code  TEXT,
+    last_error_at    TIMESTAMPTZ,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, pattern_id, rule_id, engine)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_rule_runtime_health_degraded
+    ON pattern.tenant_pattern_rule_runtime_health (tenant_id, pattern_id, degraded, updated_at DESC);
+
+-- Test fixtures authored in Workbench; core uses them for scenario replay.
+CREATE TABLE IF NOT EXISTS pattern.tenant_pattern_rule_tests (
+    id               BIGSERIAL   PRIMARY KEY,
+    tenant_id        TEXT        NOT NULL,
+    pattern_id       TEXT        NOT NULL REFERENCES pattern.patterns(pattern_id) ON DELETE CASCADE,
+    rule_id          TEXT        NOT NULL,
+    version          INTEGER     NOT NULL,
+    test_id          TEXT        NOT NULL,
+    fixture_name     TEXT        NOT NULL,
+    fixture_payload  JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    expected_outcome JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    last_run_result  JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ,
+    UNIQUE (tenant_id, pattern_id, rule_id, version, test_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_rule_tests_tenant_pattern_rule
+    ON pattern.tenant_pattern_rule_tests (tenant_id, pattern_id, rule_id, version);
+
+-- Source event schema snapshots used by Workbench and core to validate
+-- field references in rules at compile and runtime.
+CREATE TABLE IF NOT EXISTS catalog.pattern_source_schema_catalog (
+    tenant_id      TEXT        NOT NULL,
+    pattern_id     TEXT        NOT NULL REFERENCES pattern.patterns(pattern_id) ON DELETE CASCADE,
+    source_id      TEXT        NOT NULL,
+    schema_version TEXT        NOT NULL DEFAULT 'v1',
+    event_schemas  JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    sample_refs    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    refreshed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, pattern_id, source_id, schema_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pattern_source_schema_catalog_tenant_pattern
+    ON catalog.pattern_source_schema_catalog (tenant_id, pattern_id, refreshed_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS pattern.tenant_pattern_required_assets (
     tenant_id  TEXT        NOT NULL,
-    pattern_id TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    pattern_id TEXT        NOT NULL REFERENCES pattern.patterns(pattern_id) ON DELETE CASCADE,
     market_key TEXT        NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ,
@@ -840,26 +1032,46 @@ CREATE TABLE IF NOT EXISTS tenant_pattern_required_assets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenant_pattern_required_assets_tenant_pattern
-    ON tenant_pattern_required_assets (tenant_id, pattern_id);
+    ON pattern.tenant_pattern_required_assets (tenant_id, pattern_id);
 
-CREATE TABLE IF NOT EXISTS tenant_pattern_alert_policies (
+CREATE TABLE IF NOT EXISTS pattern.tenant_pattern_alert_policies (
     tenant_id          TEXT        NOT NULL,
-    pattern_id         TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    pattern_id         TEXT        NOT NULL REFERENCES pattern.patterns(pattern_id) ON DELETE CASCADE,
     severity_threshold TEXT        NOT NULL DEFAULT 'medium',
     cooldown_sec       INTEGER     NOT NULL DEFAULT 300,
     default_channels   TEXT[]      NOT NULL DEFAULT '{webhook}',
     route_overrides    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    alerts_paused      BOOLEAN     NOT NULL DEFAULT FALSE,
+    alerts_paused_until TIMESTAMPTZ,
+    pause_reason       TEXT,
+    critical_bypass    BOOLEAN     NOT NULL DEFAULT TRUE,
+    retraction_bypass  BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, pattern_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_tenant_pattern_alert_policies_tenant
-    ON tenant_pattern_alert_policies (tenant_id);
+ALTER TABLE pattern.tenant_pattern_alert_policies
+    ADD COLUMN IF NOT EXISTS alerts_paused BOOLEAN NOT NULL DEFAULT FALSE;
 
-CREATE TABLE IF NOT EXISTS tenant_pattern_notification_channels (
+ALTER TABLE pattern.tenant_pattern_alert_policies
+    ADD COLUMN IF NOT EXISTS alerts_paused_until TIMESTAMPTZ;
+
+ALTER TABLE pattern.tenant_pattern_alert_policies
+    ADD COLUMN IF NOT EXISTS pause_reason TEXT;
+
+ALTER TABLE pattern.tenant_pattern_alert_policies
+    ADD COLUMN IF NOT EXISTS critical_bypass BOOLEAN NOT NULL DEFAULT TRUE;
+
+ALTER TABLE pattern.tenant_pattern_alert_policies
+    ADD COLUMN IF NOT EXISTS retraction_bypass BOOLEAN NOT NULL DEFAULT TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_tenant_pattern_alert_policies_tenant
+    ON pattern.tenant_pattern_alert_policies (tenant_id);
+
+CREATE TABLE IF NOT EXISTS pattern.tenant_pattern_notification_channels (
     tenant_id          TEXT        NOT NULL,
-    pattern_id         TEXT        NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
+    pattern_id         TEXT        NOT NULL REFERENCES pattern.patterns(pattern_id) ON DELETE CASCADE,
     channel            TEXT        NOT NULL,
     enabled            BOOLEAN     NOT NULL DEFAULT FALSE,
     config_json        JSONB       NOT NULL DEFAULT '{}'::jsonb,
@@ -867,41 +1079,46 @@ CREATE TABLE IF NOT EXISTS tenant_pattern_notification_channels (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, pattern_id, channel),
-    CHECK (channel IN ('webhook', 'slack', 'telegram', 'discord'))
+    CHECK (channel IN ('webhook', 'slack', 'telegram', 'discord', 'email'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenant_pattern_notification_channels_tenant
-    ON tenant_pattern_notification_channels (tenant_id, pattern_id);
+    ON pattern.tenant_pattern_notification_channels (tenant_id, pattern_id);
 
-CREATE TABLE IF NOT EXISTS pattern_state (
+CREATE TABLE IF NOT EXISTS pattern.pattern_state (
     tenant_id  TEXT        NOT NULL,
     pattern_id TEXT        NOT NULL,
     state_key  TEXT        NOT NULL,
     data       JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    window_metadata JSONB  NOT NULL DEFAULT '{}'::jsonb,
+    rule_context JSONB     NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, pattern_id, state_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pattern_state_tenant_pattern
-    ON pattern_state (tenant_id, pattern_id);
+    ON pattern.pattern_state (tenant_id, pattern_id);
 
-CREATE TABLE IF NOT EXISTS pattern_snapshots (
+CREATE TABLE IF NOT EXISTS pattern.pattern_snapshots (
     id           BIGSERIAL   PRIMARY KEY,
     tenant_id    TEXT        NOT NULL,
     pattern_id   TEXT        NOT NULL,
     snapshot_key TEXT        NOT NULL,
     data         JSONB       NOT NULL,
+    rule_id      TEXT,
+    rule_version INTEGER,
+    window_metadata JSONB    NOT NULL DEFAULT '{}'::jsonb,
     score        DOUBLE PRECISION,
     severity     TEXT,
     observed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_pattern_snapshots_tenant_pattern_observed
-    ON pattern_snapshots (tenant_id, pattern_id, observed_at DESC);
+    ON pattern.pattern_snapshots (tenant_id, pattern_id, observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pattern_snapshots_tenant_key_observed
-    ON pattern_snapshots (tenant_id, snapshot_key, observed_at DESC);
+    ON pattern.pattern_snapshots (tenant_id, snapshot_key, observed_at DESC);
 
-CREATE TABLE IF NOT EXISTS tenant_policies (
+CREATE TABLE IF NOT EXISTS pattern.tenant_policies (
     tenant_id          TEXT PRIMARY KEY,
     severity_threshold TEXT    NOT NULL DEFAULT 'medium',
     cooldown_sec       INTEGER NOT NULL DEFAULT 300,
@@ -911,25 +1128,11 @@ CREATE TABLE IF NOT EXISTS tenant_policies (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS simulation_row_map (
-    map_id              BIGSERIAL PRIMARY KEY,
-    simulation_run_id   TEXT NOT NULL,
-    table_name          TEXT NOT NULL,
-    row_pk              TEXT NOT NULL,
-    scenario_id         TEXT,
-    source_pk           TEXT,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (table_name, row_pk)
-);
-
-CREATE INDEX IF NOT EXISTS idx_simulation_row_map_run_table
-    ON simulation_row_map (simulation_run_id, table_name, created_at DESC);
-
 -- ─────────────────────────────────────────────────────────────────────────────
--- 4) Detection and Alert Pipeline
+-- 3) Detection and Alert Pipeline  [detection schema]
 -- ─────────────────────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS detections (
+CREATE TABLE IF NOT EXISTS detection.detections (
     id           TEXT PRIMARY KEY,
     tx_hash      TEXT NOT NULL,
     chain        TEXT NOT NULL,
@@ -946,21 +1149,21 @@ CREATE TABLE IF NOT EXISTS detections (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_detections_chain ON detections(chain);
-CREATE INDEX IF NOT EXISTS idx_detections_protocol ON detections(protocol);
-CREATE INDEX IF NOT EXISTS idx_detections_tx_hash ON detections(tx_hash);
-CREATE INDEX IF NOT EXISTS idx_detections_created_at ON detections(created_at);
+CREATE INDEX IF NOT EXISTS idx_detections_chain ON detection.detections(chain);
+CREATE INDEX IF NOT EXISTS idx_detections_protocol ON detection.detections(protocol);
+CREATE INDEX IF NOT EXISTS idx_detections_tx_hash ON detection.detections(tx_hash);
+CREATE INDEX IF NOT EXISTS idx_detections_created_at ON detection.detections(created_at);
 CREATE INDEX IF NOT EXISTS idx_detections_subject_created
-    ON detections (subject_type, subject_key, created_at DESC);
+    ON detection.detections (subject_type, subject_key, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_detections_tenant_created
-    ON detections (tenant_id, created_at DESC);
+    ON detection.detections (tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_detections_tenant_pattern_created
-    ON detections (tenant_id, pattern_id, created_at DESC);
+    ON detection.detections (tenant_id, pattern_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_detections_simulation_run
-    ON detections (simulation_run_id, created_at DESC)
+    ON detection.detections (simulation_run_id, created_at DESC)
     WHERE is_simulated;
 
-CREATE TABLE IF NOT EXISTS alerts (
+CREATE TABLE IF NOT EXISTS detection.alerts (
     id              TEXT PRIMARY KEY,
     incident_id     TEXT,
     tx_hash         TEXT NOT NULL,
@@ -981,26 +1184,26 @@ CREATE TABLE IF NOT EXISTS alerts (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_alerts_chain ON alerts(chain);
-CREATE INDEX IF NOT EXISTS idx_alerts_protocol ON alerts(protocol);
-CREATE INDEX IF NOT EXISTS idx_alerts_tx_hash ON alerts(tx_hash);
-CREATE INDEX IF NOT EXISTS idx_alerts_incident_id ON alerts(incident_id);
-CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts(created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_chain ON detection.alerts(chain);
+CREATE INDEX IF NOT EXISTS idx_alerts_protocol ON detection.alerts(protocol);
+CREATE INDEX IF NOT EXISTS idx_alerts_tx_hash ON detection.alerts(tx_hash);
+CREATE INDEX IF NOT EXISTS idx_alerts_incident_id ON detection.alerts(incident_id);
+CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON detection.alerts(created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_subject_created
-    ON alerts (subject_type, subject_key, created_at DESC);
+    ON detection.alerts (subject_type, subject_key, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_tenant_created
-    ON alerts (tenant_id, created_at DESC);
+    ON detection.alerts (tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_tenant_pattern_created
-    ON alerts (tenant_id, pattern_id, created_at DESC);
+    ON detection.alerts (tenant_id, pattern_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_tenant_lifecycle
-    ON alerts (tenant_id, lifecycle_state, created_at DESC);
+    ON detection.alerts (tenant_id, lifecycle_state, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_tenant_severity
-    ON alerts (tenant_id, severity, created_at DESC);
+    ON detection.alerts (tenant_id, severity, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_simulation_run
-    ON alerts (simulation_run_id, created_at DESC)
+    ON detection.alerts (simulation_run_id, created_at DESC)
     WHERE is_simulated;
 
-CREATE TABLE IF NOT EXISTS alert_lifecycle_events (
+CREATE TABLE IF NOT EXISTS detection.alert_lifecycle_events (
     id              BIGSERIAL PRIMARY KEY,
     alert_id        TEXT NOT NULL,
     incident_id     TEXT,
@@ -1013,13 +1216,13 @@ CREATE TABLE IF NOT EXISTS alert_lifecycle_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_alert_lifecycle_alert_id
-    ON alert_lifecycle_events (alert_id, created_at DESC);
+    ON detection.alert_lifecycle_events (alert_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_lifecycle_incident_id
-    ON alert_lifecycle_events (incident_id, created_at DESC);
+    ON detection.alert_lifecycle_events (incident_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_lifecycle_events_event_key
-    ON alert_lifecycle_events (event_key);
+    ON detection.alert_lifecycle_events (event_key);
 
-CREATE TABLE IF NOT EXISTS incidents (
+CREATE TABLE IF NOT EXISTS detection.incidents (
     incident_id      TEXT PRIMARY KEY,
     tenant_id        TEXT NOT NULL,
     pattern_id       TEXT NOT NULL,
@@ -1034,15 +1237,15 @@ CREATE TABLE IF NOT EXISTS incidents (
 );
 
 CREATE INDEX IF NOT EXISTS idx_incidents_tenant_status_updated
-    ON incidents (tenant_id, status, updated_at DESC);
+    ON detection.incidents (tenant_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_incidents_tenant_pattern_subject
-    ON incidents (tenant_id, pattern_id, subject_key, chain_slug);
+    ON detection.incidents (tenant_id, pattern_id, subject_key, chain_slug);
 CREATE INDEX IF NOT EXISTS idx_incidents_chain_pattern_status
-    ON incidents (chain_slug, pattern_id, status, updated_at DESC);
+    ON detection.incidents (chain_slug, pattern_id, status, updated_at DESC);
 
-CREATE TABLE IF NOT EXISTS incident_events (
+CREATE TABLE IF NOT EXISTS detection.incident_events (
     id               BIGSERIAL PRIMARY KEY,
-    incident_id      TEXT NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    incident_id      TEXT NOT NULL REFERENCES detection.incidents(incident_id) ON DELETE CASCADE,
     transition_type  TEXT NOT NULL,
     from_state       TEXT,
     to_state         TEXT,
@@ -1052,13 +1255,13 @@ CREATE TABLE IF NOT EXISTS incident_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_incident_events_incident_created
-    ON incident_events (incident_id, created_at DESC);
+    ON detection.incident_events (incident_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_incident_events_transition_created
-    ON incident_events (transition_type, created_at DESC);
+    ON detection.incident_events (transition_type, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS incident_context_snapshots (
+CREATE TABLE IF NOT EXISTS detection.incident_context_snapshots (
     id             BIGSERIAL PRIMARY KEY,
-    incident_id    TEXT NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    incident_id    TEXT NOT NULL REFERENCES detection.incidents(incident_id) ON DELETE CASCADE,
     classification TEXT,
     score          DOUBLE PRECISION,
     confidence     DOUBLE PRECISION,
@@ -1067,9 +1270,9 @@ CREATE TABLE IF NOT EXISTS incident_context_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_incident_context_snapshots_incident_observed
-    ON incident_context_snapshots (incident_id, observed_at DESC);
+    ON detection.incident_context_snapshots (incident_id, observed_at DESC);
 
-CREATE TABLE IF NOT EXISTS alert_delivery_attempts (
+CREATE TABLE IF NOT EXISTS detection.alert_delivery_attempts (
     id          BIGSERIAL PRIMARY KEY,
     alert_id    TEXT NOT NULL,
     tenant_id   TEXT NOT NULL,
@@ -1081,11 +1284,11 @@ CREATE TABLE IF NOT EXISTS alert_delivery_attempts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_alert_delivery_attempts_alert
-    ON alert_delivery_attempts (alert_id, attempted_at DESC);
+    ON detection.alert_delivery_attempts (alert_id, attempted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_delivery_attempts_tenant
-    ON alert_delivery_attempts (tenant_id, attempted_at DESC);
+    ON detection.alert_delivery_attempts (tenant_id, attempted_at DESC);
 
-CREATE TABLE IF NOT EXISTS usage_events (
+CREATE TABLE IF NOT EXISTS detection.usage_events (
     id          BIGSERIAL PRIMARY KEY,
     tenant_id   TEXT NOT NULL,
     event_type  TEXT NOT NULL,
@@ -1096,83 +1299,20 @@ CREATE TABLE IF NOT EXISTS usage_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_events_tenant_recorded
-    ON usage_events (tenant_id, recorded_at DESC);
+    ON detection.usage_events (tenant_id, recorded_at DESC);
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 5) Indexer Durable State + Dead Letter Queue
+-- 4) Ingest Runtime Support + Dead Letter Queue  [ingest schema]
 -- ─────────────────────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS indexer_state (
-    chain                  TEXT PRIMARY KEY,
-    last_indexed_block     BIGINT NOT NULL,
-    last_block_hash        TEXT NOT NULL,
-    last_block_timestamp   TIMESTAMPTZ,
-    processed_events_count BIGINT NOT NULL DEFAULT 0,
-    updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+-- Legacy pre-rewrite event persistence tables are removed as part of the
+-- DB-driven indexer cutover. Keep explicit drops here so existing local/dev
+-- databases converge on the current runtime shape during bootstrap.
+DROP TABLE IF EXISTS ingest.normalized_events;
+DROP TABLE IF EXISTS ingest.processed_events;
+DROP TABLE IF EXISTS ingest.indexer_state;
 
-CREATE TABLE IF NOT EXISTS processed_events (
-    event_id      UUID PRIMARY KEY,
-    tx_hash       TEXT NOT NULL,
-    block_number  BIGINT NOT NULL,
-    block_hash    TEXT NOT NULL,
-    chain         TEXT NOT NULL,
-    event_key     TEXT,
-    processed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    reverted      BOOLEAN NOT NULL DEFAULT FALSE,
-    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
-    simulation_run_id  TEXT,
-    UNIQUE (tx_hash, block_number, chain)
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_events_event_key
-    ON processed_events (event_key);
-CREATE INDEX IF NOT EXISTS idx_processed_events_chain_block
-    ON processed_events (chain, block_number);
-CREATE INDEX IF NOT EXISTS idx_processed_events_simulation_run
-    ON processed_events (simulation_run_id, processed_at DESC)
-    WHERE is_simulated;
-
-CREATE TABLE IF NOT EXISTS normalized_events (
-    event_key              TEXT PRIMARY KEY,
-    event_id               UUID NOT NULL,
-    chain                  TEXT NOT NULL,
-    chain_slug             TEXT NOT NULL,
-    chain_id               BIGINT,
-    protocol               TEXT NOT NULL,
-    protocol_category      TEXT NOT NULL,
-    event_type             TEXT NOT NULL CHECK (event_type IN ('oracle_update', 'flash_loan_candidate')),
-    tx_hash                TEXT NOT NULL,
-    block_number           BIGINT NOT NULL,
-    block_hash             TEXT,
-    tx_index               BIGINT,
-    log_index              BIGINT,
-    status                 TEXT NOT NULL,
-    lifecycle_state        TEXT NOT NULL,
-    requires_confirmation  BOOLEAN NOT NULL,
-    confirmation_depth     BIGINT NOT NULL,
-    observed_at            TIMESTAMPTZ NOT NULL,
-    reverted               BOOLEAN NOT NULL DEFAULT FALSE,
-    payload                JSONB NOT NULL,
-    is_simulated       BOOLEAN NOT NULL DEFAULT FALSE,
-    simulation_run_id  TEXT,
-    created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_normalized_events_chain_block
-    ON normalized_events (chain_slug, block_number);
-CREATE INDEX IF NOT EXISTS idx_normalized_events_tx_hash
-    ON normalized_events (tx_hash);
-CREATE INDEX IF NOT EXISTS idx_normalized_events_observed_at
-    ON normalized_events (observed_at);
-CREATE INDEX IF NOT EXISTS idx_normalized_events_reverted
-    ON normalized_events (reverted);
-CREATE INDEX IF NOT EXISTS idx_normalized_events_simulation_run
-    ON normalized_events (simulation_run_id, observed_at DESC)
-    WHERE is_simulated;
-
-CREATE TABLE IF NOT EXISTS dead_letter_queue (
+CREATE TABLE IF NOT EXISTS ingest.dead_letter_queue (
     id               TEXT PRIMARY KEY,
     stream_name      TEXT NOT NULL,
     entry_id         TEXT NOT NULL,
@@ -1185,17 +1325,17 @@ CREATE TABLE IF NOT EXISTS dead_letter_queue (
 );
 
 CREATE INDEX IF NOT EXISTS idx_dead_letter_queue_stream_name
-    ON dead_letter_queue (stream_name);
+    ON ingest.dead_letter_queue (stream_name);
 CREATE INDEX IF NOT EXISTS idx_dead_letter_queue_created_at
-    ON dead_letter_queue (created_at DESC);
+    ON ingest.dead_letter_queue (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dead_letter_queue_retry_count
-    ON dead_letter_queue (retry_count DESC);
+    ON ingest.dead_letter_queue (retry_count DESC);
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 6) Finality, Dependency Graph, and Feature Storage
+-- 5) Finality, Dependency Graph  [ingest schema, continued]
 -- ─────────────────────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS finality_state (
+CREATE TABLE IF NOT EXISTS ingest.finality_state (
     chain              TEXT PRIMARY KEY,
     head_block         BIGINT NOT NULL,
     confirmation_depth INTEGER NOT NULL,
@@ -1204,7 +1344,7 @@ CREATE TABLE IF NOT EXISTS finality_state (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS dependency_edges (
+CREATE TABLE IF NOT EXISTS ingest.dependency_edges (
     id         BIGSERIAL PRIMARY KEY,
     chain      TEXT NOT NULL,
     protocol   TEXT NOT NULL,
@@ -1216,9 +1356,13 @@ CREATE TABLE IF NOT EXISTS dependency_edges (
 );
 
 CREATE INDEX IF NOT EXISTS idx_dependency_edges_protocol
-    ON dependency_edges (chain, protocol);
+    ON ingest.dependency_edges (chain, protocol);
 
-CREATE TABLE IF NOT EXISTS feature_vectors (
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 6) Feature Storage  [ml schema]
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS ml.feature_vectors (
     id                  BIGSERIAL PRIMARY KEY,
     detection_id        TEXT NOT NULL,
     tenant_id           TEXT,
@@ -1229,10 +1373,29 @@ CREATE TABLE IF NOT EXISTS feature_vectors (
 );
 
 CREATE INDEX IF NOT EXISTS idx_feature_vectors_detection
-    ON feature_vectors (detection_id);
+    ON ml.feature_vectors (detection_id);
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 7) History Intelligence Layer (Replay + Case Intelligence + ML Registry)
+-- 7) Simulation Lineage Row Map  [workbench schema]
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS workbench.simulation_row_map (
+    map_id              BIGSERIAL PRIMARY KEY,
+    simulation_run_id   TEXT NOT NULL,
+    table_name          TEXT NOT NULL,
+    row_pk              TEXT NOT NULL,
+    scenario_id         TEXT,
+    source_pk           TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (table_name, row_pk)
+);
+
+CREATE INDEX IF NOT EXISTS idx_simulation_row_map_run_table
+    ON workbench.simulation_row_map (simulation_run_id, table_name, created_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 8) History Intelligence Layer (Replay + Case Intelligence + ML Registry)
+--    [history schema — unchanged, already qualified]
 -- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE SCHEMA IF NOT EXISTS history;
@@ -1414,8 +1577,8 @@ CREATE TABLE IF NOT EXISTS history.ingest_offsets (
 -- Notes
 -- ============================================================================
 -- For high-volume production workloads, consider:
--- 1. Time-based partitioning on ingest_operational_events, detections, alerts
+-- 1. Time-based partitioning on catalog.ingest_operational_events,
+--    detection.detections, detection.alerts
 -- 2. Retention/archive jobs for historical rows
 -- 3. Connection pooling (PgBouncer)
 -- 4. Read replicas for analytics
--- ============================================================================

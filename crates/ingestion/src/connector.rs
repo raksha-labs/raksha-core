@@ -373,7 +373,7 @@ fn subscribe_generic_symbols(symbols: &[String]) -> Vec<Value> {
 fn subscribe_binance(symbols: &[String]) -> Vec<Value> {
     let params: Vec<String> = symbols
         .iter()
-        .map(|s| s.replace(['/', '-'], "").to_ascii_lowercase() + "@ticker")
+        .map(|s| s.replace(['/', '-'], "").to_ascii_lowercase() + "@miniTicker")
         .collect();
     if params.is_empty() {
         return Vec::new();

@@ -42,7 +42,8 @@ jobs:
       image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag || format('sha-{0}', github.sha) }}
       aws_region: eu-west-1
     secrets:
-      aws_role_arn: ${{ secrets.AWS_INFRA_PLAN_ROLE_ARN }}
+      aws_role_arn: ${{ secrets.AWS_INFRA_ROLE_ARN }}
       tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET }}
       tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
       tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
+      public_certificate_arn: ${{ secrets.PUBLIC_CERTIFICATE_ARN }}

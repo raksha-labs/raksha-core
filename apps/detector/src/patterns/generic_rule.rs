@@ -192,8 +192,7 @@ impl GenericRulePattern {
         alert: &RuntimeAlert,
         runtime_trace: &[String],
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id, simulation_operating_mode) =
-            simulation_metadata_from_event(event);
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
         let severity = Self::severity_from_runtime(&alert.severity);
         let score = Self::risk_score_for_severity(&severity);
         let chain = Self::chain_from_event(event);
@@ -257,7 +256,6 @@ impl GenericRulePattern {
             ],
             is_simulated,
             simulation_run_id,
-            simulation_operating_mode,
             created_at: Utc::now(),
         }
     }

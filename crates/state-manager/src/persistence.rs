@@ -17,6 +17,7 @@ pub struct EffectiveStreamConfig {
     pub source_name: String,
     pub connection_config: Value,
     pub connector_mode: String,
+    pub operating_mode_profile: String, // "live" | "test"
     pub stream_name: String,
     pub subscription_key: Option<String>,
     pub event_type: String,
@@ -124,6 +125,8 @@ pub struct IngestOperationalEventRecord {
     pub raw_ref_type: Option<String>,
     pub raw_ref_id: Option<String>,
     pub raw_s3_uri: Option<String>,
+    pub is_simulated: bool,
+    pub simulation_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +134,94 @@ pub struct OperationalSourcePrice {
     pub source_id: String,
     pub price: f64,
     pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlertEvidenceOperationalRow {
+    pub ingest_event_id: String,
+    pub source_id: String,
+    pub source_type: String,
+    pub event_type: String,
+    pub market_key: Option<String>,
+    pub price: Option<f64>,
+    pub observed_at: DateTime<Utc>,
+    pub event_ts: Option<DateTime<Utc>>,
+    pub tx_hash: Option<String>,
+    pub block_number: Option<i64>,
+    pub payload: Value,
+    pub normalized_fields: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlertEvidenceSimulationRow {
+    pub run_event_id: String,
+    pub source_id: String,
+    pub source_table: String,
+    pub event_type: String,
+    pub observed_at: DateTime<Utc>,
+    pub original_payload: Value,
+    pub published_payload: Value,
+}
+
+pub struct AlertEvidenceOperationalQuery<'a> {
+    pub tenant_id: &'a str,
+    pub market_key: Option<&'a str>,
+    pub source_ids: &'a [String],
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub is_simulated: bool,
+    pub simulation_run_id: Option<&'a str>,
+}
+
+pub struct AlertEvidenceSimulationQuery<'a> {
+    pub simulation_run_id: &'a str,
+    pub source_ids: &'a [String],
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlertEvidenceSnapshotRecord {
+    pub alert_id: String,
+    pub incident_id: Option<String>,
+    pub tenant_id: String,
+    pub pattern_id: Option<String>,
+    pub source_id: String,
+    pub source_type: String,
+    pub event_type: String,
+    pub market_key: Option<String>,
+    pub price: Option<f64>,
+    pub observed_at: DateTime<Utc>,
+    pub event_ts: Option<DateTime<Utc>>,
+    pub tx_hash: Option<String>,
+    pub block_number: Option<i64>,
+    pub payload: Value,
+    pub normalized_fields: Value,
+    pub raw_ref_type: Option<String>,
+    pub raw_ref_id: Option<String>,
+}
+
+fn simulation_metadata_from_payload(payload: &Value) -> (bool, Option<String>) {
+    let simulation = payload.get("simulation").and_then(Value::as_object);
+    let run_id = simulation
+        .and_then(|meta| {
+            meta.get("run_id")
+                .or_else(|| meta.get("simulation_run_id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let is_simulated = simulation
+        .and_then(|meta| meta.get("is_simulated"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || payload
+            .get("is_simulated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || run_id.is_some();
+    (is_simulated, run_id)
 }
 
 #[derive(Debug, Clone)]
@@ -175,44 +266,45 @@ impl PostgresRepository {
 
     async fn init_schema(&self) -> Result<()> {
         let required_tables = [
-            "detections",
-            "alerts",
-            "alert_lifecycle_events",
-            "incidents",
-            "incident_events",
-            "incident_context_snapshots",
-            "alert_delivery_attempts",
-            "usage_events",
-            "data_sources",
-            "tenant_data_sources",
-            "source_stream_configs",
-            "source_stream_tenant_targets",
-            "patterns",
-            "pattern_configs",
-            "tenant_pattern_configs",
-            "tenant_pattern_source_bindings",
-            "tenant_pattern_required_assets",
-            "source_required_pairs",
-            "tenant_pattern_alert_policies",
-            "tenant_pattern_notification_channels",
-            "pattern_state",
-            "pattern_snapshots",
-            "data_source_health",
-            "ingest_operational_events",
+            "detection.detections",
+            "detection.alerts",
+            "detection.alert_lifecycle_events",
+            "detection.incidents",
+            "detection.incident_events",
+            "detection.incident_context_snapshots",
+            "detection.alert_delivery_attempts",
+            "detection.usage_events",
+            "catalog.data_sources",
+            "catalog.tenant_data_sources",
+            "catalog.source_stream_configs",
+            "catalog.source_stream_tenant_targets",
+            "pattern.patterns",
+            "pattern.pattern_configs",
+            "pattern.tenant_pattern_configs",
+            "pattern.tenant_pattern_source_bindings",
+            "pattern.tenant_pattern_required_assets",
+            "catalog.source_required_pairs",
+            "pattern.tenant_pattern_alert_policies",
+            "pattern.tenant_pattern_notification_channels",
+            "pattern.pattern_state",
+            "pattern.pattern_snapshots",
+            "catalog.data_source_health",
+            "catalog.ingest_operational_events",
         ];
 
         let mut missing_tables = Vec::new();
         for table in required_tables {
+            let (table_schema, table_name) = table.split_once('.').unwrap_or(("public", table));
             let exists = self
                 .client
                 .query_opt(
                     r#"
                     SELECT 1
                     FROM information_schema.tables
-                    WHERE table_schema = 'public'
-                      AND table_name = $1
+                    WHERE table_schema = $1
+                      AND table_name = $2
                     "#,
-                    &[&table],
+                    &[&table_schema, &table_name],
                 )
                 .await?;
             if exists.is_none() {
@@ -325,11 +417,22 @@ impl PostgresRepository {
             .execute(
                 r#"
                 INSERT INTO data_source_health (
-                    tenant_id, source_id, healthy, last_error, updated_at
+                    tenant_id, source_id, healthy, last_message_at, last_error, updated_at
                 )
-                VALUES ($1, $2, $3, $4, NOW())
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    CASE WHEN $3 THEN NOW() ELSE NULL END,
+                    $4,
+                    NOW()
+                )
                 ON CONFLICT (tenant_id, source_id) DO UPDATE
                 SET healthy = EXCLUDED.healthy,
+                    last_message_at = CASE
+                        WHEN EXCLUDED.healthy THEN NOW()
+                        ELSE data_source_health.last_message_at
+                    END,
                     last_error = EXCLUDED.last_error,
                     updated_at = NOW()
                 "#,
@@ -349,8 +452,8 @@ impl PostgresRepository {
                 SELECT tds.tenant_id, ds.source_id, ds.source_type, ds.source_name,
                        COALESCE(tds.override_config, ds.connection_config) AS connection_config,
                        ds.filters, ds.enabled AND tds.enabled AS enabled
-                FROM tenant_data_sources tds
-                JOIN data_sources ds ON ds.source_id = tds.source_id
+                FROM catalog.tenant_data_sources tds
+                JOIN catalog.data_sources ds ON ds.source_id = tds.source_id
                 WHERE ds.enabled = TRUE AND tds.enabled = TRUE
                 ORDER BY tds.tenant_id, ds.source_id
                 "#,
@@ -379,13 +482,55 @@ impl PostgresRepository {
     pub async fn load_tenant_pattern_configs(
         &self,
     ) -> Result<std::collections::HashMap<(String, String), serde_json::Value>> {
+        // Composite query: joins all four per-tenant pattern config tables into one
+        // JSONB blob per (tenant_id, pattern_id).  Each pattern's reload_config()
+        // extracts "detection_config" for its thresholds; the outer wrapper
+        // also carries source_bindings, alert_policy, and notification_channels
+        // so the detector can gate events and alert delivery per-tenant.
+        //
+        // Backward compat: individual patterns do `config.get("detection_config").unwrap_or(config)`
+        // so older code that stored flat configs still works.
         let rows = self
             .client
             .query(
                 r#"
-                SELECT tpc.tenant_id, tpc.pattern_id, tpc.config
-                FROM tenant_pattern_configs tpc
-                JOIN patterns p ON p.pattern_id = tpc.pattern_id
+                SELECT
+                    tpc.tenant_id,
+                    tpc.pattern_id,
+                    jsonb_build_object(
+                        'enabled',          tpc.enabled,
+                        'detection_config', tpc.config,
+                        'source_bindings',  (
+                            SELECT jsonb_agg(jsonb_build_object(
+                                'source_id',      b.source_id,
+                                'enabled',        b.enabled,
+                                'binding_config', b.binding_config
+                            ))
+                            FROM pattern.tenant_pattern_source_bindings b
+                            WHERE b.tenant_id   = tpc.tenant_id
+                              AND b.pattern_id  = tpc.pattern_id
+                              AND b.enabled     = TRUE
+                        ),
+                        'alert_policy',     (
+                            SELECT row_to_json(ap)::jsonb
+                            FROM pattern.tenant_pattern_alert_policies ap
+                            WHERE ap.tenant_id  = tpc.tenant_id
+                              AND ap.pattern_id = tpc.pattern_id
+                        ),
+                        'notification_channels', (
+                            SELECT jsonb_agg(jsonb_build_object(
+                                'channel',    nc.channel,
+                                'enabled',    nc.enabled,
+                                'config_json', nc.config_json
+                            ))
+                            FROM pattern.tenant_pattern_notification_channels nc
+                            WHERE nc.tenant_id  = tpc.tenant_id
+                              AND nc.pattern_id = tpc.pattern_id
+                              AND nc.enabled    = TRUE
+                        )
+                    ) AS full_config
+                FROM pattern.tenant_pattern_configs tpc
+                JOIN pattern.patterns p ON p.pattern_id = tpc.pattern_id
                 WHERE p.enabled = TRUE AND tpc.enabled = TRUE
                 ORDER BY tpc.tenant_id, tpc.pattern_id
                 "#,
@@ -397,41 +542,10 @@ impl PostgresRepository {
         for row in rows {
             let tenant_id: String = row.get(0);
             let pattern_id: String = row.get(1);
-            let config: serde_json::Value = row.get(2);
-            map.insert((tenant_id, pattern_id), config);
+            let full_config: serde_json::Value = row.get(2);
+            map.insert((tenant_id, pattern_id), full_config);
         }
         Ok(map)
-    }
-
-    pub async fn load_simulation_run_pattern_config(
-        &self,
-        run_id: &str,
-        pattern_id: &str,
-    ) -> Result<Option<serde_json::Value>> {
-        let row = self
-            .client
-            .query_opt(
-                r#"
-                SELECT COALESCE(
-                    sr.metadata_json -> 'pattern_config_overrides' -> $2,
-                    sc.metadata_json -> 'runtime_pattern_configs' -> $2,
-                    CASE
-                        WHEN lower(COALESCE(sc.metadata_json ->> 'pattern_id', '')) = lower($2)
-                        THEN sc.metadata_json -> 'pattern_config'
-                        ELSE NULL
-                    END
-                ) AS config
-                FROM simulation_runs sr
-                JOIN simulation_scenarios sc
-                  ON sc.scenario_id = sr.scenario_id
-                WHERE sr.run_id = $1
-                LIMIT 1
-                "#,
-                &[&run_id, &pattern_id],
-            )
-            .await?;
-
-        Ok(row.and_then(|record| record.get::<_, Option<serde_json::Value>>(0)))
     }
 
     pub async fn list_effective_stream_configs(&self) -> Result<Vec<EffectiveStreamConfig>> {
@@ -446,6 +560,7 @@ impl PostgresRepository {
                     ds.source_name,
                     COALESCE(ssc.connection_config_override, ds.connection_config) AS connection_config,
                     ssc.connector_mode,
+                    ssc.operating_mode_profile,
                     ssc.stream_name,
                     ssc.subscription_key,
                     ssc.event_type,
@@ -458,12 +573,21 @@ impl PostgresRepository {
                     ssc.payload_ts_path,
                     ssc.payload_ts_unit,
                     ssc.poll_interval_ms
-                FROM source_stream_configs ssc
-                JOIN data_sources ds
+                FROM catalog.source_stream_configs ssc
+                JOIN catalog.data_sources ds
                   ON ds.source_id = ssc.source_id
                 WHERE ds.enabled = TRUE
                   AND ssc.enabled = TRUE
-                ORDER BY ssc.source_id, ssc.stream_name, ssc.asset_pair NULLS FIRST
+                  AND EXISTS (
+                    SELECT 1
+                    FROM catalog.source_stream_tenant_targets sstt
+                    LEFT JOIN catalog.tenant_operating_mode tom
+                      ON tom.tenant_id = sstt.tenant_id
+                    WHERE sstt.stream_config_id = ssc.stream_config_id
+                      AND sstt.enabled = TRUE
+                      AND COALESCE(tom.mode, 'live') = ssc.operating_mode_profile
+                  )
+                ORDER BY ssc.source_id, ssc.operating_mode_profile, ssc.stream_name, ssc.asset_pair NULLS FIRST
                 "#,
                 &[],
             )
@@ -488,38 +612,48 @@ impl PostgresRepository {
                 source_name: row.get(3),
                 connection_config: row.get(4),
                 connector_mode: row.get(5),
-                stream_name: row.get(6),
-                subscription_key: row.get(7),
-                event_type: row.get(8),
-                parser_name: row.get(9),
-                market_key: row.get(10),
-                asset_pair: row.get(11),
-                filter_config: row.get(12),
-                auth_secret_ref: row.get(13),
-                auth_config: row.get(14),
-                payload_ts_path: row.get(15),
-                payload_ts_unit: row.get(16),
-                poll_interval_ms: row.get(17),
+                operating_mode_profile: row.get(6),
+                stream_name: row.get(7),
+                subscription_key: row.get(8),
+                event_type: row.get(9),
+                parser_name: row.get(10),
+                market_key: row.get(11),
+                asset_pair: row.get(12),
+                filter_config: row.get(13),
+                auth_secret_ref: row.get(14),
+                auth_config: row.get(15),
+                payload_ts_path: row.get(16),
+                payload_ts_unit: row.get(17),
+                poll_interval_ms: row.get(18),
             });
         }
         Ok(configs)
     }
 
+    /// Returns tenant targets for a stream config, filtered by operating mode.
+    ///
+    /// Only tenants whose operating mode matches the stream's `operating_mode_profile`
+    /// receive events from that stream.  Tenants with no row in
+    /// `catalog.tenant_operating_mode` default to `'live'`.
     pub async fn list_stream_tenant_targets(
         &self,
         stream_config_id: &str,
+        operating_mode_profile: &str,
     ) -> Result<Vec<StreamTenantTarget>> {
         let rows = match self
             .client
             .query(
                 r#"
-                SELECT tenant_id
-                FROM source_stream_tenant_targets
-                WHERE stream_config_id::text = $1
-                  AND enabled = TRUE
-                ORDER BY tenant_id
+                SELECT sstt.tenant_id
+                FROM catalog.source_stream_tenant_targets sstt
+                LEFT JOIN catalog.tenant_operating_mode tom
+                  ON tom.tenant_id = sstt.tenant_id
+                WHERE sstt.stream_config_id::text = $1
+                  AND sstt.enabled = TRUE
+                  AND COALESCE(tom.mode, 'live') = $2
+                ORDER BY sstt.tenant_id
                 "#,
-                &[&stream_config_id],
+                &[&stream_config_id, &operating_mode_profile],
             )
             .await
         {
@@ -550,7 +684,7 @@ impl PostgresRepository {
             .client
             .execute(
                 r#"
-                INSERT INTO ingest_operational_events (
+                INSERT INTO catalog.ingest_operational_events (
                     stream_id,
                     source_id,
                     source_type,
@@ -574,7 +708,9 @@ impl PostgresRepository {
                     dedup_key,
                     raw_ref_type,
                     raw_ref_id,
-                    raw_s3_uri
+                    raw_s3_uri,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     ($1)::text::uuid,
@@ -600,6 +736,8 @@ impl PostgresRepository {
                     $20,
                     NULL,
                     NULL,
+                    NULL,
+                    FALSE,
                     NULL
                 )
                 ON CONFLICT DO NOTHING
@@ -640,7 +778,7 @@ impl PostgresRepository {
             .client
             .execute(
                 r#"
-                INSERT INTO ingest_operational_events (
+                INSERT INTO catalog.ingest_operational_events (
                     stream_id,
                     source_id,
                     source_type,
@@ -664,7 +802,9 @@ impl PostgresRepository {
                     dedup_key,
                     raw_ref_type,
                     raw_ref_id,
-                    raw_s3_uri
+                    raw_s3_uri,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     ($1)::text::uuid,
@@ -690,7 +830,9 @@ impl PostgresRepository {
                     $21,
                     $22,
                     $23,
-                    $24
+                    $24,
+                    $25,
+                    $26
                 )
                 ON CONFLICT DO NOTHING
                 "#,
@@ -719,6 +861,8 @@ impl PostgresRepository {
                     &record.raw_ref_type,
                     &record.raw_ref_id,
                     &record.raw_s3_uri,
+                    &record.is_simulated,
+                    &record.simulation_run_id,
                 ],
             )
             .await?;
@@ -733,9 +877,9 @@ impl PostgresRepository {
             .client
             .execute(
                 r#"
-                DELETE FROM ingest_operational_events
+                DELETE FROM catalog.ingest_operational_events
                 WHERE event_type = ANY($1)
-                  AND observed_at < NOW() - ($2::BIGINT * INTERVAL '1 second')
+                  AND created_at < NOW() - ($2::BIGINT * INTERVAL '1 second')
                 "#,
                 &[&event_types, &seconds],
             )
@@ -764,7 +908,7 @@ impl PostgresRepository {
             .query_opt(
                 r#"
                 SELECT price
-                FROM ingest_operational_events
+                FROM catalog.ingest_operational_events
                 WHERE market_key = $1
                   AND price IS NOT NULL
                   AND parse_status IN ('parsed', 'partial')
@@ -793,7 +937,7 @@ impl PostgresRepository {
                     source_id,
                     price,
                     observed_at
-                FROM ingest_operational_events
+                FROM catalog.ingest_operational_events
                 WHERE market_key = $1
                   AND price IS NOT NULL
                   AND parse_status IN ('parsed', 'partial')
@@ -836,6 +980,7 @@ impl PostgresRepository {
         }
 
         let payload = serde_json::to_value(event)?;
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_payload(&payload);
         let asset_pair = event
             .payload
             .get("s")
@@ -860,7 +1005,7 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO ingest_operational_events (
+                INSERT INTO catalog.ingest_operational_events (
                     stream_id,
                     source_id,
                     source_type,
@@ -884,13 +1029,14 @@ impl PostgresRepository {
                     dedup_key,
                     raw_ref_type,
                     raw_ref_id,
-                    raw_s3_uri
+                    raw_s3_uri,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     NULL,
                     $1,
                     $2,
-                    NULL,
                     $3,
                     $4,
                     $5,
@@ -902,21 +1048,25 @@ impl PostgresRepository {
                     $11,
                     $12,
                     $13,
-                    $13,
+                    $14,
+                    $14,
                     'parsed',
                     NULL,
-                    $14,
                     $15,
                     $16,
+                    $17,
                     NULL,
                     NULL,
-                    NULL
+                    NULL,
+                    $18,
+                    $19
                 )
                 ON CONFLICT DO NOTHING
                 "#,
                 &[
                     &event.source_id,
                     &format!("{:?}", event.source_type).to_lowercase(),
+                    &Some(event.tenant_id.clone()),
                     &event.event_type,
                     &event.event_id,
                     &event.market_key,
@@ -931,6 +1081,8 @@ impl PostgresRepository {
                     &payload,
                     &normalized_fields,
                     &event.event_id,
+                    &is_simulated,
+                    &simulation_run_id,
                 ],
             )
             .await?;
@@ -947,7 +1099,7 @@ impl PostgresRepository {
             .query_opt(
                 r#"
                 SELECT 1
-                FROM source_required_pairs
+                FROM catalog.source_required_pairs
                 WHERE source_id = $1
                   AND market_key = $2
                 LIMIT 1
@@ -959,7 +1111,9 @@ impl PostgresRepository {
             Ok(value) => value,
             Err(error) => {
                 if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
-                    warn!("source_required_pairs table not found; skipping market-key filtering");
+                    warn!(
+                        "catalog.source_required_pairs table not found; skipping market-key filtering"
+                    );
                     return Ok(true);
                 }
                 return Err(error.into());
@@ -975,15 +1129,18 @@ impl PostgresRepository {
             .query_opt(
                 r#"
                 SELECT 1
-                FROM data_sources ds
-                JOIN source_stream_configs ssc
+                FROM catalog.data_sources ds
+                JOIN catalog.source_stream_configs ssc
                   ON ssc.source_id = ds.source_id
                  AND ssc.enabled = TRUE
-                JOIN source_stream_tenant_targets stt
+                JOIN catalog.source_stream_tenant_targets stt
                   ON stt.stream_config_id = ssc.stream_config_id
                  AND stt.enabled = TRUE
+                LEFT JOIN catalog.tenant_operating_mode tom
+                  ON tom.tenant_id = stt.tenant_id
                 WHERE ds.source_id = $1
                   AND ds.enabled = TRUE
+                  AND COALESCE(tom.mode, 'live') = ssc.operating_mode_profile
                 LIMIT 1
                 "#,
                 &[&source_id],
@@ -1015,7 +1172,7 @@ impl PostgresRepository {
             .client
             .query_opt(
                 r#"
-                SELECT data FROM pattern_state
+                SELECT data FROM pattern.pattern_state
                 WHERE tenant_id = $1 AND pattern_id = $2 AND state_key = $3
                 "#,
                 &[&tenant_id, &pattern_id, &state_key],
@@ -1035,7 +1192,7 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO pattern_state (tenant_id, pattern_id, state_key, data, updated_at)
+                INSERT INTO pattern.pattern_state (tenant_id, pattern_id, state_key, data, updated_at)
                 VALUES ($1, $2, $3, $4, NOW())
                 ON CONFLICT (tenant_id, pattern_id, state_key) DO UPDATE
                 SET data = EXCLUDED.data, updated_at = NOW()
@@ -1050,7 +1207,7 @@ impl PostgresRepository {
         self.client
             .execute(
                 r#"
-                INSERT INTO pattern_snapshots
+                INSERT INTO pattern.pattern_snapshots
                     (tenant_id, pattern_id, snapshot_key, data, score, severity, observed_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                 "#,
@@ -1087,6 +1244,244 @@ impl PostgresRepository {
                 ],
             )
             .await?;
+        Ok(())
+    }
+
+    pub async fn load_simulation_events_for_alert_evidence(
+        &self,
+        query: AlertEvidenceSimulationQuery<'_>,
+    ) -> Result<Vec<AlertEvidenceSimulationRow>> {
+        if query.source_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = match self
+            .client
+            .query(
+                r#"
+                SELECT
+                    id::text,
+                    NULLIF(
+                        BTRIM(
+                            COALESCE(
+                                published_payload_json->>'source_id',
+                                original_payload_json->>'source_id',
+                                ''
+                            )
+                        ),
+                        ''
+                    ) AS source_id,
+                    source_table,
+                    event_type,
+                    event_ts,
+                    COALESCE(original_payload_json, '{}'::jsonb) AS original_payload_json,
+                    COALESCE(published_payload_json, '{}'::jsonb) AS published_payload_json
+                FROM workbench.simulation_run_events
+                WHERE run_id = $1
+                  AND event_ts >= $2
+                  AND event_ts <= $3
+                  AND NULLIF(
+                        BTRIM(
+                            COALESCE(
+                                published_payload_json->>'source_id',
+                                original_payload_json->>'source_id',
+                                ''
+                            )
+                        ),
+                        ''
+                      ) = ANY($4)
+                ORDER BY event_ts ASC, id ASC
+                "#,
+                &[
+                    &query.simulation_run_id,
+                    &query.window_start,
+                    &query.window_end,
+                    &query.source_ids,
+                ],
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                if error.code() == Some(&SqlState::UNDEFINED_TABLE) {
+                    warn!("simulation_run_events table not found; skipping simulation evidence lookup");
+                    return Ok(vec![]);
+                }
+                return Err(error.into());
+            }
+        };
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let source_id: Option<String> = row.get(1);
+                Some(AlertEvidenceSimulationRow {
+                    run_event_id: row.get(0),
+                    source_id: source_id?,
+                    source_table: row.get(2),
+                    event_type: row.get(3),
+                    observed_at: row.get(4),
+                    original_payload: row.get(5),
+                    published_payload: row.get(6),
+                })
+            })
+            .collect())
+    }
+
+    pub async fn load_operational_events_for_alert_evidence(
+        &self,
+        query: AlertEvidenceOperationalQuery<'_>,
+    ) -> Result<Vec<AlertEvidenceOperationalRow>> {
+        if query.source_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT
+                    ingest_event_id::text,
+                    source_id,
+                    source_type,
+                    event_type,
+                    market_key,
+                    price,
+                    observed_at,
+                    payload_event_ts,
+                    tx_hash,
+                    block_number,
+                    COALESCE(payload, '{}'::jsonb) AS payload,
+                    COALESCE(normalized_fields, '{}'::jsonb) AS normalized_fields
+                FROM catalog.ingest_operational_events
+                WHERE tenant_id = $1
+                  AND observed_at >= $2
+                  AND observed_at <= $3
+                  AND source_id = ANY($4)
+                  AND ($5::text IS NULL OR market_key = $5)
+                  AND is_simulated = $6
+                  AND (
+                    ($7::text IS NULL AND simulation_run_id IS NULL)
+                    OR simulation_run_id = $7
+                  )
+                ORDER BY observed_at ASC, ingest_event_id ASC
+                "#,
+                &[
+                    &query.tenant_id,
+                    &query.window_start,
+                    &query.window_end,
+                    &query.source_ids,
+                    &query.market_key,
+                    &query.is_simulated,
+                    &query.simulation_run_id,
+                ],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| AlertEvidenceOperationalRow {
+                ingest_event_id: row.get(0),
+                source_id: row.get(1),
+                source_type: row.get(2),
+                event_type: row.get(3),
+                market_key: row.get(4),
+                price: row.get(5),
+                observed_at: row.get(6),
+                event_ts: row.get(7),
+                tx_hash: row.get(8),
+                block_number: row.get(9),
+                payload: row.get(10),
+                normalized_fields: row.get(11),
+            })
+            .collect())
+    }
+
+    pub async fn save_alert_evidence_snapshot_batch(
+        &self,
+        records: &[AlertEvidenceSnapshotRecord],
+    ) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        self.client
+            .execute(
+                r#"
+                DELETE FROM detection.alert_evidence_snapshots
+                WHERE tenant_id = $1
+                  AND alert_id = $2
+                "#,
+                &[&records[0].tenant_id, &records[0].alert_id],
+            )
+            .await?;
+
+        for record in records {
+            self.client
+                .execute(
+                    r#"
+                    INSERT INTO detection.alert_evidence_snapshots (
+                        alert_id,
+                        incident_id,
+                        tenant_id,
+                        pattern_id,
+                        source_id,
+                        source_type,
+                        event_type,
+                        market_key,
+                        price,
+                        observed_at,
+                        event_ts,
+                        tx_hash,
+                        block_number,
+                        payload,
+                        normalized_fields,
+                        raw_ref_type,
+                        raw_ref_id
+                    )
+                    VALUES (
+                        $1,
+                        $2,
+                        $3,
+                        $4,
+                        $5,
+                        $6,
+                        $7,
+                        $8,
+                        $9,
+                        $10,
+                        $11,
+                        $12,
+                        $13,
+                        $14,
+                        $15,
+                        $16,
+                        $17
+                    )
+                    "#,
+                    &[
+                        &record.alert_id,
+                        &record.incident_id,
+                        &record.tenant_id,
+                        &record.pattern_id,
+                        &record.source_id,
+                        &record.source_type,
+                        &record.event_type,
+                        &record.market_key,
+                        &record.price,
+                        &record.observed_at,
+                        &record.event_ts,
+                        &record.tx_hash,
+                        &record.block_number,
+                        &record.payload,
+                        &record.normalized_fields,
+                        &record.raw_ref_type,
+                        &record.raw_ref_id,
+                    ],
+                )
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -1145,6 +1540,56 @@ impl PostgresRepository {
                     &key.subject_type,
                     &key.subject_key,
                     &key.chain_slug,
+                ],
+            )
+            .await?;
+
+        Ok(row.map(|record| IncidentRecord {
+            incident_id: record.get(0),
+            tenant_id: record.get(1),
+            pattern_id: record.get(2),
+            subject_type: record.get(3),
+            subject_key: record.get(4),
+            chain_slug: record.get(5),
+            status: record.get(6),
+            current_severity: record.get(7),
+        }))
+    }
+
+    pub async fn find_active_incident_for_simulation(
+        &self,
+        key: IncidentKey<'_>,
+        simulation_run_id: &str,
+    ) -> Result<Option<IncidentRecord>> {
+        let row = self
+            .client
+            .query_opt(
+                r#"
+                SELECT i.incident_id, i.tenant_id, i.pattern_id, i.subject_type, i.subject_key, i.chain_slug, i.status, i.current_severity
+                FROM incidents i
+                WHERE i.tenant_id = $1
+                  AND i.pattern_id = $2
+                  AND COALESCE(i.subject_type, '') = COALESCE($3, '')
+                  AND COALESCE(i.subject_key, '') = COALESCE($4, '')
+                  AND i.chain_slug = $5
+                  AND i.status NOT IN ('resolved', 'retracted', 'closed', 'cancelled')
+                  AND EXISTS (
+                      SELECT 1
+                      FROM alerts a
+                      WHERE a.incident_id = i.incident_id
+                        AND a.is_simulated = TRUE
+                        AND a.simulation_run_id = $6
+                  )
+                ORDER BY i.updated_at DESC
+                LIMIT 1
+                "#,
+                &[
+                    &key.tenant_id,
+                    &key.pattern_id,
+                    &key.subject_type,
+                    &key.subject_key,
+                    &key.chain_slug,
+                    &simulation_run_id,
                 ],
             )
             .await?;
@@ -1361,13 +1806,54 @@ impl PostgresRepository {
         Ok(row.get::<_, i64>(0))
     }
 
+    pub async fn count_usage_event_quantity_for_past_hour(
+        &self,
+        tenant_id: &str,
+        event_type: &str,
+    ) -> Result<i64> {
+        let row = self
+            .client
+            .query_one(
+                r#"
+                SELECT COALESCE(SUM(quantity), 0)::bigint AS total
+                FROM usage_events
+                WHERE tenant_id = $1
+                  AND event_type = $2
+                  AND recorded_at >= NOW() - INTERVAL '1 hour'
+                "#,
+                &[&tenant_id, &event_type],
+            )
+            .await?;
+        Ok(row.get::<_, i64>(0))
+    }
+
+    pub async fn load_tenant_hourly_alert_limit(&self, tenant_id: &str) -> Result<Option<i64>> {
+        let row = match self
+            .client
+            .query_opt(
+                r#"
+                SELECT hourly_alert_limit
+                FROM notify.tenant_delivery_controls
+                WHERE tenant_id = $1
+                "#,
+                &[&tenant_id],
+            )
+            .await
+        {
+            Ok(row) => row,
+            Err(_) => return Ok(None),
+        };
+
+        Ok(row.map(|row| row.get::<_, i32>(0) as i64))
+    }
+
     pub async fn load_tenant_monthly_alert_quota(&self, tenant_id: &str) -> Result<Option<i64>> {
         let row = match self
             .client
             .query_opt(
                 r#"
                 SELECT max_alerts_per_month
-                FROM tenants
+                FROM iam.tenants
                 WHERE tenant_id = $1
                 "#,
                 &[&tenant_id],
@@ -1455,7 +1941,7 @@ impl PostgresRepository {
                 r#"
                 SELECT entity_id, entity_type, display_name, chain_slug, asset_symbol,
                        quantity::float8, valuation_usd::float8, metadata_json
-                FROM tenant_monitored_entities
+                FROM control.tenant_monitored_entities
                 WHERE tenant_id = $1
                   AND asset_symbol = $2
                   AND enabled = TRUE

@@ -29,6 +29,12 @@ pub fn make_postgres_tls_connector() -> Result<MakeTlsConnector> {
     Ok(MakeTlsConnector::new(connector))
 }
 
+/// Search path used for all connections to the core raksha_core database.
+/// Covers all named schemas; extra schemas are silently ignored on databases
+/// that do not have them (e.g. raksha_raw only uses raw_ingest).
+const DEFAULT_SEARCH_PATH: &str =
+    "catalog, pattern, detection, ingest, ml, workbench, history, raw_ingest, public";
+
 pub async fn connect_postgres_client(
     database_url: &str,
     background_error_message: &'static str,
@@ -41,6 +47,11 @@ pub async fn connect_postgres_client(
             crate::log_error!(error, err, background_error_message);
         }
     });
+
+    client
+        .execute(&format!("SET search_path TO {DEFAULT_SEARCH_PATH}"), &[])
+        .await
+        .context("failed to set search_path on postgres connection")?;
 
     Ok(client)
 }

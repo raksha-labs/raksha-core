@@ -3,7 +3,10 @@ use chrono::{DateTime, Utc};
 use common::connect_postgres_client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tokio_postgres::Client;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +29,8 @@ pub struct SourceEnvelopeV1 {
     pub topic0: Option<String>,
     pub market_key: Option<String>,
     pub price: Option<f64>,
+    pub is_simulated: bool,
+    pub simulation_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,17 +66,24 @@ pub struct IngestFailureRecord {
 
 #[derive(Clone)]
 pub struct PostgresRawRepository {
-    client: Arc<Client>,
+    clients: Arc<Vec<Arc<Client>>>,
+    next_client: Arc<AtomicUsize>,
 }
 
 impl PostgresRawRepository {
     pub async fn from_database_url(database_url: &str) -> Result<Self> {
-        let client =
-            connect_postgres_client(database_url, "raw postgres background connection error")
-                .await?;
+        let pool_size = raw_database_pool_size();
+        let mut clients = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            let client =
+                connect_postgres_client(database_url, "raw postgres background connection error")
+                    .await?;
+            clients.push(Arc::new(client));
+        }
 
         Ok(Self {
-            client: Arc::new(client),
+            clients: Arc::new(clients),
+            next_client: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -100,7 +112,7 @@ impl PostgresRawRepository {
         last_block_number: Option<i64>,
         last_seen_ts: DateTime<Utc>,
     ) -> Result<()> {
-        self.client
+        self.client()
             .execute(
                 r#"
                 INSERT INTO raw_ingest.ingest_offsets (
@@ -131,7 +143,7 @@ impl PostgresRawRepository {
     }
 
     pub async fn record_ingest_batch(&self, metrics: &IngestBatchMetrics) -> Result<()> {
-        self.client
+        self.client()
             .execute(
                 r#"
                 INSERT INTO raw_ingest.ingest_batches (
@@ -168,7 +180,7 @@ impl PostgresRawRepository {
     }
 
     pub async fn record_ingest_failure(&self, failure: &IngestFailureRecord) -> Result<()> {
-        self.client
+        self.client()
             .execute(
                 r#"
                 INSERT INTO raw_ingest.ingest_failures (
@@ -205,8 +217,8 @@ impl PostgresRawRepository {
         &self,
         envelope: &SourceEnvelopeV1,
     ) -> Result<Option<RawRecordPointer>> {
-        let row = self
-            .client
+        let client = self.client();
+        let row = client
             .query_opt(
                 r#"
                 INSERT INTO raw_ingest.chain_events (
@@ -225,15 +237,20 @@ impl PostgresRawRepository {
                     provider,
                     request_window,
                     schema_version,
-                    idempotency_key
+                    idempotency_key,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16
+                    $11, $12, $13, $14, $15, $16,
+                    $17, $18
                 )
                 ON CONFLICT (idempotency_key) DO UPDATE
-                SET observed_at = EXCLUDED.observed_at
+                SET observed_at = EXCLUDED.observed_at,
+                    is_simulated = EXCLUDED.is_simulated,
+                    simulation_run_id = EXCLUDED.simulation_run_id
                 RETURNING event_id::text
                 "#,
                 &[
@@ -253,6 +270,8 @@ impl PostgresRawRepository {
                     &Some(envelope.partition_key.clone()),
                     &envelope.schema_version,
                     &envelope.idempotency_key,
+                    &envelope.is_simulated,
+                    &envelope.simulation_run_id,
                 ],
             )
             .await;
@@ -274,8 +293,8 @@ impl PostgresRawRepository {
         &self,
         envelope: &SourceEnvelopeV1,
     ) -> Result<Option<RawRecordPointer>> {
-        let row = self
-            .client
+        let client = self.client();
+        let row = client
             .query_opt(
                 r#"
                 INSERT INTO raw_ingest.dex_events (
@@ -290,14 +309,19 @@ impl PostgresRawRepository {
                     decoded_json,
                     raw_payload,
                     schema_version,
-                    idempotency_key
+                    idempotency_key,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     $1, $2, $3, $4, $5,
-                    $6, $7, $8, $9, $10, $11, $12
+                    $6, $7, $8, $9, $10, $11, $12,
+                    $13, $14
                 )
                 ON CONFLICT (idempotency_key) DO UPDATE
-                SET observed_at = EXCLUDED.observed_at
+                SET observed_at = EXCLUDED.observed_at,
+                    is_simulated = EXCLUDED.is_simulated,
+                    simulation_run_id = EXCLUDED.simulation_run_id
                 RETURNING event_id::text
                 "#,
                 &[
@@ -313,6 +337,8 @@ impl PostgresRawRepository {
                     &envelope.payload,
                     &envelope.schema_version,
                     &envelope.idempotency_key,
+                    &envelope.is_simulated,
+                    &envelope.simulation_run_id,
                 ],
             )
             .await;
@@ -334,8 +360,8 @@ impl PostgresRawRepository {
         &self,
         envelope: &SourceEnvelopeV1,
     ) -> Result<Option<RawRecordPointer>> {
-        let row = self
-            .client
+        let client = self.client();
+        let row = client
             .query_opt(
                 r#"
                 INSERT INTO raw_ingest.cex_ticks (
@@ -349,14 +375,19 @@ impl PostgresRawRepository {
                     sequence,
                     payload,
                     schema_version,
-                    idempotency_key
+                    idempotency_key,
+                    is_simulated,
+                    simulation_run_id
                 )
                 VALUES (
                     $1, $2, $3, $4, $5,
-                    $6, $7, $8, $9, $10, $11
+                    $6, $7, $8, $9, $10, $11,
+                    $12, $13
                 )
                 ON CONFLICT (idempotency_key) DO UPDATE
-                SET observed_at = EXCLUDED.observed_at
+                SET observed_at = EXCLUDED.observed_at,
+                    is_simulated = EXCLUDED.is_simulated,
+                    simulation_run_id = EXCLUDED.simulation_run_id
                 RETURNING tick_id::text
                 "#,
                 &[
@@ -371,6 +402,8 @@ impl PostgresRawRepository {
                     &envelope.payload,
                     &envelope.schema_version,
                     &envelope.idempotency_key,
+                    &envelope.is_simulated,
+                    &envelope.simulation_run_id,
                 ],
             )
             .await;
@@ -387,4 +420,22 @@ impl PostgresRawRepository {
             }
         }
     }
+
+    fn client(&self) -> Arc<Client> {
+        let client_count = self.clients.len();
+        debug_assert!(
+            client_count > 0,
+            "raw repository must have at least one client"
+        );
+        let index = self.next_client.fetch_add(1, Ordering::Relaxed) % client_count;
+        self.clients[index].clone()
+    }
+}
+
+fn raw_database_pool_size() -> usize {
+    std::env::var("RAW_DATABASE_POOL_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(4)
+        .clamp(1, 16)
 }

@@ -16,8 +16,7 @@ locals {
     for svc in local.service_catalog_raw.services :
     svc.service_name => svc
   }
-  secret_prefix                    = "raksha/${var.environment}"
-  service_discovery_namespace_name = "raksha-${var.environment}.local"
+  secret_prefix = "raksha/${var.environment}"
 }
 
 module "network" {
@@ -81,13 +80,11 @@ locals {
 
   service_static_env_overrides = {
     indexer = {
-      SIMLAB_MOCK_WS_BASE_URL   = "ws://simlab-api-service.${local.service_discovery_namespace_name}:8000/api/simulation/mock/ws"
-      SIMLAB_MOCK_RPC_BASE_URL  = "ws://simlab-api-service.${local.service_discovery_namespace_name}:8000/api/simulation/mock/rpc"
-      SIMLAB_MOCK_HTTP_BASE_URL = "http://simlab-api-service.${local.service_discovery_namespace_name}:8000/api/simulation/mock/http"
+      AUTH_INTERNAL_SERVICE_TOKEN = "raksha-auth-token"
     }
     orchestrator = {
       ALERT_FALLBACK_TENANT_ID = "glider"
-      NOTIFIER_GATEWAY_URL     = "http://notifier-gateway:3002"
+      NOTIFIER_GATEWAY_URL     = "http://notifier-gateway.${module.compute.service_discovery_namespace_name}:3002"
     }
     finality = {
       ALERT_FALLBACK_TENANT_ID = "glider"
@@ -116,7 +113,7 @@ locals {
       var.enable_managed_data ? { DATABASE_URL = "${local.database_url_secret_arn}:DATABASE_URL::" } : {},
       var.enable_managed_data ? { RAW_DATABASE_URL = "${local.raw_database_url_secret_arn}:RAW_DATABASE_URL::" } : {},
       var.enable_managed_data ? { REDIS_URL = "${local.redis_url_secret_arn}:REDIS_URL::" } : {},
-      service_name == "indexer" ? var.rpc_ws_url_secret_arns : {}
+      {}
     )
   }
 }

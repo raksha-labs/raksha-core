@@ -31,9 +31,9 @@ on:
         required: true
         type: boolean
         default: false
-  # schedule:
-  #   # Auto-stop test environment at 8 PM PST (4 AM UTC) on weekdays
-  #   - cron: '0 4 * * 1-5'
+  schedule:
+    # Daily auto-stop at 00:00 CET (23:00 UTC year-round).
+    - cron: '0 23 * * *'
 
 permissions:
   id-token: write

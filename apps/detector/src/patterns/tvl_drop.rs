@@ -210,10 +210,10 @@ struct PauseDetectionContext<'a> {
 pub struct TvlDropPattern {
     // tenant_id -> rules
     configs: HashMap<String, Vec<TvlDropRule>>,
-    // simulation_run_id -> rules
-    simulation_configs: HashMap<String, Vec<TvlDropRule>>,
     // `${tenant_id}:${rule_id}:${subject_key}` -> state
     state_cache: HashMap<String, TvlRuleState>,
+    // tenant_id -> set of enabled source_ids (None = unrestricted)
+    source_bindings: HashMap<String, HashSet<String>>,
 }
 
 impl TvlDropPattern {
@@ -228,27 +228,8 @@ impl TvlDropPattern {
     async fn effective_rules(
         &mut self,
         tenant_id: &str,
-        simulation_run_id: Option<&str>,
-        repo: &PostgresRepository,
+        _repo: &PostgresRepository,
     ) -> Result<Option<Vec<TvlDropRule>>> {
-        let Some(run_id) = simulation_run_id.filter(|value| !value.trim().is_empty()) else {
-            return Ok(self.configs.get(tenant_id).cloned());
-        };
-
-        if let Some(cached) = self.simulation_configs.get(run_id) {
-            return Ok(Some(cached.clone()));
-        }
-
-        if let Some(config) = repo
-            .load_simulation_run_pattern_config(run_id, PATTERN_ID)
-            .await?
-        {
-            let rules = parse_tvl_drop_rules(&config, tenant_id);
-            self.simulation_configs
-                .insert(run_id.to_string(), rules.clone());
-            return Ok(Some(rules));
-        }
-
         Ok(self.configs.get(tenant_id).cloned())
     }
 
@@ -358,8 +339,7 @@ impl TvlDropPattern {
         evaluation: &TvlEvaluation,
         sample: &TvlStateEvent,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id, simulation_operating_mode) =
-            simulation_metadata_from_event(event);
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
         let confidence_breakdown = HashMap::from([
             ("fast_drop_pct".to_string(), evaluation.fast_drop_pct),
             ("slow_drop_pct".to_string(), evaluation.slow_drop_pct),
@@ -464,7 +444,6 @@ impl TvlDropPattern {
             actions_recommended: recommended_actions_for_severity(&context.severity),
             is_simulated,
             simulation_run_id,
-            simulation_operating_mode,
             created_at: context.now,
         }
     }
@@ -475,8 +454,7 @@ impl TvlDropPattern {
         context: &PauseDetectionContext<'_>,
         pause: &TvlPauseEvent,
     ) -> DetectionResult {
-        let (is_simulated, simulation_run_id, simulation_operating_mode) =
-            simulation_metadata_from_event(event);
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
         let state_label = if pause.paused { "paused" } else { "unpaused" };
         let mut oracle_context = HashMap::new();
         oracle_context.insert("protocol_id".to_string(), json!(pause.protocol_id));
@@ -540,7 +518,6 @@ impl TvlDropPattern {
             ],
             is_simulated,
             simulation_run_id,
-            simulation_operating_mode,
             created_at: context.now,
         }
     }
@@ -554,14 +531,20 @@ impl DetectionPattern for TvlDropPattern {
 
     async fn reload_config(&mut self, config_map: &HashMap<(String, String), Value>) -> Result<()> {
         let mut next = HashMap::new();
+        let mut next_bindings = HashMap::new();
         for ((tenant_id, pattern_id), config) in config_map {
             if pattern_id != PATTERN_ID {
                 continue;
             }
-            let rules = parse_tvl_drop_rules(config, tenant_id);
+            let detection_config = super::extract_detection_config(config);
+            let rules = parse_tvl_drop_rules(detection_config, tenant_id);
             next.insert(tenant_id.clone(), rules);
+            if let Some(bound) = super::extract_bound_source_ids(config) {
+                next_bindings.insert(tenant_id.clone(), bound);
+            }
         }
         self.configs = next;
+        self.source_bindings = next_bindings;
         tracing::info!(
             tenant_count = self.configs.len(),
             "tvl_drop configs reloaded"
@@ -575,11 +558,16 @@ impl DetectionPattern for TvlDropPattern {
         now: DateTime<Utc>,
         repo: &PostgresRepository,
     ) -> Result<Option<DetectionResult>> {
-        let (_, simulation_run_id, _) = simulation_metadata_from_event(event);
-        let Some(rules) = self
-            .effective_rules(&event.tenant_id, simulation_run_id.as_deref(), repo)
-            .await?
-        else {
+        // Enforce source bindings: only process events from sources the tenant has bound to
+        // this pattern in the Gateway tab.  Mode switching (live ↔ test) is handled at the
+        // indexer level — live tenants receive live-profile streams, test tenants receive
+        // test-profile streams.  No simulation bypass needed here.
+        if let Some(bound) = self.source_bindings.get(&event.tenant_id) {
+            if !bound.is_empty() && !bound.contains(&event.source_id) {
+                return Ok(None);
+            }
+        }
+        let Some(rules) = self.effective_rules(&event.tenant_id, repo).await? else {
             return Ok(None);
         };
 
@@ -1396,5 +1384,122 @@ mod tests {
         assert_eq!(rule.fast_window_minutes, 5);
         assert_eq!(rule.velocity_critical_minutes, 2);
         assert_eq!(rule.concurrent_window_minutes, 10);
+    }
+
+    #[tokio::test]
+    async fn reload_config_keeps_tenant_rules_isolated_for_same_subject() {
+        let mut pattern = TvlDropPattern::default();
+        let mut config_map = HashMap::new();
+
+        config_map.insert(
+            ("tenant-a".to_string(), PATTERN_ID.to_string()),
+            json!({
+                "rules": [{
+                    "rule_id": "tvl-a",
+                    "scope": {
+                        "chain_slug": "base",
+                        "protocol_id": "aave_v3",
+                        "market_id": "all"
+                    },
+                    "thresholds": {
+                        "fast_drop_pct": 10,
+                        "fast_window_sec": 300,
+                        "slow_drop_pct": 20,
+                        "slow_window_sec": 3600,
+                        "velocity_critical_pct": 5,
+                        "velocity_window_sec": 120
+                    },
+                    "contagion": {
+                        "enabled": true,
+                        "overlap_window_sec": 300
+                    },
+                    "min_tvl_floor_usd": 1000000,
+                    "enabled": true
+                }]
+            }),
+        );
+        config_map.insert(
+            ("tenant-b".to_string(), PATTERN_ID.to_string()),
+            json!({
+                "rules": [{
+                    "rule_id": "tvl-b",
+                    "scope": {
+                        "chain_slug": "base",
+                        "protocol_id": "aave_v3",
+                        "market_id": "all"
+                    },
+                    "thresholds": {
+                        "fast_drop_pct": 35,
+                        "fast_window_sec": 300,
+                        "slow_drop_pct": 50,
+                        "slow_window_sec": 3600,
+                        "velocity_critical_pct": 25,
+                        "velocity_window_sec": 120
+                    },
+                    "contagion": {
+                        "enabled": false,
+                        "overlap_window_sec": 900
+                    },
+                    "min_tvl_floor_usd": 2000000,
+                    "enabled": true
+                }]
+            }),
+        );
+
+        pattern
+            .reload_config(&config_map)
+            .await
+            .expect("reload config");
+
+        let tenant_a = pattern.configs.get("tenant-a").expect("tenant-a rules");
+        let tenant_b = pattern.configs.get("tenant-b").expect("tenant-b rules");
+
+        assert_eq!(tenant_a.len(), 1);
+        assert_eq!(tenant_b.len(), 1);
+        assert_eq!(tenant_a[0].fast_drop_pct, 10.0);
+        assert_eq!(tenant_b[0].fast_drop_pct, 35.0);
+        assert!(tenant_a[0].contagion_enabled);
+        assert!(!tenant_b[0].contagion_enabled);
+    }
+
+    #[test]
+    fn process_state_sample_uses_tenant_specific_thresholds_independently() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(4), 100_000_000.0));
+        let mut tenant_a_state = state.clone();
+        let mut tenant_b_state = state;
+
+        let event = TvlStateEvent {
+            protocol_id: "aave_v3".to_string(),
+            chain_slug: "base".to_string(),
+            market_id: None,
+            tvl_usd: 80_000_000.0,
+            block_number: 1,
+            tx_hash: None,
+        };
+
+        let mut tenant_a_rule = base_rule();
+        tenant_a_rule.fast_drop_pct = 10.0;
+        tenant_a_rule.slow_drop_pct = 20.0;
+        tenant_a_rule.velocity_critical_pct = 25.0;
+
+        let mut tenant_b_rule = base_rule();
+        tenant_b_rule.fast_drop_pct = 30.0;
+        tenant_b_rule.slow_drop_pct = 45.0;
+        tenant_b_rule.velocity_critical_pct = 25.0;
+
+        let pattern = TvlDropPattern::default();
+        let tenant_a =
+            pattern.process_state_sample(&tenant_a_rule, &mut tenant_a_state, &event, now);
+        let tenant_b =
+            pattern.process_state_sample(&tenant_b_rule, &mut tenant_b_state, &event, now);
+
+        assert!(tenant_a.base_severity.is_some());
+        assert!(tenant_a.selected_drop_pct >= tenant_a_rule.fast_drop_pct);
+        assert!(tenant_b.base_severity.is_none());
+        assert!(tenant_b.selected_drop_pct < tenant_b_rule.fast_drop_pct);
     }
 }

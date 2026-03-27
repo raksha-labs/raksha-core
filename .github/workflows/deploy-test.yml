@@ -1,30 +1,17 @@
 name: Deploy Test Environment
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - 'infra/**'
-      - 'apps/**'
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'Dockerfile'
-      - '.github/workflows/deploy-test.yml'
-      - '.github/workflows/reusable-ecs-rollout.yml'
-      - '.github/workflows/reusable-image-build.yml'
-      - 'scripts/ci/**'
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Image tag to deploy (leave empty to build fresh images)'
+        description: 'Image tag to deploy (required when build_images is false)'
         required: false
         default: ''
         type: string
-      force_build:
-        description: Force image build even when only CI/infrastructure files changed
+      build_images:
+        description: Build fresh images before deploy (recommended for recreated test envs)
         required: true
-        default: false
+        default: true
         type: boolean
       apply_infra:
         description: Apply Terraform before deploy
@@ -72,35 +59,55 @@ jobs:
   guard-rails:
     needs: detect-changes
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' && needs.detect-changes.outputs.ci_scripts_changed == 'true' && needs.detect-changes.outputs.build_required != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_images != 'true' && needs.detect-changes.outputs.ci_scripts_changed == 'true' && needs.detect-changes.outputs.build_required != 'true' }}
     steps:
       - name: Warn when build is skipped for CI script-only change
         run: |
-          echo "::warning title=Image build skipped::Only scripts/ci changed, so image build was skipped. If CI scripts now affect image contents, include those paths in detect-changes.build_required or run workflow_dispatch with force_build=true."
+          echo "::warning title=Image build skipped::Only scripts/ci changed, so image build was skipped. If CI scripts now affect image contents, include those paths in detect-changes.build_required or run workflow_dispatch with build_images=true."
+
+  guard-build-required:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_images != 'true' && github.event.inputs.image_tag == '' && needs.detect-changes.outputs.build_required == 'true' }}
+    steps:
+      - name: Fail when deploy skips build without explicit image tag
+        run: |
+          echo "::error title=Missing image tag::Image-impacting files changed, but build_images=false and image_tag is empty. Run with build_images=true or provide an explicit image_tag." >&2
+          exit 1
+
+  guard-image-source:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_images != 'true' && github.event.inputs.image_tag == '' }}
+    steps:
+      - name: Fail when deploy has no image source
+        run: |
+          echo "::error title=Missing image source::Set build_images=true or provide image_tag. Empty image_tag is not a safe default for core deploys." >&2
+          exit 1
 
   build-images:
     needs: detect-changes
-    # Build images on push, or on dispatch when no pre-built image_tag is provided
-    if: ${{ (github.event_name == 'push' && needs.detect-changes.outputs.build_required == 'true') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.image_tag == '' || github.event.inputs.force_build == 'true')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_images == 'true' }}
     uses: ./.github/workflows/reusable-image-build.yml
     with:
       aws_region: eu-west-1
+      build_all: ${{ github.event.inputs.apply_infra == 'true' }}
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
       image_tag: ${{ format('sha-{0}', github.sha) }}
-      push_latest: ${{ github.ref == 'refs/heads/master' }}
+      push_latest: false
     secrets:
-      aws_role_arn: ${{ secrets.AWS_IMAGES_ROLE_ARN }}
+      aws_role_arn: ${{ secrets.AWS_INFRA_ROLE_ARN }}
 
   deploy:
-    needs: build-images
-    # Run when build-images succeeded OR was skipped (dispatch with pre-built image_tag)
-    if: ${{ !cancelled() && (needs.build-images.result == 'success' || needs.build-images.result == 'skipped') }}
+    needs: [build-images, guard-build-required, guard-image-source]
+    if: ${{ !cancelled() && (needs.build-images.result == 'success' || needs.build-images.result == 'skipped') && (needs.guard-build-required.result == 'success' || needs.guard-build-required.result == 'skipped') && (needs.guard-image-source.result == 'success' || needs.guard-image-source.result == 'skipped') }}
     uses: ./.github/workflows/reusable-ecs-rollout.yml
     with:
       environment: test
-      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_build != 'true' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || needs.build-images.result == 'success' && format('sha-{0}', github.sha) || 'latest' }}
-      apply_infra: ${{ github.event_name == 'push' || github.event.inputs.apply_infra == 'true' }}
+      image_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag != '' && github.event.inputs.image_tag || needs.build-images.result == 'success' && format('sha-{0}', github.sha) || '' }}
+      apply_infra: ${{ github.event.inputs.apply_infra == 'true' }}
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
+      expected_aws_account_id: ${{ needs.build-images.result == 'success' && needs.build-images.outputs.aws_account_id || '' }}
+      auto_build_missing_images: ${{ needs.build-images.result == 'success' }}
       aws_region: eu-west-1
     secrets:
       aws_role_arn: ${{ secrets.AWS_TEST_DEPLOY_ROLE_ARN }}
@@ -108,32 +115,3 @@ jobs:
       tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET }}
       tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
       tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
-
-  notify-platform:
-    needs: deploy
-    runs-on: ubuntu-latest
-    if: ${{ needs.deploy.result == 'success' }}
-    env:
-      PLATFORM_REPO_DISPATCH_TOKEN: ${{ secrets.PLATFORM_REPO_DISPATCH_TOKEN }}
-
-    steps:
-      - name: Skip platform dispatch when token is not configured
-        if: ${{ env.PLATFORM_REPO_DISPATCH_TOKEN == '' }}
-        run: echo "::warning title=Platform dispatch skipped::Secret PLATFORM_REPO_DISPATCH_TOKEN is not configured; core deploy completed without triggering raksha-platform."
-
-      - name: Trigger platform deployment dispatch
-        if: ${{ env.PLATFORM_REPO_DISPATCH_TOKEN != '' }}
-        env:
-          GH_TOKEN: ${{ env.PLATFORM_REPO_DISPATCH_TOKEN }}
-          TARGET_REPO: raksha-labs/raksha-platform
-          CORE_IMAGE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag || format('sha-{0}', github.sha) }}
-          CORE_CONTRACT_VERSION: ${{ needs.deploy.outputs.core_contract_version }}
-          TRIGGER_SHA: ${{ github.sha }}
-        run: |
-          payload=$(printf '{"event_type":"core_release_ready","client_payload":{"environment":"test","core_image_tag":"%s","core_contract_version":"%s","trigger_sha":"%s"}}' "$CORE_IMAGE_TAG" "$CORE_CONTRACT_VERSION" "$TRIGGER_SHA")
-
-          curl -sS -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            https://api.github.com/repos/${TARGET_REPO}/dispatches \
-            -d "${payload}"

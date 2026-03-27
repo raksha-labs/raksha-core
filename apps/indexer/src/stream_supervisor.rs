@@ -15,12 +15,29 @@ use tokio::{
 };
 use tokio_postgres::AsyncMessage;
 use tracing::{info, warn};
+use url::Url;
 
 use crate::stream_worker::{run_stream_worker, RuntimeStreamConfig};
 
-const DEFAULT_RECONCILE_INTERVAL_SECS: u64 = 30;
+// Keep notify-driven reloads fast, but avoid unnecessary full reconciles when
+// stream configs are mostly stable. If LISTEN/NOTIFY is unavailable, fall back
+// to a shorter resync so ephemeral simulation streams are still picked up.
+const NOTIFY_CONNECTED_RECONCILE_INTERVAL_SECS: u64 = 600;
+const NOTIFY_DEGRADED_RECONCILE_INTERVAL_SECS: u64 = 30;
 const DEFAULT_PURGE_INTERVAL_SECS: u64 = 15;
 const DEFAULT_RETENTION_SECONDS: i64 = 300;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NotifySignal {
+    Connected,
+    Changed,
+    Disconnected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SupervisorCommand {
+    ReconcileNow,
+}
 
 struct WorkerHandle {
     config_hash: String,
@@ -33,6 +50,7 @@ pub async fn run_stream_supervisor(
     stream: RedisStreamPublisher,
     database_url: String,
     purge_enabled: bool,
+    mut command_rx: mpsc::Receiver<SupervisorCommand>,
 ) -> Result<()> {
     let raw_repo = match PostgresRawRepository::from_env().await {
         Some(Ok(repo)) => Some(repo),
@@ -53,8 +71,9 @@ pub async fn run_stream_supervisor(
     };
 
     let mut workers: HashMap<String, WorkerHandle> = HashMap::new();
+    let mut listener_connected = false;
     let mut notify_rx = spawn_config_notify_listener(database_url);
-    let mut reconcile_tick = interval(Duration::from_secs(DEFAULT_RECONCILE_INTERVAL_SECS));
+    let mut reconcile_tick = build_reconcile_tick(listener_connected);
     let mut purge_tick = interval(Duration::from_secs(DEFAULT_PURGE_INTERVAL_SECS));
 
     reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await?;
@@ -67,11 +86,56 @@ pub async fn run_stream_supervisor(
                 }
             }
             signal = notify_rx.recv() => {
-                if signal.is_none() {
-                    warn!("stream config notify listener stopped; continuing with periodic reconcile only");
+                let mut should_reconcile = false;
+                match signal {
+                    Some(NotifySignal::Connected) => {
+                        if !listener_connected {
+                            listener_connected = true;
+                            reconcile_tick = build_reconcile_tick(listener_connected);
+                            info!(
+                                reconcile_interval_secs = NOTIFY_CONNECTED_RECONCILE_INTERVAL_SECS,
+                                "stream config notify listener active; using long periodic fallback"
+                            );
+                        }
+                        should_reconcile = true;
+                    }
+                    Some(NotifySignal::Changed) => {
+                        should_reconcile = true;
+                    }
+                    Some(NotifySignal::Disconnected) => {
+                        if listener_connected {
+                            listener_connected = false;
+                            reconcile_tick = build_reconcile_tick(listener_connected);
+                            warn!(
+                                reconcile_interval_secs = NOTIFY_DEGRADED_RECONCILE_INTERVAL_SECS,
+                                "stream config notify listener unavailable; using degraded periodic fallback"
+                            );
+                        }
+                    }
+                    None => {
+                        if listener_connected {
+                            listener_connected = false;
+                            reconcile_tick = build_reconcile_tick(listener_connected);
+                        }
+                        warn!("stream config notify listener stopped; continuing with degraded periodic reconcile");
+                    }
+                }
+                if !should_reconcile {
+                    continue;
                 }
                 if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
                     common::log_error!(warn, error, "stream supervisor notify-driven reconcile failed");
+                }
+            }
+            command = command_rx.recv() => {
+                let Some(SupervisorCommand::ReconcileNow) = command else {
+                    warn!("stream supervisor command channel closed; continuing without explicit reload triggers");
+                    let (_disabled_tx, disabled_rx) = mpsc::channel(1);
+                    command_rx = disabled_rx;
+                    continue;
+                };
+                if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
+                    common::log_error!(warn, error, "stream supervisor explicit reconcile failed");
                 }
             }
             _ = purge_tick.tick(), if purge_enabled => {
@@ -88,6 +152,15 @@ pub async fn run_stream_supervisor(
     }
 }
 
+fn build_reconcile_tick(listener_connected: bool) -> tokio::time::Interval {
+    let reconcile_secs = if listener_connected {
+        NOTIFY_CONNECTED_RECONCILE_INTERVAL_SECS
+    } else {
+        NOTIFY_DEGRADED_RECONCILE_INTERVAL_SECS
+    };
+    interval(Duration::from_secs(reconcile_secs))
+}
+
 async fn reconcile(
     repo: &PostgresRepository,
     raw_repo: Option<&PostgresRawRepository>,
@@ -98,8 +171,20 @@ async fn reconcile(
     let mut desired_ids: Vec<String> = Vec::new();
 
     for cfg in effective {
+        if let Some(reason) = skipped_test_stream_reason(&cfg) {
+            info!(
+                stream_config_id = %cfg.stream_config_id,
+                source_id = %cfg.source_id,
+                stream_name = %cfg.stream_name,
+                connector_mode = %cfg.connector_mode,
+                reason,
+                "skipping deprecated test stream config",
+            );
+            continue;
+        }
+
         let targets = repo
-            .list_stream_tenant_targets(&cfg.stream_config_id)
+            .list_stream_tenant_targets(&cfg.stream_config_id, &cfg.operating_mode_profile)
             .await?
             .into_iter()
             .map(|target| target.tenant_id)
@@ -109,6 +194,7 @@ async fn reconcile(
         }
 
         let runtime_cfg = to_runtime_config(cfg, targets);
+        log_test_mode_stream_selection(&runtime_cfg);
         let config_hash = hash_runtime_config(&runtime_cfg);
         desired_ids.push(runtime_cfg.stream_config_id.clone());
 
@@ -173,6 +259,49 @@ async fn stop_worker(handle: WorkerHandle) {
     }
 }
 
+fn skipped_test_stream_reason(cfg: &EffectiveStreamConfig) -> Option<&'static str> {
+    if cfg.operating_mode_profile != "test" {
+        return None;
+    }
+
+    for key in ["ws_endpoint", "rpc_url", "http_url", "endpoint"] {
+        let Some(endpoint) = cfg
+            .connection_config
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+        else {
+            continue;
+        };
+        if endpoint.is_empty() {
+            continue;
+        }
+        if endpoint.contains('{') && endpoint.contains('}') {
+            return Some("unresolved endpoint placeholder");
+        }
+
+        let Ok(parsed) = Url::parse(endpoint) else {
+            continue;
+        };
+        let path = parsed.path();
+        if path.contains("/api/simulation/mock/") {
+            let mut has_tenant_id = false;
+            let mut has_stream_name = false;
+            for (key, value) in parsed.query_pairs() {
+                match key.as_ref() {
+                    "tenant_id" if !value.trim().is_empty() => has_tenant_id = true,
+                    "stream_name" if !value.trim().is_empty() => has_stream_name = true,
+                    _ => {}
+                }
+            }
+            if !has_tenant_id || !has_stream_name {
+                return Some("deprecated simulation replay endpoint");
+            }
+        }
+    }
+    None
+}
+
 fn to_runtime_config(
     cfg: EffectiveStreamConfig,
     tenant_targets: Vec<String>,
@@ -183,6 +312,7 @@ fn to_runtime_config(
         source_type: cfg.source_type,
         source_name: cfg.source_name,
         connection_config: cfg.connection_config,
+        operating_mode_profile: cfg.operating_mode_profile,
         auth_secret_ref: cfg.auth_secret_ref,
         auth_config: cfg.auth_config,
         connector_mode: cfg.connector_mode,
@@ -209,6 +339,7 @@ fn hash_runtime_config(cfg: &RuntimeStreamConfig) -> String {
         "source_type": cfg.source_type,
         "source_name": cfg.source_name,
         "connection_config": cfg.connection_config,
+        "operating_mode_profile": cfg.operating_mode_profile,
         "auth_secret_ref": cfg.auth_secret_ref,
         "auth_config": cfg.auth_config,
         "connector_mode": cfg.connector_mode,
@@ -229,7 +360,92 @@ fn hash_runtime_config(cfg: &RuntimeStreamConfig) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
+fn log_test_mode_stream_selection(cfg: &RuntimeStreamConfig) {
+    if cfg.operating_mode_profile != "test" {
+        return;
+    }
+
+    let endpoint = cfg
+        .connection_config
+        .as_object()
+        .and_then(|config| {
+            ["ws_endpoint", "rpc_url", "ws_url", "endpoint", "http_url"]
+                .iter()
+                .find_map(|key| config.get(*key).and_then(|value| value.as_str()))
+        })
+        .map(str::trim)
+        .unwrap_or("");
+
+    let parsed = Url::parse(endpoint).ok();
+    let endpoint_path = parsed
+        .as_ref()
+        .map(|url| url.path().to_string())
+        .unwrap_or_else(|| endpoint.to_string());
+    let endpoint_host = parsed.as_ref().and_then(|url| url.host_str());
+    let is_mock_endpoint = parsed
+        .as_ref()
+        .map(|url| url.path().contains("/api/simulation/mock/"))
+        .unwrap_or_else(|| endpoint.contains("/api/simulation/mock/"));
+    let mut endpoint_tenant_id: Option<String> = None;
+    let mut endpoint_stream_name: Option<String> = None;
+    let mut endpoint_simulation_run_id: Option<String> = None;
+    if let Some(url) = parsed.as_ref() {
+        for (key, value) in url.query_pairs() {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            match key.as_ref() {
+                "tenant_id" => endpoint_tenant_id = Some(value.to_string()),
+                "stream_name" => endpoint_stream_name = Some(value.to_string()),
+                "simulation_run_id" => endpoint_simulation_run_id = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+
+    info!(
+        stream_config_id = %cfg.stream_config_id,
+        source_id = %cfg.source_id,
+        stream_name = %cfg.stream_name,
+        connector_mode = %cfg.connector_mode,
+        tenant_targets = ?cfg.tenant_targets,
+        endpoint_host,
+        endpoint_path = %endpoint_path,
+        is_mock_endpoint,
+        endpoint_tenant_id = endpoint_tenant_id.as_deref(),
+        endpoint_stream_name = endpoint_stream_name.as_deref(),
+        endpoint_simulation_run_id = endpoint_simulation_run_id.as_deref(),
+        "selected test-mode stream config",
+    );
+
+    if !is_mock_endpoint {
+        warn!(
+            stream_config_id = %cfg.stream_config_id,
+            source_id = %cfg.source_id,
+            stream_name = %cfg.stream_name,
+            connector_mode = %cfg.connector_mode,
+            endpoint_host,
+            endpoint_path = %endpoint_path,
+            "selected test-mode stream config does not point to a mock endpoint",
+        );
+    } else if endpoint_tenant_id.is_none() || endpoint_stream_name.is_none() {
+        warn!(
+            stream_config_id = %cfg.stream_config_id,
+            source_id = %cfg.source_id,
+            stream_name = %cfg.stream_name,
+            connector_mode = %cfg.connector_mode,
+            endpoint_host,
+            endpoint_path = %endpoint_path,
+            endpoint_tenant_id = endpoint_tenant_id.as_deref(),
+            endpoint_stream_name = endpoint_stream_name.as_deref(),
+            endpoint_simulation_run_id = endpoint_simulation_run_id.as_deref(),
+            "selected test-mode mock endpoint is missing tenant-scoped routing parameters",
+        );
+    }
+}
+
+fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<NotifySignal> {
     let (tx, rx) = mpsc::channel(32);
     tokio::spawn(async move {
         loop {
@@ -270,6 +486,7 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
                 continue;
             }
 
+            let _ = tx.send(NotifySignal::Connected).await;
             info!("stream config listener connected (LISTEN source_stream_config_changed)");
 
             loop {
@@ -277,7 +494,7 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
                 match message {
                     Some(Ok(AsyncMessage::Notification(notification))) => {
                         if notification.channel() == "source_stream_config_changed"
-                            && tx.send(()).await.is_err()
+                            && tx.send(NotifySignal::Changed).await.is_err()
                         {
                             return;
                         }
@@ -289,9 +506,11 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
                             error,
                             "stream config listener connection error; reconnecting"
                         );
+                        let _ = tx.send(NotifySignal::Disconnected).await;
                         break;
                     }
                     None => {
+                        let _ = tx.send(NotifySignal::Disconnected).await;
                         warn!("stream config listener connection closed; reconnecting");
                         break;
                     }
@@ -300,4 +519,67 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<()> {
         }
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skipped_test_stream_reason;
+    use state_manager::EffectiveStreamConfig;
+
+    fn config_for(endpoint_key: &str, endpoint: &str) -> EffectiveStreamConfig {
+        EffectiveStreamConfig {
+            stream_config_id: "stream-1".to_string(),
+            source_id: "source-1".to_string(),
+            source_type: "cex".to_string(),
+            source_name: "source".to_string(),
+            connection_config: serde_json::json!({ endpoint_key: endpoint }),
+            connector_mode: "websocket".to_string(),
+            operating_mode_profile: "test".to_string(),
+            stream_name: "ticker-usdc-usd".to_string(),
+            subscription_key: None,
+            event_type: "quote".to_string(),
+            parser_name: "parser".to_string(),
+            market_key: Some("USDC/USD".to_string()),
+            asset_pair: Some("USDC/USD".to_string()),
+            filter_config: serde_json::json!({}),
+            auth_secret_ref: None,
+            auth_config: serde_json::json!({}),
+            payload_ts_path: None,
+            payload_ts_unit: "ms".to_string(),
+            poll_interval_ms: None,
+        }
+    }
+
+    #[test]
+    fn skips_bare_simulation_mock_routes() {
+        let cfg = config_for(
+            "rpc_url",
+            "ws://workbench-services:8010/api/simulation/mock/rpc/chainlink-eth-mainnet",
+        );
+        assert_eq!(
+            skipped_test_stream_reason(&cfg),
+            Some("deprecated simulation replay endpoint")
+        );
+    }
+
+    #[test]
+    fn keeps_run_scoped_simulation_routes() {
+        let cfg = config_for(
+            "rpc_url",
+            "ws://workbench-services:8010/api/simulation/mock/rpc/chainlink-eth-mainnet?tenant_id=raksha-demo&stream_name=usdc-usd-feed&simulation_run_id=run_123",
+        );
+        assert_eq!(skipped_test_stream_reason(&cfg), None);
+    }
+
+    #[test]
+    fn skips_test_streams_with_unresolved_placeholders() {
+        let cfg = config_for(
+            "rpc_url",
+            "{simlab_mock_rpc_base_url}/rpc/uniswap-v2-eth-mainnet",
+        );
+        assert_eq!(
+            skipped_test_stream_reason(&cfg),
+            Some("unresolved endpoint placeholder")
+        );
+    }
 }

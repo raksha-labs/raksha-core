@@ -46,6 +46,39 @@ pub trait DetectionPattern: Send {
     ) -> Result<Option<DetectionResult>>;
 }
 
+/// Extract the detection config from a composite full_config blob.
+///
+/// The `load_tenant_pattern_configs()` query wraps each pattern's stored JSONB
+/// under `detection_config`.  This helper extracts that key so individual parse
+/// functions still work when they look for their top-level fields (e.g. `rules`,
+/// `policies`).  Falls back to the whole blob for backward compatibility with
+/// tests and older flat configs.
+pub(crate) fn extract_detection_config(config: &Value) -> &Value {
+    config.get("detection_config").unwrap_or(config)
+}
+
+/// Collect the set of enabled source_ids from a composite full_config blob.
+///
+/// Returns `None` when no `source_bindings` key is present (meaning: no
+/// binding restriction — accept events from any source).  Returns `Some(set)`
+/// when bindings are explicitly configured; an empty set means all sources
+/// were disabled and events from every source should be skipped.
+pub(crate) fn extract_bound_source_ids(
+    config: &Value,
+) -> Option<std::collections::HashSet<String>> {
+    let arr = config.get("source_bindings")?.as_array()?;
+    let set = arr
+        .iter()
+        .filter(|b| b.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+        .filter_map(|b| {
+            b.get("source_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    Some(set)
+}
+
 pub(crate) fn append_snapshot_meta(event: &UnifiedEvent, data: Value) -> Value {
     let mut snapshot = match data {
         Value::Object(map) => map,
@@ -73,9 +106,7 @@ pub(crate) fn append_snapshot_meta(event: &UnifiedEvent, data: Value) -> Value {
     Value::Object(snapshot)
 }
 
-pub(crate) fn simulation_metadata_from_event(
-    event: &UnifiedEvent,
-) -> (bool, Option<String>, Option<String>) {
+pub(crate) fn simulation_metadata_from_event(event: &UnifiedEvent) -> (bool, Option<String>) {
     let simulation = event
         .payload
         .get("simulation")
@@ -89,13 +120,6 @@ pub(crate) fn simulation_metadata_from_event(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let operating_mode = simulation
-        .and_then(|meta| meta.get("operating_mode"))
-        .or_else(|| event.payload.get("simulation_operating_mode"))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
     let is_simulated = simulation
         .and_then(|meta| meta.get("is_simulated"))
         .and_then(|value| value.as_bool())
@@ -106,7 +130,40 @@ pub(crate) fn simulation_metadata_from_event(
             .and_then(|value| value.as_bool())
             .unwrap_or(false)
         || run_id.is_some();
-    (is_simulated, run_id, operating_mode)
+    (is_simulated, run_id)
+}
+
+fn log_test_mode_event_received(event: &UnifiedEvent, simulation_run_id: Option<&str>) {
+    tracing::info!(
+        pipeline_mode = "test",
+        component = "detector",
+        tenant_id = %event.tenant_id,
+        source_id = %event.source_id,
+        event_id = %event.event_id,
+        event_type = %event.event_type,
+        market_key = event.market_key.as_deref(),
+        tx_hash = event.tx_hash.as_deref(),
+        block_number = event.block_number,
+        simulation_run_id,
+        "test-mode event received by detector"
+    );
+}
+
+fn log_test_mode_detection_emitted(detection: &DetectionResult) {
+    tracing::info!(
+        pipeline_mode = "test",
+        component = "detector",
+        detection_id = %detection.detection_id,
+        pattern_id = %detection.pattern_id,
+        tenant_id = detection.tenant_id.as_deref(),
+        event_key = detection.event_key.as_deref(),
+        subject_key = detection.subject_key.as_deref(),
+        severity = ?detection.severity,
+        lifecycle_state = ?detection.lifecycle_state,
+        incident_transition = ?detection.incident_transition,
+        simulation_run_id = detection.simulation_run_id.as_deref(),
+        "test-mode detection emitted"
+    );
 }
 
 /// Owns all registered patterns and dispatches events to each in turn.
@@ -154,12 +211,23 @@ impl PatternRegistry {
         repo: &PostgresRepository,
         stream: &RedisStreamPublisher,
     ) -> Result<()> {
-        let raw_persisted = event
+        let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
+        if is_simulated {
+            log_test_mode_event_received(event, simulation_run_id.as_deref());
+        }
+
+        let ingest_persisted = event
             .payload
-            .get("raw_persisted")
+            .get("ingest_persisted")
             .and_then(|value| value.as_bool())
+            .or_else(|| {
+                event
+                    .payload
+                    .get("raw_persisted")
+                    .and_then(|value| value.as_bool())
+            })
             .unwrap_or(false);
-        if !raw_persisted {
+        if !ingest_persisted {
             if let Err(err) = repo.insert_raw_event(event).await {
                 common::log_error!(
                     warn,
@@ -175,6 +243,9 @@ impl PatternRegistry {
         for pattern in &mut self.patterns {
             match pattern.process_event(event, now, repo).await {
                 Ok(Some(detection)) => {
+                    if detection.is_simulated || detection.simulation_run_id.is_some() {
+                        log_test_mode_detection_emitted(&detection);
+                    }
                     if let Err(err) = repo.save_detection(&detection).await {
                         common::log_error!(
                             warn,

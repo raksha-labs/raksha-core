@@ -178,10 +178,10 @@ fn resolve_simlab_dir(env_key: &str, candidates: &[&str]) -> Option<PathBuf> {
 
 async fn validate_schema(client: &Client) -> Result<()> {
     let required = [
-        ("public", "incidents"),
-        ("public", "alerts"),
-        ("public", "detections"),
-        ("public", "feature_vectors"),
+        ("detection", "incidents"),
+        ("detection", "alerts"),
+        ("detection", "detections"),
+        ("ml", "feature_vectors"),
         ("history", "cases"),
         ("history", "case_events"),
         ("history", "case_alert_links"),

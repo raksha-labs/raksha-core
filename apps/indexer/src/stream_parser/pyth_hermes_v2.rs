@@ -40,7 +40,10 @@ use chrono::TimeZone;
 /// Both shapes are handled transparently.
 use serde_json::{json, Value};
 
-use super::{observed_at, ParsedFeedEvent, ParserInput};
+use super::{
+    decode_hex_words, observed_at, parse_i256_word_to_f64, parse_i64, parse_u256_word_to_f64,
+    source_event_id, ParsedFeedEvent, ParserInput,
+};
 
 /// Decode a Pyth fixed-point numeric object into a `f64`.
 ///
@@ -65,6 +68,80 @@ fn decode_pyth_price(obj: &Value) -> Option<f64> {
 fn decode_pyth_ts(obj: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
     let secs = obj.get("publish_time").and_then(Value::as_i64)?;
     chrono::Utc.timestamp_opt(secs, 0).single()
+}
+
+#[allow(clippy::type_complexity)]
+fn decode_pyth_log(
+    payload: &Value,
+) -> Option<(
+    Option<String>,
+    f64,
+    Option<f64>,
+    i32,
+    Option<chrono::DateTime<chrono::Utc>>,
+)> {
+    let topics = payload.get("topics")?.as_array()?;
+    let data_hex = payload.get("data")?.as_str()?;
+    let data_words = decode_hex_words(data_hex);
+    if data_words.len() < 4 {
+        return None;
+    }
+
+    let price_mantissa = parse_i256_word_to_f64(&data_words[0])?;
+    let conf_mantissa = parse_u256_word_to_f64(&data_words[1]);
+    let expo = parse_i256_word_to_f64(&data_words[2])
+        .and_then(|value| i32::try_from(value as i64).ok())
+        .unwrap_or(-8);
+    let publish_time = parse_u256_word_to_f64(&data_words[3])
+        .and_then(|value| chrono::Utc.timestamp_opt(value as i64, 0).single());
+
+    let scale = 10f64.powi(expo);
+    if !scale.is_finite() {
+        return None;
+    }
+    let price = price_mantissa * scale;
+    if !price.is_finite() || price <= 0.0 {
+        return None;
+    }
+    let conf_usd = conf_mantissa
+        .map(|value| value * scale)
+        .filter(|value| value.is_finite());
+    let feed_id = topics
+        .get(1)
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    Some((feed_id, price, conf_usd, expo, publish_time))
+}
+
+fn pyth_log_event_id(payload: &Value) -> Option<String> {
+    let tx_hash = payload
+        .get("transactionHash")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("tx_hash").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let log_index = parse_i64(payload.get("logIndex").or_else(|| payload.get("log_index")));
+    Some(match log_index {
+        Some(index) => format!("{tx_hash}:{index}"),
+        None => tx_hash.to_string(),
+    })
+}
+
+fn pyth_stream_event_id(
+    feed: &Value,
+    feed_id: Option<&str>,
+    payload_event_ts: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<String> {
+    let feed_id = feed_id.map(str::trim).filter(|value| !value.is_empty())?;
+    let slot = feed
+        .get("metadata")
+        .and_then(|metadata| metadata.get("slot"))
+        .and_then(Value::as_i64);
+    if let Some(slot) = slot {
+        return Some(format!("{feed_id}:{slot}"));
+    }
+
+    payload_event_ts.map(|ts| format!("{feed_id}:{}", ts.timestamp()))
 }
 
 /// Derive a normalised `market_key` from the Pyth symbol string.
@@ -95,6 +172,57 @@ fn market_key_from_pyth_symbol(raw_symbol: &str) -> String {
 }
 
 pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFeedEvent, String> {
+    if let Some((feed_id, price, conf_usd, expo, payload_event_ts)) = decode_pyth_log(payload) {
+        let observed_at = observed_at(payload_event_ts);
+        let tx_hash = payload
+            .get("transactionHash")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("tx_hash").and_then(Value::as_str))
+            .map(ToString::to_string);
+        let block_number = parse_i64(
+            payload
+                .get("blockNumber")
+                .or_else(|| payload.get("block_number")),
+        );
+        let log_index = parse_i64(payload.get("logIndex").or_else(|| payload.get("log_index")));
+        let chain_id = parse_i64(payload.get("chainId").or_else(|| payload.get("chain_id")));
+        let topic0 = payload
+            .get("topics")
+            .and_then(Value::as_array)
+            .and_then(|topics| topics.first())
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| {
+                payload
+                    .get("topic0")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            });
+        return Ok(ParsedFeedEvent {
+            event_type: input.event_type.to_string(),
+            event_id: pyth_log_event_id(payload).or_else(|| source_event_id(payload)),
+            market_key: input.market_key_hint.map(ToString::to_string),
+            asset_pair: input.asset_pair_hint.map(ToString::to_string),
+            price: Some(price),
+            chain_id,
+            block_number,
+            tx_hash,
+            log_index,
+            topic0,
+            payload_event_ts,
+            observed_at,
+            normalized_fields: json!({
+                "decoded_by": "pyth_hermes_v2",
+                "feed_id": feed_id,
+                "price_type": "spot",
+                "ema_price_usd": Value::Null,
+                "spot_price_usd": price,
+                "conf_usd": conf_usd,
+                "expo": expo,
+            }),
+        });
+    }
+
     // Unwrap optional `price_feed` envelope.
     let feed = payload
         .get("price_feed")
@@ -146,6 +274,10 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         .get("id")
         .and_then(Value::as_str)
         .map(ToString::to_string);
+    let slot = feed
+        .get("metadata")
+        .and_then(|metadata| metadata.get("slot"))
+        .and_then(Value::as_i64);
 
     let market_key = input
         .market_key_hint
@@ -165,7 +297,8 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
 
     Ok(ParsedFeedEvent {
         event_type: input.event_type.to_string(),
-        event_id: feed_id.clone(),
+        event_id: pyth_stream_event_id(feed, feed_id.as_deref(), payload_event_ts)
+            .or_else(|| feed_id.clone()),
         market_key,
         asset_pair,
         price: Some(price),
@@ -179,6 +312,7 @@ pub(super) fn parse(input: &ParserInput<'_>, payload: &Value) -> Result<ParsedFe
         normalized_fields: json!({
             "decoded_by": "pyth_hermes_v2",
             "feed_id": feed_id,
+            "slot": slot,
             "raw_symbol": raw_symbol,
             "price_type": if use_spot { "spot" } else { "ema" },
             "ema_price_usd": ema_price,
@@ -223,7 +357,8 @@ mod tests {
             },
             "metadata": {
                 "symbol": "Crypto.USDC/USD",
-                "asset_type": "Crypto"
+                "asset_type": "Crypto",
+                "slot": 280932977
             }
         })
     }
@@ -269,5 +404,76 @@ mod tests {
         let filter = Value::Null;
         let payload = json!({"id": "0xabc"});
         assert!(parse(&make_input(&filter), &payload).is_err());
+    }
+
+    #[test]
+    fn hermes_stream_uses_feed_id_and_slot_for_event_id() {
+        let filter = Value::Null;
+        let result = parse(&make_input(&filter), &hermes_payload()).expect("should parse");
+        assert_eq!(
+            result.event_id.as_deref(),
+            Some("0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace:280932977")
+        );
+        assert_eq!(
+            result.normalized_fields.get("slot").and_then(Value::as_i64),
+            Some(280932977)
+        );
+    }
+
+    #[test]
+    fn hermes_stream_falls_back_to_publish_time_for_event_id() {
+        let filter = Value::Null;
+        let payload = json!({
+            "id": "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+            "price": {
+                "price": "99990000",
+                "conf": "50000",
+                "expo": -8,
+                "publish_time": 1713984281_i64
+            },
+            "ema_price": {
+                "price": "99985000",
+                "conf": "48000",
+                "expo": -8,
+                "publish_time": 1713984281_i64
+            },
+            "metadata": {
+                "symbol": "Crypto.USDC/USD"
+            }
+        });
+
+        let result = parse(&make_input(&filter), &payload).expect("should parse");
+        assert_eq!(
+            result.event_id.as_deref(),
+            Some("0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace:1713984281")
+        );
+    }
+
+    #[test]
+    fn pyth_log_uses_transaction_identity_for_event_id() {
+        let filter = Value::Null;
+        let payload = json!({
+            "transactionHash": "0xabc123",
+            "logIndex": "0x7",
+            "blockNumber": "0x123",
+            "chainId": 1,
+            "topics": [
+                "0xd06a6b7f4918494b3719217d1802786c1f5112a6c1d88fe2cfb5bef7fda2bc6f",
+                "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
+            ],
+            "data": "0x\
+        00000000000000000000000000000000000000000000000000000000053ec600\
+        0000000000000000000000000000000000000000000000000000000000004e20\
+        fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8\
+        00000000000000000000000000000000000000000000000000000000640c3455"
+        });
+
+        let result = parse(&make_input(&filter), &payload).expect("should parse pyth log");
+        assert_eq!(result.event_id.as_deref(), Some("0xabc123:7"));
+        assert_eq!(result.tx_hash.as_deref(), Some("0xabc123"));
+        assert_eq!(result.log_index, Some(7));
+        assert_eq!(result.block_number, Some(0x123));
+        assert_eq!(result.chain_id, Some(1));
+        assert_eq!(result.price, Some(0.88));
     }
 }

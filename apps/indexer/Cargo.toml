@@ -11,7 +11,6 @@ path = "src/main.rs"
 # Local crates
 common = { path = "../../crates/common" }
 event-schema = { path = "../../crates/event-schema" }
-ingestion = { path = "../../crates/ingestion" }
 state-manager = { path = "../../crates/state-manager" }
 
 # External dependencies
@@ -20,7 +19,6 @@ chrono = { workspace = true }
 dotenvy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
 tokio = { workspace = true }
 tokio-postgres = { workspace = true }
 tokio-tungstenite = { workspace = true }
@@ -32,3 +30,6 @@ sha2 = { workspace = true }
 uuid = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
+chainlink-data-streams-report = { workspace = true }
+chainlink-data-streams-sdk = { workspace = true }
+url = { workspace = true }

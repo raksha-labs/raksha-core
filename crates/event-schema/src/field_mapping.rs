@@ -9,6 +9,7 @@
 // as a JSON array and consumed by stream parsers when building ParsedFeedEvent.
 // ─────────────────────────────────────────────────────────────────────────────
 
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -234,6 +235,46 @@ pub fn default_mappings_for_parser(parser_name: &str) -> Vec<FieldMapping> {
                 description: Some("Update time (epoch sec)".into()),
             },
         ],
+        "chainlink_data_streams_v3" => vec![
+            FieldMapping {
+                source_field: "$.benchmark_price".into(),
+                canonical_field: CanonicalField::Price,
+                transform: FieldTransform::ScalePrice,
+                description: Some("Benchmark price integer ÷ 10^8 → price".into()),
+            },
+            FieldMapping {
+                source_field: "$.market_key".into(),
+                canonical_field: CanonicalField::MarketKey,
+                transform: FieldTransform::Identity,
+                description: Some("Normalized market key when present in payload".into()),
+            },
+            FieldMapping {
+                source_field: "$.observations_timestamp".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsS,
+                description: Some("Observation time (epoch sec)".into()),
+            },
+        ],
+        "pyth_hermes_v2" | "pyth_price_update_v1" => vec![
+            FieldMapping {
+                source_field: "$.ema_price.price".into(),
+                canonical_field: CanonicalField::Price,
+                transform: FieldTransform::ScalePrice,
+                description: Some("EMA price mantissa scaled by sibling expo".into()),
+            },
+            FieldMapping {
+                source_field: "$.metadata.symbol".into(),
+                canonical_field: CanonicalField::MarketKey,
+                transform: FieldTransform::SymbolToMarketKey,
+                description: Some("Pyth symbol → market key".into()),
+            },
+            FieldMapping {
+                source_field: "$.ema_price.publish_time".into(),
+                canonical_field: CanonicalField::Timestamp,
+                transform: FieldTransform::ParseTsS,
+                description: Some("EMA publish time (epoch sec)".into()),
+            },
+        ],
         "uniswap_v2_swap_price_v1" => vec![
             FieldMapping {
                 source_field: "$.amount0In".into(),
@@ -397,7 +438,7 @@ pub fn resolve_field_mappings(
 pub struct MappedFields {
     pub market_key: Option<String>,
     pub price: Option<f64>,
-    pub timestamp_raw: Option<Value>,
+    pub timestamp: Option<DateTime<Utc>>,
     pub chain_id: Option<u64>,
     pub block_number: Option<u64>,
     pub tx_hash: Option<String>,
@@ -436,7 +477,13 @@ fn eval_jsonpath<'a>(payload: &'a Value, path: &str) -> Option<&'a Value> {
 
 /// Convert a symbol string to a market key using the same logic as `symbol_to_market_key` in parsers.
 fn symbol_to_market_key(symbol: &str) -> Option<String> {
-    let s = symbol.to_uppercase().replace(['-', '/'], "");
+    let normalized = symbol
+        .split('.')
+        .next_back()
+        .unwrap_or(symbol)
+        .trim()
+        .to_uppercase();
+    let s = normalized.replace(['-', '/'], "");
     let known: &[(&str, &str)] = &[
         ("USDCUSDT", "USDC/USD"),
         ("USDCUSD", "USDC/USD"),
@@ -451,12 +498,59 @@ fn symbol_to_market_key(symbol: &str) -> Option<String> {
         .map(|(_, mk)| mk.to_string())
         .or_else(|| {
             // Fallback: if already in USDC/USD form
-            if symbol.contains('/') {
-                Some(symbol.to_string())
+            if normalized.contains('/') {
+                Some(normalized)
             } else {
                 None
             }
         })
+}
+
+fn scale_price_from_mapping(
+    payload: &Value,
+    mapping: &FieldMapping,
+    raw: &Value,
+    fallback_decimals: i32,
+) -> Option<f64> {
+    let raw_int = raw
+        .as_i64()
+        .map(|value| value as f64)
+        .or_else(|| raw.as_str().and_then(|s| s.parse::<f64>().ok()))?;
+
+    let expo_path = mapping
+        .source_field
+        .strip_suffix(".price")
+        .map(|prefix| format!("{prefix}.expo"));
+    if let Some(expo_value) = expo_path
+        .as_deref()
+        .and_then(|path| eval_jsonpath(payload, path))
+        .and_then(Value::as_i64)
+    {
+        let expo = i32::try_from(expo_value).ok()?;
+        let scaled = raw_int * 10f64.powi(expo);
+        return (scaled.is_finite() && scaled > 0.0).then_some(scaled);
+    }
+
+    let scaled = raw_int / 10f64.powi(fallback_decimals);
+    (scaled.is_finite() && scaled > 0.0).then_some(scaled)
+}
+
+fn parse_timestamp_from_mapping(raw: &Value, transform: &FieldTransform) -> Option<DateTime<Utc>> {
+    match transform {
+        FieldTransform::ParseTsMs => raw
+            .as_i64()
+            .or_else(|| raw.as_str().and_then(|s| s.parse::<i64>().ok()))
+            .and_then(|millis| Utc.timestamp_millis_opt(millis).single()),
+        FieldTransform::ParseTsS => raw
+            .as_i64()
+            .or_else(|| raw.as_str().and_then(|s| s.parse::<i64>().ok()))
+            .and_then(|secs| Utc.timestamp_opt(secs, 0).single()),
+        FieldTransform::ParseTsIso8601 => raw
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|ts| ts.with_timezone(&Utc)),
+        _ => None,
+    }
 }
 
 /// Apply field mappings to a raw payload and populate `MappedFields`.
@@ -485,10 +579,7 @@ pub fn apply_mappings(
                         .as_f64()
                         .or_else(|| raw.as_str().and_then(|s| s.parse().ok())),
                     FieldTransform::ScalePrice => {
-                        let raw_int_opt = raw
-                            .as_i64()
-                            .or_else(|| raw.as_str().and_then(|s| s.parse().ok()));
-                        raw_int_opt.map(|v| v as f64 / 10f64.powi(decimals))
+                        scale_price_from_mapping(payload, mapping, raw, decimals)
                     }
                     FieldTransform::SqrtRatioToPrice => {
                         let sqrt_price_opt: Option<u128> = raw
@@ -521,7 +612,7 @@ pub fn apply_mappings(
                 }
             }
             CanonicalField::Timestamp => {
-                out.timestamp_raw = Some(raw.clone());
+                out.timestamp = parse_timestamp_from_mapping(raw, &mapping.transform);
             }
             CanonicalField::BlockNumber => {
                 out.block_number = raw
@@ -610,5 +701,26 @@ mod tests {
         let mappings = resolve_field_mappings("binance_miniticker_v1", Some(&filter));
         assert_eq!(mappings.len(), 1);
         assert_eq!(mappings[0].source_field, "$.p");
+    }
+
+    #[test]
+    fn test_symbol_to_market_key_strips_prefix() {
+        assert_eq!(
+            symbol_to_market_key("Crypto.USDC/USD").as_deref(),
+            Some("USDC/USD")
+        );
+    }
+
+    #[test]
+    fn test_apply_pyth_defaults_with_dynamic_expo() {
+        let payload = json!({
+            "metadata": { "symbol": "Crypto.USDC/USD" },
+            "ema_price": { "price": "99985000", "expo": -8, "publish_time": 1710000000i64 }
+        });
+        let mappings = default_mappings_for_parser("pyth_hermes_v2");
+        let fields = apply_mappings(&mappings, &payload, None);
+        assert_eq!(fields.market_key.as_deref(), Some("USDC/USD"));
+        assert_eq!(fields.timestamp, Utc.timestamp_opt(1710000000, 0).single());
+        assert!((fields.price.unwrap() - 0.99985).abs() < 1e-9);
     }
 }

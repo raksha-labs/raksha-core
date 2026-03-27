@@ -65,7 +65,7 @@ Key variables:
 |---|---|
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis connection string |
-| `ETH_WS_URL` / `BASE_WS_URL` | Live EVM WebSocket RPC (optional; mock mode used if absent) |
+| `STREAM_PURGE_ENABLED` | Enable rolling purge of old quote/trade operational rows |
 | `NOTIFIER_GATEWAY_URL` | Notifier gateway endpoint (`/dispatch`) |
 | `RUST_LOG` | Log level filter (e.g. `info`, `debug`) |
 | `HEALTH_CHECK_ENABLED` | Enable `/health` + `/ready` endpoints |
@@ -76,14 +76,11 @@ Key variables:
 From the repository root (`raksha-core/`):
 
 ```bash
-# Optional — enables live EVM ingestion; omit to run in mock mode
-export ETH_WS_URL=wss://eth-mainnet.g.alchemy.com/v2/<your-key>
-
 docker compose up -d --build
 docker compose logs -f indexer detector
 ```
 
-This starts Postgres, Redis, indexer, and detector.
+This starts Postgres, Redis, indexer, and detector. The indexer reads active streams from the catalog tables in Postgres; it no longer boots from YAML/rules files or chain-specific RPC env vars.
 
 ## Codespaces sandbox
 

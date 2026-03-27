@@ -47,9 +47,9 @@ variable "service_desired_counts" {
 }
 
 variable "streams_enabled" {
-  description = "Enable stream-processing services (indexer, detector, orchestrator, finality, history-worker). Off by default in test — flip to true when testing the ingestion/detection pipeline."
+  description = "Enable stream-processing services (indexer, detector, orchestrator, finality, history-worker). Acceptance test environments run the real ingestion/detection pipeline by default."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "service_cpu_memory" {
@@ -286,12 +286,6 @@ variable "oidc_provider_arn" {
   description = "Existing GitHub OIDC provider ARN"
   type        = string
   default     = null
-}
-
-variable "rpc_ws_url_secret_arns" {
-  description = "Map of RPC WebSocket URL env var names to Secrets Manager valueFrom strings for the indexer. Each value must be a full ECS secrets valueFrom reference (e.g. \"arn:aws:secretsmanager:eu-west-1:123456789012:secret:raksha/test/rpc-AbCdEf:ETH_WS_URL::\"). Without this the indexer falls back to mock/synthetic data."
-  type        = map(string)
-  default     = {}
 }
 
 variable "tags" {

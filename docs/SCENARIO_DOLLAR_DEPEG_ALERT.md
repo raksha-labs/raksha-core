@@ -7,14 +7,14 @@ Detect sustained depeg on a dollar-pegged market (e.g., `USDC/USD`) using the `D
 ## Preconditions
 
 - Core runtime dependencies are up (`Postgres`, `Redis`).
-- Core schema from `infra/sql/001_init.sql` and `infra/sql/002_lifecycle_tenant.sql` is applied.
+- Core bootstrap schema from `infra/sql/bootstrap/core_schema.sql`, `infra/sql/bootstrap/history_schema.sql`, `infra/sql/bootstrap/seed_sources.sql`, and `infra/sql/bootstrap/seed_patterns.sql` is applied.
 - Pattern configuration tables exist:
   - `tenant_data_sources` — Multi-source data connections (CEX, oracle feeds)
   - `tenant_pattern_configs` — Per-tenant pattern configuration
   - `pattern_state` — Runtime pattern state management
   - `pattern_snapshots` — Historical pattern evaluation snapshots
 
-These configuration tables are normally created/managed by `raksha-platform` `config-service`.
+These configuration tables are created by the shared bootstrap schema and managed through `raksha-platform`.
 
 ## Architecture Overview
 

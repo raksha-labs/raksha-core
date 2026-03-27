@@ -1,22 +1,17 @@
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde_json::Value;
-use tokio::time::sleep;
 
 pub struct HttpPollConnector {
     client: Client,
     endpoint: String,
-    poll_interval: Duration,
 }
 
 impl HttpPollConnector {
-    pub fn new(endpoint: String, poll_interval: Duration) -> Self {
+    pub fn new(endpoint: String, _poll_interval: std::time::Duration) -> Self {
         Self {
             client: Client::new(),
             endpoint,
-            poll_interval,
         }
     }
 
@@ -24,24 +19,27 @@ impl HttpPollConnector {
         Ok(())
     }
 
-    pub async fn next_payload(&mut self) -> Result<Value> {
-        sleep(self.poll_interval).await;
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub async fn fetch_payload(&self, endpoint: &str) -> Result<Option<Value>> {
         let response = self
             .client
-            .get(&self.endpoint)
+            .get(endpoint)
             .send()
             .await
-            .with_context(|| format!("http_poll request failed for {}", self.endpoint))?
+            .with_context(|| format!("http_poll request failed for {endpoint}"))?;
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        let response = response
             .error_for_status()
-            .with_context(|| {
-                format!(
-                    "http_poll returned non-success status for {}",
-                    self.endpoint
-                )
-            })?;
+            .with_context(|| format!("http_poll returned non-success status for {endpoint}"))?;
         response
             .json::<Value>()
             .await
-            .with_context(|| format!("http_poll returned non-JSON payload for {}", self.endpoint))
+            .map(Some)
+            .with_context(|| format!("http_poll returned non-JSON payload for {endpoint}"))
     }
 }

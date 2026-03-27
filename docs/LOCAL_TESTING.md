@@ -18,12 +18,20 @@ This starts:
 - Postgres (`localhost:5432`, db `raksha`, user `postgres`, password `postgres`)
 - Redis (`localhost:6379`)
 
-## 2. Apply schema migrations
+## 2. Apply bootstrap schema
 
 ```bash
-for f in infra/sql/001_init.sql infra/sql/002_lifecycle_tenant.sql; do
+for f in \
+  infra/sql/bootstrap/core_schema.sql \
+  infra/sql/bootstrap/history_schema.sql \
+  infra/sql/bootstrap/seed_sources.sql \
+  infra/sql/bootstrap/seed_patterns.sql \
+  infra/sql/bootstrap/seed_history_replay.sql
+do
   docker exec -i raksha-postgres psql -U postgres -d raksha < "$f"
 done
+
+docker exec -i raksha-postgres-raw psql -U postgres -d raksha_raw < infra/sql/bootstrap/raw_schema.sql
 ```
 
 ## 3. Export runtime env
@@ -31,17 +39,14 @@ done
 ```bash
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/raksha
 export REDIS_URL=redis://localhost:6379
-export RULES_REPO_PATH=$(pwd)/rules
 export RUST_LOG=info
-export STREAM_SUPERVISOR_ENABLED=true
 export STREAM_PURGE_ENABLED=true
 ```
 
-For chain ingestion, also set `ETH_WS_URL` / `BASE_WS_URL` if you want live adapter mode.
 For DB-managed stream ingestion, configure rows in:
-- `data_sources`
-- `source_stream_configs`
-- `source_stream_tenant_targets`
+- `catalog.data_sources`
+- `catalog.source_stream_configs`
+- `catalog.source_stream_tenant_targets`
 
 If a stream endpoint template contains placeholders (for example `wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}`),
 set the value in `source_stream_configs.auth_config` (for example `{"alchemy_api_key":"<key>"}`) via admin UI/API.
