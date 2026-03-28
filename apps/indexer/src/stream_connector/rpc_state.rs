@@ -225,8 +225,10 @@ fn parse_state_call(candidate: &Value, defaults: &Value) -> Result<Option<StateC
         object
             .get("data")
             .or_else(|| object.get("calldata"))
+            .or_else(|| object.get("function_selector"))
             .or_else(|| defaults.get("data"))
-            .or_else(|| defaults.get("calldata")),
+            .or_else(|| defaults.get("calldata"))
+            .or_else(|| defaults.get("function_selector")),
     )
     .unwrap_or_default()
     .to_string();

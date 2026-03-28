@@ -239,7 +239,16 @@ impl PatternRegistry {
             }
         }
 
-        let now = Utc::now();
+        // Use the event's own timestamp for window analysis so that accelerated
+        // replay (speed_factor > 1) produces the same detection results as 1x.
+        // Fall back to wall-clock only when the event has no timestamp or is in
+        // the future (guards against clock-skewed sources in live mode).
+        let wall = Utc::now();
+        let now = if event.timestamp <= wall {
+            event.timestamp
+        } else {
+            wall
+        };
         for pattern in &mut self.patterns {
             match pattern.process_event(event, now, repo).await {
                 Ok(Some(detection)) => {

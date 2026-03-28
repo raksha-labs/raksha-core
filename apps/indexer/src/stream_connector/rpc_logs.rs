@@ -184,17 +184,77 @@ fn build_filter(filter_config: &Value, from: U64, to: U64) -> Result<Filter> {
         filter = filter.address(ValueOrArray::Array(addresses));
     }
 
-    if let Some(topic0) = filter_config
-        .get("topics")
-        .and_then(Value::as_array)
-        .and_then(|topics| topics.first())
-        .and_then(Value::as_str)
-    {
-        let topic0 = topic0
-            .parse::<H256>()
-            .with_context(|| format!("invalid topic0 in filter config: {topic0}"))?;
-        filter = filter.topic0(topic0);
+    if let Some(topics) = filter_config.get("topics").and_then(Value::as_array) {
+        if let Some(topic0) = parse_topic_filter(topics.first(), 0)? {
+            filter = filter.topic0(topic0);
+        }
+        if let Some(topic1) = parse_topic_filter(topics.get(1), 1)? {
+            filter = filter.topic1(topic1);
+        }
+        if let Some(topic2) = parse_topic_filter(topics.get(2), 2)? {
+            filter = filter.topic2(topic2);
+        }
+        if let Some(topic3) = parse_topic_filter(topics.get(3), 3)? {
+            filter = filter.topic3(topic3);
+        }
     }
 
     Ok(filter)
+}
+
+fn parse_topic_filter(
+    value: Option<&Value>,
+    index: usize,
+) -> Result<Option<ValueOrArray<Option<H256>>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    if let Some(raw) = value.as_str() {
+        return Ok(Some(ValueOrArray::Value(Some(parse_topic_hash(
+            raw, index,
+        )?))));
+    }
+
+    if let Some(items) = value.as_array() {
+        let mut topics = Vec::new();
+        for item in items {
+            let Some(raw) = item.as_str() else {
+                return Err(anyhow!(
+                    "invalid topic{} entry in filter config: expected string values",
+                    index
+                ));
+            };
+            topics.push(Some(parse_topic_hash(raw, index)?));
+        }
+        if topics.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(ValueOrArray::Array(topics)));
+    }
+
+    Err(anyhow!(
+        "invalid topic{} in filter config: expected string, array, or null",
+        index
+    ))
+}
+
+fn parse_topic_hash(raw: &str, index: usize) -> Result<H256> {
+    let trimmed = raw.trim();
+    let body = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    if body.is_empty() || body.len() > 64 {
+        return Err(anyhow!(
+            "invalid topic{} in filter config: {}",
+            index,
+            trimmed
+        ));
+    }
+
+    let normalized = format!("0x{:0>64}", body);
+    normalized
+        .parse::<H256>()
+        .with_context(|| format!("invalid topic{} in filter config: {}", index, trimmed))
 }
