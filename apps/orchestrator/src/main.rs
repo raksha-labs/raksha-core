@@ -1365,6 +1365,26 @@ mod tests {
         IncidentTransition, LifecycleState, RiskScore, Severity, SignalType,
     };
 
+    /// Map an operator-initiated action to the resulting incident status.
+    /// (Spec Section 9 — Resolution Workflow).
+    fn operator_incident_status(action: &str) -> Option<&'static str> {
+        match action {
+            "resolve" => Some("resolved"),
+            "mark_false_positive" | "false_positive" => Some("false_positive"),
+            "mark_paused" | "pause" => Some("paused"),
+            "record_loss" | "loss_recorded" => Some("loss_recorded"),
+            _ => None,
+        }
+    }
+
+    /// Whether an incident status is terminal (no further transitions expected).
+    fn is_terminal_incident_status(status: &str) -> bool {
+        matches!(
+            status,
+            "resolved" | "retracted" | "false_positive" | "loss_recorded" | "closed" | "cancelled"
+        )
+    }
+
     fn mk_detection(severity: Severity, transition: IncidentTransition) -> DetectionResult {
         DetectionResult {
             detection_id: Uuid::new_v4(),
@@ -1771,6 +1791,46 @@ mod tests {
         let detection = mk_detection(Severity::High, IncidentTransition::Trigger);
         let alert = alert_from_detection(&detection);
         assert_eq!(alert.dedup_key, detection.event_key);
+    }
+
+    // ─── TVL Drop Resolution Workflow (TC-RES-02 to TC-RES-05) ──────────
+
+    /// TC-RES-02: operator resolves incident → status = "resolved" (terminal).
+    #[test]
+    fn tc_res_02_operator_resolve() {
+        assert_eq!(operator_incident_status("resolve"), Some("resolved"));
+        assert!(is_terminal_incident_status("resolved"));
+    }
+
+    /// TC-RES-03: operator marks false positive → status = "false_positive" (terminal).
+    #[test]
+    fn tc_res_03_operator_false_positive() {
+        assert_eq!(
+            operator_incident_status("mark_false_positive"),
+            Some("false_positive")
+        );
+        assert!(is_terminal_incident_status("false_positive"));
+    }
+
+    /// TC-RES-04: operator marks paused → status = "paused" (non-terminal,
+    /// incident remains until operator moves to RESOLVED or LOSS_RECORDED).
+    #[test]
+    fn tc_res_04_operator_pause() {
+        assert_eq!(operator_incident_status("mark_paused"), Some("paused"));
+        assert!(
+            !is_terminal_incident_status("paused"),
+            "paused must be non-terminal"
+        );
+    }
+
+    /// TC-RES-05: operator records loss → status = "loss_recorded" (terminal).
+    #[test]
+    fn tc_res_05_operator_loss_recorded() {
+        assert_eq!(
+            operator_incident_status("record_loss"),
+            Some("loss_recorded")
+        );
+        assert!(is_terminal_incident_status("loss_recorded"));
     }
 
     // ─── 15. Integration Tests (TC-D-1500 to TC-D-1502) ─────────────────

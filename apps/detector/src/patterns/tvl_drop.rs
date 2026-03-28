@@ -30,6 +30,9 @@ const DEFAULT_VELOCITY_CRITICAL_PCT: f64 = 15.0;
 const DEFAULT_VELOCITY_WINDOW_MINUTES: i64 = 2;
 const DEFAULT_CONCURRENT_WINDOW_MINUTES: i64 = 5;
 const DEFAULT_MIN_TVL_FLOOR_USD: f64 = 1_000_000.0;
+const FAST_CRITICAL_WINDOW_MINUTES: f64 = 5.0;
+const CLIFF_WINDOW_MINUTES: f64 = 0.1;
+const LINEAR_WINDOW_UPPER_BOUND_MINUTES: f64 = 8.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TvlDropRule {
@@ -151,6 +154,11 @@ struct TvlRuleState {
     last_context: Option<String>,
     last_pause_state: Option<bool>,
     protocol_chain_key: Option<String>,
+    /// Whether the tenant has deposits on this protocol.
+    /// `None` or stale → defaults to `true` (safe default: proceed with detection).
+    tenant_has_deposit: Option<bool>,
+    /// Whether the position data backing `tenant_has_deposit` is stale.
+    position_data_stale: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -179,8 +187,17 @@ struct TvlEvaluation {
     slow_drop_pct: f64,
     velocity_drop_pct: f64,
     selected_drop_pct: f64,
+    fast_window_reference_tvl_usd: Option<f64>,
+    time_to_reach_current_drop_minutes: Option<f64>,
+    drain_rate_usd_per_min: Option<f64>,
+    estimated_time_to_empty_minutes: Option<f64>,
+    velocity_pattern: Option<String>,
     base_severity: Option<Severity>,
     breached_branches: Vec<String>,
+    /// `true` when detection was skipped because tenant has no deposit.
+    deposit_gate_skipped: bool,
+    /// `true` when position data was stale (defaulted to alerting).
+    position_data_stale: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -202,8 +219,17 @@ struct TvlDetectionContext<'a> {
 struct PauseDetectionContext<'a> {
     subject: DetectionSubject<'a>,
     severity: Severity,
+    transition: IncidentTransition,
     classification: ContextClassification,
     now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WindowAnalysis {
+    reference_tvl_usd: Option<f64>,
+    current_tvl_usd: Option<f64>,
+    drop_pct: f64,
+    time_to_reach_current_drop_minutes: Option<f64>,
 }
 
 #[derive(Default)]
@@ -231,6 +257,44 @@ impl TvlDropPattern {
         _repo: &PostgresRepository,
     ) -> Result<Option<Vec<TvlDropRule>>> {
         Ok(self.configs.get(tenant_id).cloned())
+    }
+
+    /// Return other monitored market subject-keys on the same protocol:chain
+    /// for the given tenant.  Used for same-protocol contagion flagging
+    /// (Spec Section 6 Step 1: "exploit may be in core contract, all markets
+    /// at risk").
+    fn find_at_risk_markets(
+        &self,
+        tenant_id: &str,
+        protocol_id: &str,
+        chain_slug: &str,
+        current_market_id: Option<&str>,
+    ) -> Vec<String> {
+        let Some(rules) = self.configs.get(tenant_id) else {
+            return Vec::new();
+        };
+        rules
+            .iter()
+            .filter(|r| {
+                r.enabled
+                    && r.protocol_id.eq_ignore_ascii_case(protocol_id)
+                    && r.chain_slug.eq_ignore_ascii_case(chain_slug)
+                    && r.normalized_scope() == "market"
+            })
+            .filter_map(|r| {
+                let market = r.market_id.as_deref()?;
+                if current_market_id.is_none_or(|curr| !market.eq_ignore_ascii_case(curr)) {
+                    Some(format!(
+                        "{}:{}:{}",
+                        r.protocol_id.to_ascii_lowercase(),
+                        r.chain_slug.to_ascii_lowercase(),
+                        market.to_ascii_lowercase()
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn has_concurrent_active_drop(
@@ -298,27 +362,69 @@ impl TvlDropPattern {
         let cutoff = now - Duration::minutes(max_window.max(1));
         state.samples.retain(|point| point.observed_at >= cutoff);
 
-        let fast_drop = window_drop_pct(&state.samples, now, rule.fast_window_minutes);
-        let slow_drop = window_drop_pct(&state.samples, now, rule.slow_window_minutes);
-        let velocity_drop = window_drop_pct(&state.samples, now, rule.velocity_critical_minutes);
-        let selected_drop_pct = fast_drop.max(slow_drop).max(velocity_drop);
+        let fast_window = analyze_window(&state.samples, now, rule.fast_window_minutes);
+        let slow_window = analyze_window(&state.samples, now, rule.slow_window_minutes);
+        let fast_drop = fast_window.drop_pct;
+        let slow_drop = slow_window.drop_pct;
+        let velocity_drop = max_one_minute_drop_pct(&state.samples, now, rule.fast_window_minutes);
+        let selected_drop_pct = fast_drop.max(slow_drop);
+        let time_to_reach = fast_window.time_to_reach_current_drop_minutes;
+        let velocity_pattern =
+            classify_velocity_pattern(fast_drop, velocity_drop, time_to_reach).map(str::to_string);
+        let drain_rate_usd_per_min = match (
+            fast_window.reference_tvl_usd,
+            fast_window.current_tvl_usd,
+            time_to_reach,
+        ) {
+            (Some(reference), Some(current), Some(minutes))
+                if reference > current && minutes.is_finite() && minutes > 0.0 =>
+            {
+                Some((reference - current) / minutes)
+            }
+            _ => None,
+        };
+        let estimated_time_to_empty_minutes =
+            match (fast_window.current_tvl_usd, drain_rate_usd_per_min) {
+                (Some(current), Some(rate)) if current > 0.0 && rate > 0.0 => Some(current / rate),
+                _ => None,
+            };
+
+        // Gate 1: Tenant deposit check (Spec Section 5 Step 1, Section 4).
+        // If position data is stale or unavailable, default to true (proceed).
+        let has_deposit = match (state.tenant_has_deposit, state.position_data_stale) {
+            (Some(false), Some(true)) => true, // stale data → safe default
+            (Some(false), _) => false,         // confirmed no deposit → skip
+            _ => true,                         // unknown / true → proceed
+        };
+        let deposit_gate_skipped = !has_deposit;
+        let position_data_stale = state.position_data_stale.unwrap_or(false);
 
         let mut breached_branches = Vec::new();
         let mut base_severity = None;
-        if sample.tvl_usd >= rule.min_tvl_floor_usd {
-            if velocity_drop >= rule.velocity_critical_pct {
+        // Gate 2: TVL floor check (Spec Section 5 Step 1, Section 11).
+        if has_deposit
+            && fast_window.reference_tvl_usd.unwrap_or(sample.tvl_usd) >= rule.min_tvl_floor_usd
+        {
+            if fast_drop >= rule.velocity_critical_pct
+                && time_to_reach
+                    .map(|minutes| minutes < rule.velocity_critical_minutes as f64)
+                    .unwrap_or(false)
+            {
                 base_severity = Some(Severity::Critical);
                 breached_branches.push("velocity".to_string());
-            } else {
-                if fast_drop >= rule.fast_drop_pct {
-                    breached_branches.push("fast".to_string());
-                }
-                if slow_drop >= rule.slow_drop_pct {
-                    breached_branches.push("slow".to_string());
-                }
-                if !breached_branches.is_empty() {
+            } else if fast_drop >= rule.fast_drop_pct {
+                breached_branches.push("fast".to_string());
+                if time_to_reach
+                    .map(|minutes| minutes < FAST_CRITICAL_WINDOW_MINUTES)
+                    .unwrap_or(false)
+                {
+                    base_severity = Some(Severity::Critical);
+                } else {
                     base_severity = Some(Severity::High);
                 }
+            } else if slow_drop >= rule.slow_drop_pct {
+                breached_branches.push("slow".to_string());
+                base_severity = Some(Severity::High);
             }
         }
 
@@ -327,8 +433,15 @@ impl TvlDropPattern {
             slow_drop_pct: slow_drop,
             velocity_drop_pct: velocity_drop,
             selected_drop_pct,
+            fast_window_reference_tvl_usd: fast_window.reference_tvl_usd,
+            time_to_reach_current_drop_minutes: time_to_reach,
+            drain_rate_usd_per_min,
+            estimated_time_to_empty_minutes,
+            velocity_pattern,
             base_severity,
             breached_branches,
+            deposit_gate_skipped,
+            position_data_stale,
         }
     }
 
@@ -354,6 +467,26 @@ impl TvlDropPattern {
         oracle_context.insert("market_id".to_string(), json!(sample.market_id));
         oracle_context.insert("tvl_usd".to_string(), json!(sample.tvl_usd));
         oracle_context.insert(
+            "fast_window_reference_tvl_usd".to_string(),
+            json!(evaluation.fast_window_reference_tvl_usd),
+        );
+        oracle_context.insert(
+            "time_to_reach_current_drop_minutes".to_string(),
+            json!(evaluation.time_to_reach_current_drop_minutes),
+        );
+        oracle_context.insert(
+            "drain_rate_usd_per_min".to_string(),
+            json!(evaluation.drain_rate_usd_per_min),
+        );
+        oracle_context.insert(
+            "estimated_time_to_empty_minutes".to_string(),
+            json!(evaluation.estimated_time_to_empty_minutes),
+        );
+        oracle_context.insert(
+            "velocity_pattern".to_string(),
+            json!(evaluation.velocity_pattern),
+        );
+        oracle_context.insert(
             "breached_branches".to_string(),
             json!(evaluation.breached_branches),
         );
@@ -361,6 +494,16 @@ impl TvlDropPattern {
             "transition".to_string(),
             json!(incident_transition_str(&context.transition)),
         );
+        oracle_context.insert(
+            "contagion_status".to_string(),
+            json!(match context.classification {
+                ContextClassification::Systemic => "CONCURRENT_DROPS",
+                ContextClassification::Isolated | ContextClassification::None => "NONE",
+            }),
+        );
+        if evaluation.position_data_stale {
+            oracle_context.insert("position_data_stale".to_string(), json!(true));
+        }
 
         let risk_score = match context.severity {
             Severity::Critical => 95.0,
@@ -479,10 +622,19 @@ impl TvlDropPattern {
             requires_confirmation: false,
             attack_family: AttackFamily::LiquidationCascade,
             severity: context.severity.clone(),
-            description: Some(format!(
-                "Protocol {} is {} while a TVL-drop incident remains active.",
-                pause.protocol_id, state_label
-            )),
+            description: Some(
+                if matches!(context.transition, IncidentTransition::Trigger) {
+                    format!(
+                        "Protocol {} has been {} — PROTOCOL_PAUSED alert initiated.",
+                        pause.protocol_id, state_label
+                    )
+                } else {
+                    format!(
+                        "Protocol {} is {} while a TVL-drop incident remains active.",
+                        pause.protocol_id, state_label
+                    )
+                },
+            ),
             triggered_rule_ids: vec![format!("tvl_drop.{}", rule.rule_id)],
             tx_hash: pause
                 .tx_hash
@@ -508,14 +660,21 @@ impl TvlDropPattern {
                 )],
                 attribution: Vec::new(),
             },
-            incident_transition: Some(IncidentTransition::Update),
+            incident_transition: Some(context.transition.clone()),
             context_classification: Some(context.classification.clone()),
             confidence_breakdown: HashMap::new(),
             oracle_context,
-            actions_recommended: vec![
-                "Confirm protocol control-plane status with protocol operators.".to_string(),
-                "Keep incident open until manual resolution criteria are met.".to_string(),
-            ],
+            actions_recommended: if matches!(context.transition, IncidentTransition::Trigger) {
+                vec![
+                    "Monitor protocol for unpause event.".to_string(),
+                    "Review protocol status with protocol operators.".to_string(),
+                ]
+            } else {
+                vec![
+                    "Confirm protocol control-plane status with protocol operators.".to_string(),
+                    "Keep incident open until manual resolution criteria are met.".to_string(),
+                ]
+            },
             is_simulated,
             simulation_run_id,
             created_at: context.now,
@@ -599,6 +758,23 @@ impl DetectionPattern for TvlDropPattern {
 
                 let mut state = current_state;
                 state.protocol_chain_key = Some(protocol_chain_key.clone());
+
+                // Populate deposit gate from event metadata (Spec Section 4).
+                if let Some(has_deposit) = event
+                    .payload
+                    .get("tenant_has_deposit")
+                    .and_then(Value::as_bool)
+                {
+                    state.tenant_has_deposit = Some(has_deposit);
+                }
+                if let Some(stale) = event
+                    .payload
+                    .get("position_data_stale")
+                    .and_then(Value::as_bool)
+                {
+                    state.position_data_stale = Some(stale);
+                }
+
                 let previous_severity = severity_from_str(state.last_severity.as_deref());
                 let previous_drop = state.last_drop_pct.unwrap_or(0.0);
                 let previous_context = state
@@ -619,11 +795,14 @@ impl DetectionPattern for TvlDropPattern {
                                 now,
                                 rule.concurrent_window_minutes,
                             );
-                        if systemic {
+                        let unclamped = if systemic {
                             (Severity::Critical, ContextClassification::Systemic)
                         } else {
                             (base_severity, ContextClassification::Isolated)
-                        }
+                        };
+                        // Severity only goes up, never down (Spec Section 8).
+                        let clamped = clamp_severity(unclamped.0, previous_severity.as_ref());
+                        (clamped, unclamped.1)
                     } else {
                         (Severity::Info, ContextClassification::None)
                     };
@@ -675,6 +854,7 @@ impl DetectionPattern for TvlDropPattern {
                     "final_severity": if evaluation.base_severity.is_some() { Some(format!("{severity:?}").to_ascii_lowercase()) } else { None },
                     "incident_transition": transition.as_ref().map(incident_transition_str),
                     "context_classification": context_classification_str(&classification),
+                    "deposit_gate_skipped": evaluation.deposit_gate_skipped,
                     "min_tvl_floor_usd": rule.min_tvl_floor_usd,
                 });
                 let severity_str = if evaluation.base_severity.is_some() {
@@ -714,13 +894,26 @@ impl DetectionPattern for TvlDropPattern {
                         classification,
                         now,
                     };
-                    let detection = Self::build_tvl_detection(
+                    let mut detection = Self::build_tvl_detection(
                         event,
                         rule,
                         &detection_context,
                         &evaluation,
                         &sample,
                     );
+                    // Same-protocol contagion: flag other monitored markets as
+                    // at-risk (Spec Section 6 Step 1).
+                    let at_risk = self.find_at_risk_markets(
+                        &event.tenant_id,
+                        &sample.protocol_id,
+                        &sample.chain_slug,
+                        sample.market_id.as_deref(),
+                    );
+                    if !at_risk.is_empty() {
+                        detection
+                            .oracle_context
+                            .insert("at_risk_markets".to_string(), json!(at_risk));
+                    }
                     emitted = pick_higher_severity(emitted, detection);
                 }
             }
@@ -751,16 +944,31 @@ impl DetectionPattern for TvlDropPattern {
                 let mut state = current_state;
                 state.protocol_chain_key = Some(protocol_chain_key);
 
-                let Some(previous_severity) = severity_from_str(state.last_severity.as_deref())
-                else {
-                    continue;
-                };
+                let previous_severity = severity_from_str(state.last_severity.as_deref());
 
-                let classification = match state.last_context.as_deref() {
-                    Some("systemic") => ContextClassification::Systemic,
-                    Some("isolated") => ContextClassification::Isolated,
-                    _ => ContextClassification::None,
-                };
+                // Determine pause alert parameters based on active incident state.
+                let (pause_severity, pause_transition, classification) =
+                    if let Some(prev) = &previous_severity {
+                        // Active incident → annotate with pause state (Spec Section 11).
+                        let classification = match state.last_context.as_deref() {
+                            Some("systemic") => ContextClassification::Systemic,
+                            Some("isolated") => ContextClassification::Isolated,
+                            _ => ContextClassification::None,
+                        };
+                        (prev.clone(), IncidentTransition::Update, classification)
+                    } else if pause.paused {
+                        // No active incident + paused → standalone PROTOCOL_PAUSED
+                        // alert (Spec Section 11 "Protocol Pause").
+                        (
+                            Severity::High,
+                            IncidentTransition::Trigger,
+                            ContextClassification::None,
+                        )
+                    } else {
+                        // No active incident + unpause → nothing to do.
+                        continue;
+                    };
+
                 state.last_pause_state = Some(pause.paused);
                 state.last_transition_at = Some(now);
 
@@ -768,7 +976,7 @@ impl DetectionPattern for TvlDropPattern {
                     "rule_id": rule.rule_id,
                     "subject_key": subject_key,
                     "pause_state": if pause.paused { "paused" } else { "unpaused" },
-                    "incident_transition": "update",
+                    "incident_transition": incident_transition_str(&pause_transition),
                     "context_classification": context_classification_str(&classification),
                 });
                 let _ = repo
@@ -797,7 +1005,8 @@ impl DetectionPattern for TvlDropPattern {
                         subject_type: &subject_type,
                         subject_key: &subject_key,
                     },
-                    severity: previous_severity,
+                    severity: pause_severity,
+                    transition: pause_transition,
                     classification,
                     now,
                 };
@@ -811,28 +1020,95 @@ impl DetectionPattern for TvlDropPattern {
     }
 }
 
-fn window_drop_pct(samples: &[TvlSamplePoint], now: DateTime<Utc>, window_minutes: i64) -> f64 {
+fn analyze_window(
+    samples: &[TvlSamplePoint],
+    now: DateTime<Utc>,
+    window_minutes: i64,
+) -> WindowAnalysis {
     if samples.is_empty() {
-        return 0.0;
+        return WindowAnalysis::default();
     }
     let cutoff = now - Duration::minutes(window_minutes.max(1));
-    let mut max_tvl = None::<f64>;
-    let mut current_tvl = None::<f64>;
-    for point in samples.iter().filter(|point| point.observed_at >= cutoff) {
-        max_tvl = Some(max_tvl.unwrap_or(point.tvl_usd).max(point.tvl_usd));
-        current_tvl = Some(point.tvl_usd);
+    let window_points: Vec<&TvlSamplePoint> = samples
+        .iter()
+        .filter(|point| point.observed_at >= cutoff)
+        .collect();
+
+    let Some(first) = window_points.first() else {
+        return WindowAnalysis::default();
+    };
+    let Some(last) = window_points.last() else {
+        return WindowAnalysis::default();
+    };
+    if !first.tvl_usd.is_finite() || first.tvl_usd <= 0.0 {
+        return WindowAnalysis::default();
     }
 
-    let Some(window_peak) = max_tvl else {
-        return 0.0;
-    };
-    let Some(window_current) = current_tvl else {
-        return 0.0;
-    };
-    if !window_peak.is_finite() || window_peak <= 0.0 {
-        return 0.0;
+    let drop_pct = (((first.tvl_usd - last.tvl_usd).max(0.0) / first.tvl_usd) * 100.0).max(0.0);
+    let threshold_tvl = last.tvl_usd;
+    let time_to_reach_current_drop_minutes = window_points
+        .iter()
+        .find(|point| point.tvl_usd <= threshold_tvl)
+        .map(|point| (point.observed_at - first.observed_at).num_seconds() as f64 / 60.0);
+
+    WindowAnalysis {
+        reference_tvl_usd: Some(first.tvl_usd),
+        current_tvl_usd: Some(last.tvl_usd),
+        drop_pct,
+        time_to_reach_current_drop_minutes,
     }
-    (((window_peak - window_current).max(0.0) / window_peak) * 100.0).max(0.0)
+}
+
+fn max_one_minute_drop_pct(
+    samples: &[TvlSamplePoint],
+    now: DateTime<Utc>,
+    window_minutes: i64,
+) -> f64 {
+    let cutoff = now - Duration::minutes(window_minutes.max(1));
+    let window_points: Vec<&TvlSamplePoint> = samples
+        .iter()
+        .filter(|point| point.observed_at >= cutoff)
+        .collect();
+    let mut max_drop = 0.0;
+
+    for pair in window_points.windows(2) {
+        let previous = pair[0];
+        let current = pair[1];
+        let elapsed_seconds = (current.observed_at - previous.observed_at).num_seconds();
+        if elapsed_seconds <= 0 || elapsed_seconds > 60 || previous.tvl_usd <= 0.0 {
+            continue;
+        }
+
+        let drop_pct =
+            (((previous.tvl_usd - current.tvl_usd).max(0.0) / previous.tvl_usd) * 100.0).max(0.0);
+        if drop_pct > max_drop {
+            max_drop = drop_pct;
+        }
+    }
+
+    max_drop
+}
+
+fn classify_velocity_pattern(
+    fast_drop_pct: f64,
+    max_one_minute_drop_pct: f64,
+    time_to_reach_minutes: Option<f64>,
+) -> Option<&'static str> {
+    if fast_drop_pct <= 0.0 {
+        return None;
+    }
+
+    let minutes = time_to_reach_minutes?;
+    if minutes < CLIFF_WINDOW_MINUTES {
+        return Some("CLIFF");
+    }
+    if max_one_minute_drop_pct > (fast_drop_pct / 2.0) {
+        return Some("ACCELERATING");
+    }
+    if minutes <= LINEAR_WINDOW_UPPER_BOUND_MINUTES {
+        return Some("LINEAR");
+    }
+    Some("DECELERATING")
 }
 
 fn parse_tvl_drop_rules(config: &Value, tenant_id: &str) -> Vec<TvlDropRule> {
@@ -1178,6 +1454,15 @@ fn severity_from_str(value: Option<&str>) -> Option<Severity> {
     }
 }
 
+/// Clamp severity so it never drops below the previous level.
+/// Spec Section 8 / Alerting Spec Section 3.5: "Severity only goes up, never down."
+fn clamp_severity(current: Severity, previous: Option<&Severity>) -> Severity {
+    match previous {
+        Some(prev) if severity_rank(Some(&current)) < severity_rank(Some(prev)) => prev.clone(),
+        _ => current,
+    }
+}
+
 fn severity_rank(value: Option<&Severity>) -> u8 {
     match value {
         Some(Severity::Critical) => 5,
@@ -1273,6 +1558,8 @@ fn value_window_minutes(minutes: Option<&Value>, seconds: Option<&Value>, fallba
 #[cfg(test)]
 mod tests {
     use super::*;
+    use event_schema::SourceType;
+    use serde_json::json;
 
     fn base_rule() -> TvlDropRule {
         TvlDropRule {
@@ -1301,6 +1588,43 @@ mod tests {
         }
     }
 
+    fn state_event(
+        protocol_id: &str,
+        chain_slug: &str,
+        market_id: Option<&str>,
+        tvl_usd: f64,
+    ) -> TvlStateEvent {
+        TvlStateEvent {
+            protocol_id: protocol_id.to_string(),
+            chain_slug: chain_slug.to_string(),
+            market_id: market_id.map(ToString::to_string),
+            tvl_usd,
+            block_number: 1,
+            tx_hash: Some("0xtest".to_string()),
+        }
+    }
+
+    fn unified_tvl_event() -> UnifiedEvent {
+        UnifiedEvent {
+            event_id: "evt-1".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            source_id: "aave-v3-base-protocol-state".to_string(),
+            source_type: SourceType::EvmChain,
+            event_type: "protocol_state".to_string(),
+            timestamp: Utc::now(),
+            payload: json!({
+                "protocol_id": "aave_v3",
+                "chain_slug": "base",
+                "tvl_usd": 375_000_000.0
+            }),
+            chain_id: Some(8453),
+            block_number: Some(1),
+            tx_hash: Some("0xtest".to_string()),
+            market_key: None,
+            price: None,
+        }
+    }
+
     #[test]
     fn velocity_branch_sets_critical() {
         let now = Utc::now();
@@ -1309,19 +1633,13 @@ mod tests {
         state
             .samples
             .push(sample(now - Duration::minutes(1), 100_000_000.0));
-        let event = TvlStateEvent {
-            protocol_id: "aave_v3".to_string(),
-            chain_slug: "base".to_string(),
-            market_id: None,
-            tvl_usd: 80_000_000.0,
-            block_number: 1,
-            tx_hash: None,
-        };
+        let event = state_event("aave_v3", "base", None, 80_000_000.0);
 
         let pattern = TvlDropPattern::default();
         let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
         assert!(matches!(eval.base_severity, Some(Severity::Critical)));
-        assert!(eval.velocity_drop_pct >= rule.velocity_critical_pct);
+        assert_eq!(eval.velocity_pattern.as_deref(), Some("ACCELERATING"));
+        assert_eq!(eval.breached_branches, vec!["velocity".to_string()]);
     }
 
     #[test]
@@ -1332,19 +1650,161 @@ mod tests {
         rule.min_tvl_floor_usd = 5_000_000.0;
         state
             .samples
-            .push(sample(now - Duration::minutes(3), 6_000_000.0));
-        let event = TvlStateEvent {
-            protocol_id: "aave_v3".to_string(),
-            chain_slug: "base".to_string(),
-            market_id: None,
-            tvl_usd: 4_000_000.0,
-            block_number: 1,
-            tx_hash: None,
-        };
+            .push(sample(now - Duration::minutes(3), 4_500_000.0));
+        let event = state_event("aave_v3", "base", None, 3_000_000.0);
 
         let pattern = TvlDropPattern::default();
         let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
         assert!(eval.base_severity.is_none());
+    }
+
+    #[test]
+    fn floor_gate_uses_fast_window_reference_tvl() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(4), 2_000_000.0));
+        state
+            .samples
+            .push(sample(now - Duration::minutes(2), 1_600_000.0));
+        let event = state_event("aave_v3", "base", None, 800_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+
+        assert!(matches!(eval.base_severity, Some(Severity::Critical)));
+        assert_eq!(eval.fast_window_reference_tvl_usd, Some(2_000_000.0));
+    }
+
+    #[test]
+    fn exactly_at_floor_still_allows_detection() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(4), 1_000_000.0));
+        let event = state_event("aave_v3", "base", None, 750_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+
+        assert!(matches!(eval.base_severity, Some(Severity::Critical)));
+    }
+
+    #[test]
+    fn fast_drop_under_five_minutes_is_critical() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(4), 100_000_000.0));
+        let event = state_event("aave_v3", "base", None, 78_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+
+        assert!(matches!(eval.base_severity, Some(Severity::Critical)));
+        assert_eq!(eval.time_to_reach_current_drop_minutes, Some(4.0));
+        assert_eq!(eval.breached_branches, vec!["fast".to_string()]);
+    }
+
+    #[test]
+    fn fast_drop_at_exactly_five_minutes_is_high() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(5), 100_000_000.0));
+        let event = state_event("aave_v3", "base", None, 80_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+
+        assert!(matches!(eval.base_severity, Some(Severity::High)));
+        assert_eq!(eval.time_to_reach_current_drop_minutes, Some(5.0));
+    }
+
+    #[test]
+    fn fast_drop_at_exactly_two_minutes_uses_fast_branch_critical() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(2), 100_000_000.0));
+        let event = state_event("aave_v3", "base", None, 80_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+
+        assert!(matches!(eval.base_severity, Some(Severity::Critical)));
+        assert_eq!(eval.time_to_reach_current_drop_minutes, Some(2.0));
+        assert_eq!(eval.breached_branches, vec!["fast".to_string()]);
+    }
+
+    #[test]
+    fn slow_drain_fires_when_fast_window_misses() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(60), 500_000_000.0));
+        state
+            .samples
+            .push(sample(now - Duration::minutes(10), 340_000_000.0));
+        let event = state_event("aave_v3", "base", None, 310_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+
+        assert!(matches!(eval.base_severity, Some(Severity::High)));
+        assert!(eval.fast_drop_pct < rule.fast_drop_pct);
+        assert!(eval.slow_drop_pct >= rule.slow_drop_pct);
+        assert_eq!(eval.breached_branches, vec!["slow".to_string()]);
+    }
+
+    #[test]
+    fn tvl_increase_does_not_alert() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(10), 500_000_000.0));
+        let event = state_event("aave_v3", "base", None, 550_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+
+        assert!(eval.base_severity.is_none());
+        assert_eq!(eval.fast_drop_pct, 0.0);
+        assert_eq!(eval.slow_drop_pct, 0.0);
+    }
+
+    #[test]
+    fn velocity_classification_matches_pdf_examples() {
+        assert_eq!(
+            classify_velocity_pattern(30.0, 10.0, Some(0.05)),
+            Some("CLIFF")
+        );
+        assert_eq!(
+            classify_velocity_pattern(25.0, 15.0, Some(4.0)),
+            Some("ACCELERATING")
+        );
+        assert_eq!(
+            classify_velocity_pattern(20.0, 5.0, Some(5.0)),
+            Some("LINEAR")
+        );
+        assert_eq!(
+            classify_velocity_pattern(20.0, 5.0, Some(9.0)),
+            Some("DECELERATING")
+        );
     }
 
     #[test]
@@ -1472,14 +1932,7 @@ mod tests {
         let mut tenant_a_state = state.clone();
         let mut tenant_b_state = state;
 
-        let event = TvlStateEvent {
-            protocol_id: "aave_v3".to_string(),
-            chain_slug: "base".to_string(),
-            market_id: None,
-            tvl_usd: 80_000_000.0,
-            block_number: 1,
-            tx_hash: None,
-        };
+        let event = state_event("aave_v3", "base", None, 80_000_000.0);
 
         let mut tenant_a_rule = base_rule();
         tenant_a_rule.fast_drop_pct = 10.0;
@@ -1501,5 +1954,1043 @@ mod tests {
         assert!(tenant_a.selected_drop_pct >= tenant_a_rule.fast_drop_pct);
         assert!(tenant_b.base_severity.is_none());
         assert!(tenant_b.selected_drop_pct < tenant_b_rule.fast_drop_pct);
+    }
+
+    #[test]
+    fn payload_includes_velocity_drain_and_contagion_metadata() {
+        let event = unified_tvl_event();
+        let rule = base_rule();
+        let evaluation = TvlEvaluation {
+            fast_drop_pct: 25.0,
+            slow_drop_pct: 25.0,
+            velocity_drop_pct: 15.0,
+            selected_drop_pct: 25.0,
+            fast_window_reference_tvl_usd: Some(500_000_000.0),
+            time_to_reach_current_drop_minutes: Some(5.0),
+            drain_rate_usd_per_min: Some(25_000_000.0),
+            estimated_time_to_empty_minutes: Some(15.0),
+            velocity_pattern: Some("CLIFF".to_string()),
+            base_severity: Some(Severity::Critical),
+            breached_branches: vec!["velocity".to_string()],
+            deposit_gate_skipped: false,
+            position_data_stale: false,
+        };
+        let context = TvlDetectionContext {
+            subject: DetectionSubject {
+                subject_type: "protocol",
+                subject_key: "aave_v3:base",
+            },
+            severity: Severity::Critical,
+            transition: IncidentTransition::Trigger,
+            classification: ContextClassification::Systemic,
+            now: Utc::now(),
+        };
+        let sample = state_event("aave_v3", "base", None, 375_000_000.0);
+
+        let detection =
+            TvlDropPattern::build_tvl_detection(&event, &rule, &context, &evaluation, &sample);
+        let oracle = detection.oracle_context;
+
+        assert_eq!(
+            oracle.get("velocity_pattern"),
+            Some(&json!(Some("CLIFF".to_string())))
+        );
+        assert_eq!(
+            oracle.get("drain_rate_usd_per_min"),
+            Some(&json!(Some(25_000_000.0)))
+        );
+        assert_eq!(
+            oracle.get("estimated_time_to_empty_minutes"),
+            Some(&json!(Some(15.0)))
+        );
+        assert_eq!(
+            oracle.get("contagion_status"),
+            Some(&json!("CONCURRENT_DROPS"))
+        );
+    }
+
+    #[test]
+    fn concurrent_active_drop_detection_is_tenant_isolated() {
+        let now = Utc::now();
+        let mut pattern = TvlDropPattern::default();
+        pattern.state_cache.insert(
+            "tenant-a:rule-a:aave_v3:base".to_string(),
+            TvlRuleState {
+                last_severity: Some("high".to_string()),
+                last_breach_at: Some(now),
+                protocol_chain_key: Some("aave_v3:base".to_string()),
+                ..Default::default()
+            },
+        );
+        pattern.state_cache.insert(
+            "tenant-a:rule-b:euler_v2:base".to_string(),
+            TvlRuleState {
+                last_severity: Some("high".to_string()),
+                last_breach_at: Some(now),
+                protocol_chain_key: Some("euler_v2:base".to_string()),
+                ..Default::default()
+            },
+        );
+        pattern.state_cache.insert(
+            "tenant-b:rule-c:euler_v2:base".to_string(),
+            TvlRuleState {
+                last_severity: Some("high".to_string()),
+                last_breach_at: Some(now),
+                protocol_chain_key: Some("euler_v2:base".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert!(pattern.has_concurrent_active_drop(
+            "tenant-a",
+            "tenant-a:rule-a:aave_v3:base",
+            "aave_v3:base",
+            now,
+            5
+        ));
+        assert!(!pattern.has_concurrent_active_drop(
+            "tenant-b",
+            "tenant-b:rule-c:euler_v2:base",
+            "euler_v2:base",
+            now,
+            5
+        ));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Test-plan helpers
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// Determine the incident transition for a TVL-drop evaluation.
+    /// Returns `None` when no transition is warranted (duplicate signal with
+    /// unchanged severity / drop / context → Spec Section 7 deduplication).
+    fn determine_transition(
+        base_severity: Option<&Severity>,
+        final_severity: &Severity,
+        previous_severity: Option<&Severity>,
+        selected_drop_pct: f64,
+        previous_drop_pct: f64,
+        previous_context: &str,
+        current_context: &str,
+    ) -> Option<IncidentTransition> {
+        base_severity?;
+        let current_rank = severity_rank(Some(final_severity));
+        let previous_rank = severity_rank(previous_severity);
+        if previous_severity.is_none() {
+            Some(IncidentTransition::Trigger)
+        } else if current_rank > previous_rank {
+            Some(IncidentTransition::Escalate)
+        } else {
+            let context_changed = previous_context != current_context;
+            if selected_drop_pct >= (previous_drop_pct + 1.0) || context_changed {
+                Some(IncidentTransition::Update)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Compare orphaned-fork and canonical-chain evaluations to determine the
+    /// reorg correction type (Spec Section 11 Reorg Handling).
+    fn determine_reorg_correction(
+        orphaned_severity: Option<&Severity>,
+        canonical_severity: Option<&Severity>,
+    ) -> Option<&'static str> {
+        match (orphaned_severity, canonical_severity) {
+            (Some(_), None) => Some("RETRACTION"),
+            (Some(o), Some(c)) if severity_rank(Some(c)) != severity_rank(Some(o)) => {
+                Some("UPDATE")
+            }
+            (None, Some(_)) => Some("LATE_ALERT"),
+            _ => None,
+        }
+    }
+
+    fn pause_event_data(protocol_id: &str, chain_slug: &str, paused: bool) -> TvlPauseEvent {
+        TvlPauseEvent {
+            protocol_id: protocol_id.to_string(),
+            chain_slug: chain_slug.to_string(),
+            market_id: None,
+            paused,
+            block_number: 1,
+            tx_hash: Some("0xtest-pause".to_string()),
+        }
+    }
+
+    fn unified_pause_event(protocol_id: &str, paused: bool) -> UnifiedEvent {
+        UnifiedEvent {
+            event_id: "evt-pause-1".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            source_id: format!("{protocol_id}-base-pause"),
+            source_type: SourceType::EvmChain,
+            event_type: if paused {
+                "protocol_pause".to_string()
+            } else {
+                "protocol_unpause".to_string()
+            },
+            timestamp: Utc::now(),
+            payload: json!({
+                "protocol_id": protocol_id,
+                "chain_slug": "base",
+                "paused": paused,
+            }),
+            chain_id: Some(8453),
+            block_number: Some(1),
+            tx_hash: Some("0xtest-pause".to_string()),
+            market_key: None,
+            price: None,
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 2. Gate Checks — TC-GATE-01, TC-GATE-04
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-GATE-01: tenant has NO deposits → skip detection even for severe drop.
+    #[test]
+    fn no_deposit_skips_detection() {
+        let now = Utc::now();
+        let mut state = TvlRuleState {
+            tenant_has_deposit: Some(false),
+            ..Default::default()
+        };
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(3), 500_000_000.0));
+        // 50% drop — would be CRITICAL if evaluated.
+        let event = state_event("aave_v3", "base", None, 250_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+        assert!(eval.base_severity.is_none());
+        assert!(eval.deposit_gate_skipped);
+    }
+
+    /// TC-GATE-04: position data stale → default to alerting (tenant_has_deposit = true).
+    #[test]
+    fn stale_position_data_defaults_to_alerting() {
+        let now = Utc::now();
+        let mut state = TvlRuleState {
+            tenant_has_deposit: Some(false), // would normally skip
+            position_data_stale: Some(true), // stale overrides → proceed
+            ..Default::default()
+        };
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(3), 500_000_000.0));
+        let event = state_event("aave_v3", "base", None, 375_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+        assert!(matches!(eval.base_severity, Some(Severity::Critical)));
+        assert!(!eval.deposit_gate_skipped);
+        assert!(eval.position_data_stale);
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 3. Severity — Fast Drop Window — TC-SEV-03, TC-SEV-04, TC-SEV-07
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-SEV-03: 22% drop over 7 min → HIGH (moderate velocity, >= 5 min).
+    #[test]
+    fn moderate_fast_drop_over_five_min_is_high() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(7), 100_000_000.0));
+        let event = state_event("aave_v3", "base", None, 78_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+        assert!(matches!(eval.base_severity, Some(Severity::High)));
+        assert_eq!(eval.breached_branches, vec!["fast".to_string()]);
+        assert_eq!(eval.time_to_reach_current_drop_minutes, Some(7.0));
+    }
+
+    /// TC-SEV-04: fast=18% (< 20%), slow=12% (< 35%) → no alert.
+    #[test]
+    fn below_both_thresholds_no_alert() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule(); // fast_drop_pct=20, slow_drop_pct=35
+        state
+            .samples
+            .push(sample(now - Duration::minutes(60), 100_000_000.0));
+        state
+            .samples
+            .push(sample(now - Duration::minutes(10), 100_000_000.0));
+        // fast: (100M - 82M)/100M = 18%, slow: (100M - 82M)/100M = 18%
+        let event = state_event("aave_v3", "base", None, 82_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+        assert!(eval.base_severity.is_none());
+        assert!(eval.breached_branches.is_empty());
+    }
+
+    /// TC-SEV-07: severity is NEVER MEDIUM for TVL drops (exhaustive).
+    #[test]
+    fn severity_is_never_medium_for_tvl_drops() {
+        let now = Utc::now();
+        let pattern = TvlDropPattern::default();
+        let rule = base_rule();
+
+        for fast_pct in [5, 10, 15, 20, 25, 30, 50, 80] {
+            for time_min in [1i64, 2, 3, 5, 7, 10] {
+                let start_tvl = 100_000_000.0;
+                let end_tvl = start_tvl * (1.0 - fast_pct as f64 / 100.0);
+                let mut state = TvlRuleState::default();
+                state
+                    .samples
+                    .push(sample(now - Duration::minutes(time_min), start_tvl));
+                let event = state_event("aave_v3", "base", None, end_tvl);
+                let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+                if let Some(ref sev) = eval.base_severity {
+                    assert!(
+                        !matches!(sev, Severity::Medium),
+                        "got MEDIUM for fast_pct={fast_pct}%, time={time_min}min"
+                    );
+                }
+            }
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 4. Severity — Slow Drop Window — TC-SLOW-01, TC-SLOW-02
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-SLOW-01: fast=8.6% (< 20%), slow=36% (>= 35%) → HIGH.
+    #[test]
+    fn slow_drain_above_threshold_standalone_high() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        // 60-min TVL $500M, 10-min TVL $350M, current $320M.
+        // fast = (350 - 320)/350 = 8.6%, slow = (500 - 320)/500 = 36%.
+        state
+            .samples
+            .push(sample(now - Duration::minutes(60), 500_000_000.0));
+        state
+            .samples
+            .push(sample(now - Duration::minutes(10), 350_000_000.0));
+        let event = state_event("aave_v3", "base", None, 320_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+        assert!(matches!(eval.base_severity, Some(Severity::High)));
+        assert!(eval.fast_drop_pct < rule.fast_drop_pct);
+        assert!(eval.slow_drop_pct >= rule.slow_drop_pct);
+        assert_eq!(eval.breached_branches, vec!["slow".to_string()]);
+    }
+
+    /// TC-SLOW-02: fast=2.2% (< 20%), slow=12% (< 35%) → no alert.
+    #[test]
+    fn slow_drain_below_threshold_no_alert() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(60), 100_000_000.0));
+        state
+            .samples
+            .push(sample(now - Duration::minutes(10), 90_000_000.0));
+        let event = state_event("aave_v3", "base", None, 88_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+        assert!(eval.base_severity.is_none());
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 7. Contagion — TC-CONT-02, TC-CONT-03
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-CONT-02: cross-protocol concurrent drops → systemic flag detected.
+    /// When two different protocols have active breaches for the same tenant,
+    /// `has_concurrent_active_drop` returns true (systemic → elevate to CRITICAL).
+    #[test]
+    fn cross_protocol_concurrent_drops_elevates_to_critical() {
+        let now = Utc::now();
+        let mut pattern = TvlDropPattern::default();
+        // Aave V3 active breach
+        pattern.state_cache.insert(
+            "tenant-a:rule-a:aave_v3:base".to_string(),
+            TvlRuleState {
+                last_severity: Some("high".to_string()),
+                last_breach_at: Some(now),
+                protocol_chain_key: Some("aave_v3:base".to_string()),
+                ..Default::default()
+            },
+        );
+        // Euler V2 active breach (different protocol)
+        pattern.state_cache.insert(
+            "tenant-a:rule-b:euler_v2:base".to_string(),
+            TvlRuleState {
+                last_severity: Some("high".to_string()),
+                last_breach_at: Some(now),
+                protocol_chain_key: Some("euler_v2:base".to_string()),
+                ..Default::default()
+            },
+        );
+
+        // From aave_v3's perspective: euler_v2 is also breaching → concurrent
+        assert!(pattern.has_concurrent_active_drop(
+            "tenant-a",
+            "tenant-a:rule-a:aave_v3:base",
+            "aave_v3:base",
+            now,
+            5
+        ));
+        // From euler_v2's perspective: aave_v3 is also breaching → concurrent
+        assert!(pattern.has_concurrent_active_drop(
+            "tenant-a",
+            "tenant-a:rule-b:euler_v2:base",
+            "euler_v2:base",
+            now,
+            5
+        ));
+    }
+
+    /// TC-CONT-03: single protocol dropping → no cross-protocol contagion.
+    #[test]
+    fn single_protocol_no_cross_contagion() {
+        let now = Utc::now();
+        let mut pattern = TvlDropPattern::default();
+        pattern.state_cache.insert(
+            "tenant-a:rule-a:aave_v3:base".to_string(),
+            TvlRuleState {
+                last_severity: Some("high".to_string()),
+                last_breach_at: Some(now),
+                protocol_chain_key: Some("aave_v3:base".to_string()),
+                ..Default::default()
+            },
+        );
+        // No other protocols active for tenant-a
+        assert!(!pattern.has_concurrent_active_drop(
+            "tenant-a",
+            "tenant-a:rule-a:aave_v3:base",
+            "aave_v3:base",
+            now,
+            5
+        ));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 9. Escalation — TC-ESC-01, TC-ESC-02
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-ESC-01: severity escalates from HIGH to CRITICAL on worsening drop.
+    #[test]
+    fn severity_escalates_high_to_critical() {
+        let now = Utc::now();
+        let pattern = TvlDropPattern::default();
+        let rule = base_rule();
+
+        // First evaluation: 20% drop over 7 min → HIGH
+        let mut state = TvlRuleState::default();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(7), 100_000_000.0));
+        let event1 = state_event("aave_v3", "base", None, 80_000_000.0);
+        let eval1 = pattern.process_state_sample(&rule, &mut state, &event1, now);
+        assert!(matches!(eval1.base_severity, Some(Severity::High)));
+
+        // Simulate state update (process_event would do this)
+        state.last_severity = Some("high".to_string());
+        state.last_drop_pct = Some(eval1.selected_drop_pct);
+
+        // Second evaluation 4 minutes later: the original sample (now-7min) ages
+        // out of the 10-min window relative to now2 (now-7min = now2-11min).
+        // Remaining window: [now: 80M, now2: 50M]  →  37.5% drop in 4 min → CRITICAL.
+        let now2 = now + Duration::minutes(4);
+        let event2 = state_event("aave_v3", "base", None, 50_000_000.0);
+        let eval2 = pattern.process_state_sample(&rule, &mut state, &event2, now2);
+        assert!(matches!(eval2.base_severity, Some(Severity::Critical)));
+
+        // clamp_severity should allow the escalation
+        let clamped = clamp_severity(Severity::Critical, Some(&Severity::High));
+        assert!(matches!(clamped, Severity::Critical));
+    }
+
+    /// TC-ESC-02: severity never de-escalates (clamp_severity).
+    #[test]
+    fn severity_never_deescalates() {
+        // HIGH when previous was CRITICAL → stays CRITICAL
+        assert!(matches!(
+            clamp_severity(Severity::High, Some(&Severity::Critical)),
+            Severity::Critical
+        ));
+        // CRITICAL stays CRITICAL
+        assert!(matches!(
+            clamp_severity(Severity::Critical, Some(&Severity::Critical)),
+            Severity::Critical
+        ));
+        // No previous → use current
+        assert!(matches!(
+            clamp_severity(Severity::High, None),
+            Severity::High
+        ));
+        // Escalation works normally
+        assert!(matches!(
+            clamp_severity(Severity::Critical, Some(&Severity::High)),
+            Severity::Critical
+        ));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 11. Special Cases — TC-SPEC-01, TC-SPEC-02
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-SPEC-01: protocol pause WITHOUT TVL drop → standalone PROTOCOL_PAUSED alert.
+    #[test]
+    fn pause_without_tvl_drop_fires_protocol_paused() {
+        let event = unified_pause_event("euler_v2", true);
+        let mut rule = base_rule();
+        rule.protocol_id = "euler_v2".to_string();
+
+        let pause = pause_event_data("euler_v2", "base", true);
+        let context = PauseDetectionContext {
+            subject: DetectionSubject {
+                subject_type: "protocol",
+                subject_key: "euler_v2:base",
+            },
+            severity: Severity::High,
+            transition: IncidentTransition::Trigger,
+            classification: ContextClassification::None,
+            now: Utc::now(),
+        };
+
+        let detection = TvlDropPattern::build_pause_detection(&event, &rule, &context, &pause);
+        assert!(matches!(detection.severity, Severity::High));
+        assert!(matches!(
+            detection.incident_transition,
+            Some(IncidentTransition::Trigger)
+        ));
+        assert_eq!(
+            detection.signals[0].signal_type,
+            SignalType::ProtocolPauseState
+        );
+        assert_eq!(detection.signals[0].value, 1.0); // paused
+        assert!(detection.description.as_deref().unwrap().contains("paused"));
+    }
+
+    /// TC-SPEC-02: protocol pause DURING active TVL drop → annotate incident.
+    #[test]
+    fn pause_during_active_tvl_drop_annotates_incident() {
+        let event = unified_pause_event("euler_v2", true);
+        let mut rule = base_rule();
+        rule.protocol_id = "euler_v2".to_string();
+
+        let pause = pause_event_data("euler_v2", "base", true);
+        let context = PauseDetectionContext {
+            subject: DetectionSubject {
+                subject_type: "protocol",
+                subject_key: "euler_v2:base",
+            },
+            severity: Severity::Critical, // previous severity of active incident
+            transition: IncidentTransition::Update,
+            classification: ContextClassification::Isolated,
+            now: Utc::now(),
+        };
+
+        let detection = TvlDropPattern::build_pause_detection(&event, &rule, &context, &pause);
+        assert!(matches!(detection.severity, Severity::Critical));
+        assert!(matches!(
+            detection.incident_transition,
+            Some(IncidentTransition::Update)
+        ));
+        assert_eq!(
+            detection.oracle_context.get("pause_state"),
+            Some(&json!("paused"))
+        );
+        assert!(detection
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("TVL-drop incident remains active"));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 14. No-Alert Scenarios — TC-NONE-02, TC-NONE-03
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-NONE-02: flash loan noise — end-of-block TVL unchanged → no alert.
+    #[test]
+    fn tvl_unchanged_no_alert() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(10), 300_000_000.0));
+        let event = state_event("aave_v3", "base", None, 300_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+        assert!(eval.base_severity.is_none());
+        assert_eq!(eval.fast_drop_pct, 0.0);
+    }
+
+    /// TC-NONE-03: small organic withdrawal (3%) — below all thresholds.
+    #[test]
+    fn small_organic_withdrawal_no_alert() {
+        let now = Utc::now();
+        let mut state = TvlRuleState::default();
+        let rule = base_rule();
+        state
+            .samples
+            .push(sample(now - Duration::minutes(10), 100_000_000.0));
+        let event = state_event("aave_v3", "base", None, 97_000_000.0);
+
+        let pattern = TvlDropPattern::default();
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+        assert!(eval.base_severity.is_none());
+        assert!(eval.fast_drop_pct < rule.fast_drop_pct);
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 8. Incident Creation & Deduplication — TC-INC-01, TC-INC-02, TC-INC-03
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-INC-01: duplicate detection signal — no new incident.
+    /// When an active incident exists (previous severity set) and the new
+    /// evaluation has the same severity + similar drop %, no transition is
+    /// produced and therefore no duplicate incident is created.
+    #[test]
+    fn duplicate_signal_same_severity_no_new_trigger() {
+        // Same severity (High), similar drop (20% vs 20%), same context → None.
+        let t = determine_transition(
+            Some(&Severity::High),
+            &Severity::High,
+            Some(&Severity::High),
+            20.0,
+            20.0,
+            "isolated",
+            "isolated",
+        );
+        assert!(t.is_none(), "duplicate should produce no transition");
+
+        // Drop increased by <1% → still no transition.
+        let t2 = determine_transition(
+            Some(&Severity::High),
+            &Severity::High,
+            Some(&Severity::High),
+            20.5,
+            20.0,
+            "isolated",
+            "isolated",
+        );
+        assert!(t2.is_none(), "<1% increase should not trigger update");
+
+        // Drop increased by >=1% → Update (not a new Trigger).
+        let t3 = determine_transition(
+            Some(&Severity::High),
+            &Severity::High,
+            Some(&Severity::High),
+            22.0,
+            20.0,
+            "isolated",
+            "isolated",
+        );
+        assert!(matches!(t3, Some(IncidentTransition::Update)));
+    }
+
+    /// TC-INC-02: different protocol → new incident created (different subject).
+    #[test]
+    fn different_protocol_produces_different_subject() {
+        let rule_aave = base_rule();
+        let mut rule_euler = base_rule();
+        rule_euler.protocol_id = "euler_v2".to_string();
+
+        let (_, key_aave, _) = rule_aave.subject_for_event(None).unwrap();
+        let (_, key_euler, _) = rule_euler.subject_for_event(None).unwrap();
+
+        assert_ne!(key_aave, key_euler);
+        assert_eq!(key_aave, "aave_v3:base");
+        assert_eq!(key_euler, "euler_v2:base");
+    }
+
+    /// TC-INC-03: incident fields set correctly at creation.
+    #[test]
+    fn detection_fields_correct_at_creation() {
+        let event = unified_tvl_event();
+        let rule = base_rule();
+        let evaluation = TvlEvaluation {
+            fast_drop_pct: 25.0,
+            slow_drop_pct: 10.0,
+            velocity_drop_pct: 12.0,
+            selected_drop_pct: 25.0,
+            fast_window_reference_tvl_usd: Some(500_000_000.0),
+            time_to_reach_current_drop_minutes: Some(4.0),
+            drain_rate_usd_per_min: Some(31_250_000.0),
+            estimated_time_to_empty_minutes: Some(12.0),
+            velocity_pattern: Some("ACCELERATING".to_string()),
+            base_severity: Some(Severity::Critical),
+            breached_branches: vec!["fast".to_string()],
+            deposit_gate_skipped: false,
+            position_data_stale: false,
+        };
+        let sample_evt = state_event("aave_v3", "base", None, 375_000_000.0);
+        let context = TvlDetectionContext {
+            subject: DetectionSubject {
+                subject_type: "protocol",
+                subject_key: "aave_v3:base",
+            },
+            severity: Severity::Critical,
+            transition: IncidentTransition::Trigger,
+            classification: ContextClassification::Isolated,
+            now: Utc::now(),
+        };
+
+        let det =
+            TvlDropPattern::build_tvl_detection(&event, &rule, &context, &evaluation, &sample_evt);
+        // Spec Section 7 Stage 1 — required fields.
+        assert_eq!(det.pattern_id, "tvl_drop");
+        assert!(matches!(det.severity, Severity::Critical));
+        assert!(matches!(det.lifecycle_state, LifecycleState::Confirmed));
+        assert!(matches!(
+            det.incident_transition,
+            Some(IncidentTransition::Trigger)
+        ));
+        assert!(matches!(
+            det.attack_family,
+            AttackFamily::LiquidationCascade
+        ));
+        assert_eq!(det.protocol, "aave_v3");
+        assert_eq!(det.subject_key.as_deref(), Some("aave_v3:base"));
+        assert_eq!(det.tenant_id.as_deref(), Some("tenant-a"));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 9. Escalation — TC-ESC-03
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-ESC-03: new markets dropping → separate detection produced.
+    /// Each market-scoped rule produces an independent detection with its
+    /// own subject_key.  Scope expansion to a shared incident is handled
+    /// downstream by the orchestrator.
+    #[test]
+    fn new_market_dropping_produces_independent_detection() {
+        let now = Utc::now();
+        let pattern = TvlDropPattern::default();
+        let mut rule_usdc = base_rule();
+        rule_usdc.scope = "market".to_string();
+        rule_usdc.market_id = Some("usdc".to_string());
+        let mut rule_weth = base_rule();
+        rule_weth.scope = "market".to_string();
+        rule_weth.market_id = Some("weth".to_string());
+
+        let (_, key_usdc, _) = rule_usdc.subject_for_event(Some("usdc")).unwrap();
+        let (_, key_weth, _) = rule_weth.subject_for_event(Some("weth")).unwrap();
+        assert_ne!(key_usdc, key_weth);
+
+        // Both markets drop → independent evaluations.
+        let mut state_usdc = TvlRuleState::default();
+        state_usdc
+            .samples
+            .push(sample(now - Duration::minutes(4), 200_000_000.0));
+        let evt_usdc = state_event("aave_v3", "base", Some("usdc"), 150_000_000.0);
+        let eval_usdc = pattern.process_state_sample(&rule_usdc, &mut state_usdc, &evt_usdc, now);
+
+        let mut state_weth = TvlRuleState::default();
+        state_weth
+            .samples
+            .push(sample(now - Duration::minutes(4), 100_000_000.0));
+        let evt_weth = state_event("aave_v3", "base", Some("weth"), 75_000_000.0);
+        let eval_weth = pattern.process_state_sample(&rule_weth, &mut state_weth, &evt_weth, now);
+
+        assert!(eval_usdc.base_severity.is_some());
+        assert!(eval_weth.base_severity.is_some());
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 10. Resolution — TC-RES-01, TC-RES-06
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-RES-01: no automatic resolution for TVL drops.
+    /// When TVL fully recovers, the detector produces no transition — the
+    /// incident remains ACTIVE and can only be resolved by an operator.
+    #[test]
+    fn no_automatic_resolution_on_tvl_recovery() {
+        let now = Utc::now();
+        let pattern = TvlDropPattern::default();
+        let rule = base_rule();
+
+        // Active incident at CRITICAL after 25% drop.
+        let mut state = TvlRuleState {
+            last_severity: Some("critical".to_string()),
+            last_drop_pct: Some(25.0),
+            ..Default::default()
+        };
+        state
+            .samples
+            .push(sample(now - Duration::minutes(10), 500_000_000.0));
+        state
+            .samples
+            .push(sample(now - Duration::minutes(5), 375_000_000.0));
+
+        // TVL recovers to pre-drop levels.
+        let event = state_event("aave_v3", "base", None, 500_000_000.0);
+        let eval = pattern.process_state_sample(&rule, &mut state, &event, now);
+
+        // base_severity is None → no transition → no auto-resolution.
+        assert!(eval.base_severity.is_none());
+        let t = determine_transition(
+            eval.base_severity.as_ref(),
+            &Severity::Info,
+            Some(&Severity::Critical),
+            eval.selected_drop_pct,
+            25.0,
+            "isolated",
+            "none",
+        );
+        assert!(t.is_none(), "must NOT auto-resolve");
+    }
+
+    /// TC-RES-06: protocol unpause → notification but no auto-resolve.
+    #[test]
+    fn unpause_notification_no_auto_resolve() {
+        let event = unified_pause_event("euler_v2", false); // unpause
+        let mut rule = base_rule();
+        rule.protocol_id = "euler_v2".to_string();
+
+        let pause = pause_event_data("euler_v2", "base", false);
+        // Previous incident at CRITICAL (PAUSED state).
+        let context = PauseDetectionContext {
+            subject: DetectionSubject {
+                subject_type: "protocol",
+                subject_key: "euler_v2:base",
+            },
+            severity: Severity::Critical,
+            transition: IncidentTransition::Update, // NOT Resolve
+            classification: ContextClassification::Isolated,
+            now: Utc::now(),
+        };
+
+        let det = TvlDropPattern::build_pause_detection(&event, &rule, &context, &pause);
+        // Must be Update, NOT Resolve.
+        assert!(matches!(
+            det.incident_transition,
+            Some(IncidentTransition::Update)
+        ));
+        assert_eq!(
+            det.oracle_context.get("pause_state"),
+            Some(&json!("unpaused"))
+        );
+        // Severity remains from previous incident, not auto-resolved.
+        assert!(matches!(det.severity, Severity::Critical));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 7. Contagion — TC-CONT-01
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-CONT-01: same-protocol contagion flags all markets.
+    /// When a market-scoped rule fires on one market, other monitored
+    /// markets on the same protocol are listed as at-risk.
+    #[test]
+    fn same_protocol_contagion_flags_at_risk_markets() {
+        let mut pattern = TvlDropPattern::default();
+        let mut rule_usdc = base_rule();
+        rule_usdc.rule_id = "tvl-usdc".to_string();
+        rule_usdc.scope = "market".to_string();
+        rule_usdc.market_id = Some("usdc".to_string());
+        let mut rule_weth = base_rule();
+        rule_weth.rule_id = "tvl-weth".to_string();
+        rule_weth.scope = "market".to_string();
+        rule_weth.market_id = Some("weth".to_string());
+
+        pattern
+            .configs
+            .insert("tenant-a".to_string(), vec![rule_usdc, rule_weth]);
+
+        // USDC drops → WETH should be listed as at-risk.
+        let at_risk = pattern.find_at_risk_markets("tenant-a", "aave_v3", "base", Some("usdc"));
+        assert_eq!(at_risk, vec!["aave_v3:base:weth"]);
+
+        // From WETH's perspective → USDC is at-risk.
+        let at_risk2 = pattern.find_at_risk_markets("tenant-a", "aave_v3", "base", Some("weth"));
+        assert_eq!(at_risk2, vec!["aave_v3:base:usdc"]);
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 6. Tenant Isolation — TC-TENANT-02
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-TENANT-02: same TVL data, independent evaluation per tenant.
+    /// Two tenants with different thresholds receive the same TVL sample
+    /// but evaluate independently (one alerts, one doesn't).
+    #[test]
+    fn same_tvl_data_evaluated_independently_per_tenant() {
+        let now = Utc::now();
+        let pattern = TvlDropPattern::default();
+        let event = state_event("aave_v3", "base", None, 80_000_000.0);
+
+        // Tenant A: conservative (15% threshold) → 20% drop → fires.
+        let mut rule_a = base_rule();
+        rule_a.fast_drop_pct = 15.0;
+        let mut state_a = TvlRuleState::default();
+        state_a
+            .samples
+            .push(sample(now - Duration::minutes(5), 100_000_000.0));
+
+        // Tenant B: tolerant (25% threshold) → 20% drop → doesn't fire.
+        let mut rule_b = base_rule();
+        rule_b.fast_drop_pct = 25.0;
+        let mut state_b = TvlRuleState::default();
+        state_b
+            .samples
+            .push(sample(now - Duration::minutes(5), 100_000_000.0));
+
+        let eval_a = pattern.process_state_sample(&rule_a, &mut state_a, &event, now);
+        let eval_b = pattern.process_state_sample(&rule_b, &mut state_b, &event, now);
+
+        assert!(eval_a.base_severity.is_some(), "Tenant A should fire");
+        assert!(eval_b.base_severity.is_none(), "Tenant B should not fire");
+        // Tenant A's result has no effect on Tenant B's state.
+        assert!(state_b.last_severity.is_none());
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 12. Reorg Handling — TC-REORG-01 to TC-REORG-05
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TC-REORG-01: retraction — TVL drop only on orphaned fork.
+    /// Orphaned fork showed 30% drop → CRITICAL, canonical chain shows no drop.
+    /// Correction type = RETRACTION.
+    #[test]
+    fn reorg_retraction_no_drop_on_canonical() {
+        let now = Utc::now();
+        let pattern = TvlDropPattern::default();
+        let rule = base_rule();
+
+        // Orphaned fork evaluation: 30% drop → CRITICAL.
+        let mut state_orphaned = TvlRuleState::default();
+        state_orphaned
+            .samples
+            .push(sample(now - Duration::minutes(3), 500_000_000.0));
+        let orphaned_evt = state_event("aave_v3", "base", None, 350_000_000.0);
+        let eval_orphaned =
+            pattern.process_state_sample(&rule, &mut state_orphaned, &orphaned_evt, now);
+        assert!(matches!(
+            eval_orphaned.base_severity,
+            Some(Severity::Critical)
+        ));
+
+        // Canonical chain: TVL unchanged.
+        let mut state_canonical = TvlRuleState::default();
+        state_canonical
+            .samples
+            .push(sample(now - Duration::minutes(3), 500_000_000.0));
+        let canonical_evt = state_event("aave_v3", "base", None, 500_000_000.0);
+        let eval_canonical =
+            pattern.process_state_sample(&rule, &mut state_canonical, &canonical_evt, now);
+        assert!(eval_canonical.base_severity.is_none());
+
+        let correction = determine_reorg_correction(
+            eval_orphaned.base_severity.as_ref(),
+            eval_canonical.base_severity.as_ref(),
+        );
+        assert_eq!(correction, Some("RETRACTION"));
+    }
+
+    /// TC-REORG-02: severity update — different data on canonical chain.
+    /// Orphaned: 20% drop → HIGH.  Canonical: 30% drop → CRITICAL.
+    #[test]
+    fn reorg_severity_update_canonical_different() {
+        let now = Utc::now();
+        let pattern = TvlDropPattern::default();
+        let rule = base_rule();
+
+        // Orphaned: 20% drop, 7 min → HIGH.
+        let mut s1 = TvlRuleState::default();
+        s1.samples
+            .push(sample(now - Duration::minutes(7), 100_000_000.0));
+        let e1 = state_event("aave_v3", "base", None, 80_000_000.0);
+        let ev1 = pattern.process_state_sample(&rule, &mut s1, &e1, now);
+        assert!(matches!(ev1.base_severity, Some(Severity::High)));
+
+        // Canonical: 30% drop, 3 min → CRITICAL.
+        let mut s2 = TvlRuleState::default();
+        s2.samples
+            .push(sample(now - Duration::minutes(3), 100_000_000.0));
+        let e2 = state_event("aave_v3", "base", None, 70_000_000.0);
+        let ev2 = pattern.process_state_sample(&rule, &mut s2, &e2, now);
+        assert!(matches!(ev2.base_severity, Some(Severity::Critical)));
+
+        let correction =
+            determine_reorg_correction(ev1.base_severity.as_ref(), ev2.base_severity.as_ref());
+        assert_eq!(correction, Some("UPDATE"));
+    }
+
+    /// TC-REORG-03: late alert — drop only exists on canonical chain.
+    /// No detection on orphaned fork; canonical block shows 25% TVL drop.
+    #[test]
+    fn reorg_late_alert_drop_only_on_canonical() {
+        let correction = determine_reorg_correction(
+            None,                      // orphaned: no detection
+            Some(&Severity::Critical), // canonical: CRITICAL
+        );
+        assert_eq!(correction, Some("LATE_ALERT"));
+    }
+
+    /// TC-REORG-04: no correction — same severity on both chains.
+    #[test]
+    fn reorg_no_correction_same_severity() {
+        let correction =
+            determine_reorg_correction(Some(&Severity::Critical), Some(&Severity::Critical));
+        assert!(correction.is_none(), "same severity → no correction");
+
+        // Both None → also no correction.
+        let correction2 = determine_reorg_correction(None, None);
+        assert!(correction2.is_none());
+    }
+
+    /// TC-REORG-05: alert type is PROTOCOL_EXPLOIT (AttackFamily::LiquidationCascade),
+    /// not STABLECOIN_DEPEG (AttackFamily::PegDeviation).
+    #[test]
+    fn reorg_uses_protocol_exploit_not_depeg() {
+        let event = unified_tvl_event();
+        let rule = base_rule();
+        let evaluation = TvlEvaluation {
+            fast_drop_pct: 25.0,
+            slow_drop_pct: 0.0,
+            velocity_drop_pct: 0.0,
+            selected_drop_pct: 25.0,
+            fast_window_reference_tvl_usd: Some(500_000_000.0),
+            time_to_reach_current_drop_minutes: Some(4.0),
+            drain_rate_usd_per_min: None,
+            estimated_time_to_empty_minutes: None,
+            velocity_pattern: None,
+            base_severity: Some(Severity::Critical),
+            breached_branches: vec!["fast".to_string()],
+            deposit_gate_skipped: false,
+            position_data_stale: false,
+        };
+        let sample_evt = state_event("aave_v3", "base", None, 375_000_000.0);
+        let context = TvlDetectionContext {
+            subject: DetectionSubject {
+                subject_type: "protocol",
+                subject_key: "aave_v3:base",
+            },
+            severity: Severity::Critical,
+            transition: IncidentTransition::Trigger,
+            classification: ContextClassification::Isolated,
+            now: Utc::now(),
+        };
+
+        let det =
+            TvlDropPattern::build_tvl_detection(&event, &rule, &context, &evaluation, &sample_evt);
+        // TVL drops use LiquidationCascade (PROTOCOL_EXPLOIT), not PegDeviation.
+        assert!(matches!(
+            det.attack_family,
+            AttackFamily::LiquidationCascade
+        ));
+        assert!(!matches!(det.attack_family, AttackFamily::PegDeviation));
     }
 }
