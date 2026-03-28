@@ -221,7 +221,7 @@ struct UtilizationSample {
 
 /// Persisted state for one `(rule_id, subject_key)` pair.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct UtilizationRuleState {
+pub(crate) struct UtilizationRuleState {
     /// Severity of the currently active incident, e.g. `"medium"`, `"high"`, `"critical"`.
     last_severity: Option<String>,
     /// When the current incident was first triggered.
@@ -236,6 +236,63 @@ struct UtilizationRuleState {
     resolution_block_counter: u32,
     /// Rolling window of utilization samples for rate-of-change.
     samples: Vec<UtilizationSample>,
+    /// Number of severity escalations during the current incident lifetime.
+    #[serde(default)]
+    escalation_count: u32,
+}
+
+/// Machine-readable recommended action per Spec Section 10.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum RecommendedAction {
+    EmergencyWithdraw,
+    MonitorForUnpause,
+    WithdrawMaxAvailable,
+    Monitor,
+}
+
+impl RecommendedAction {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::EmergencyWithdraw => "EMERGENCY_WITHDRAW",
+            Self::MonitorForUnpause => "MONITOR_FOR_UNPAUSE",
+            Self::WithdrawMaxAvailable => "WITHDRAW_MAX_AVAILABLE",
+            Self::Monitor => "MONITOR",
+        }
+    }
+}
+
+fn recommended_action_for(severity: &Severity, paused: bool) -> RecommendedAction {
+    if paused {
+        return RecommendedAction::MonitorForUnpause;
+    }
+    match severity {
+        Severity::Critical => RecommendedAction::EmergencyWithdraw,
+        Severity::High => RecommendedAction::WithdrawMaxAvailable,
+        _ => RecommendedAction::Monitor,
+    }
+}
+
+/// Outcome of evaluating a single utilization reading against one rule.
+/// Returned by [`evaluate_utilization_state`] and used by `process_event`
+/// and unit tests.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UtilizationEvalResult {
+    /// The event was suppressed by the TVL floor gate.
+    pub tvl_floor_suppressed: bool,
+    /// The lifecycle transition to emit, if any.
+    pub transition: Option<IncidentTransition>,
+    /// The severity to attach to the emitted detection (Trigger/Escalate only).
+    pub emit_severity: Option<Severity>,
+    /// The incident was auto-resolved in this evaluation.
+    pub resolved: bool,
+    /// The severity from which the incident resolved (set only when `resolved`).
+    pub resolved_from_severity: Option<Severity>,
+    /// Machine-readable recommended action (Spec Section 10).
+    pub recommended_action: Option<RecommendedAction>,
+    /// When the incident was first triggered (carried into resolution for duration calc).
+    pub incident_active_since: Option<DateTime<Utc>>,
+    /// Number of escalations that occurred during the incident lifetime.
+    pub escalation_count: u32,
 }
 
 // ─── Parsed event helpers ─────────────────────────────────────────────────────
@@ -522,6 +579,122 @@ fn rate_of_change(
     Some(current.utilization_pct - baseline.utilization_pct)
 }
 
+// ─── Pure evaluation logic ────────────────────────────────────────────────────
+
+/// Pure evaluation of a utilization reading against one rule.
+///
+/// Mutates `state` in place (rolling window, counters, severity tracking)
+/// and returns the lifecycle outcome without performing any I/O.  Used by
+/// `process_event` and directly by unit tests.
+pub(crate) fn evaluate_utilization_state(
+    rule: &UtilizationHighRule,
+    state: &mut UtilizationRuleState,
+    utilization_pct: f64,
+    tvl_usd: f64,
+    now: DateTime<Utc>,
+) -> UtilizationEvalResult {
+    let mut result = UtilizationEvalResult::default();
+
+    // Gate: TVL floor
+    if tvl_usd < rule.min_tvl_floor_usd && tvl_usd > 0.0 {
+        result.tvl_floor_suppressed = true;
+        return result;
+    }
+
+    // Update rolling utilization window (keep last 61 minutes)
+    state.samples.push(UtilizationSample {
+        observed_at: now,
+        utilization_pct,
+    });
+    state.samples.sort_by_key(|s| s.observed_at);
+    let window_cutoff = now - Duration::minutes(61);
+    state.samples.retain(|s| s.observed_at >= window_cutoff);
+
+    let previous_severity = severity_from_str(state.last_severity.as_deref());
+    let new_severity = classify_severity(utilization_pct, rule);
+
+    match (&previous_severity, &new_severity) {
+        (None, Some(sev)) => {
+            // First breach — Trigger
+            result.transition = Some(IncidentTransition::Trigger);
+            result.emit_severity = Some(sev.clone());
+            result.recommended_action = Some(recommended_action_for(sev, state.paused_status));
+            state.active_since = Some(now);
+            state.last_breach_at = Some(now);
+            state.last_severity = Some(severity_to_str(sev).to_string());
+            state.resolution_block_counter = 0;
+            state.escalation_count = 0;
+            state.last_transition_at = Some(now);
+        }
+        (Some(prev), Some(new)) => {
+            let prev_rank = severity_rank(Some(prev));
+            let new_rank = severity_rank(Some(new));
+            if new_rank > prev_rank {
+                // Escalate
+                result.transition = Some(IncidentTransition::Escalate);
+                result.emit_severity = Some(new.clone());
+                result.recommended_action = Some(recommended_action_for(new, state.paused_status));
+                state.last_severity = Some(severity_to_str(new).to_string());
+                state.last_breach_at = Some(now);
+                state.resolution_block_counter = 0;
+                state.escalation_count += 1;
+                state.last_transition_at = Some(now);
+            } else {
+                // Same or lower severity while incident is active → suppress
+                state.last_breach_at = Some(now);
+                state.resolution_block_counter = 0;
+            }
+        }
+        (Some(prev_sev), None) => {
+            // Below detection threshold — check resolution path
+            let resolution_threshold =
+                rule.resolution_threshold_for(state.last_severity.as_deref().unwrap_or("medium"));
+
+            if utilization_pct < resolution_threshold && !state.paused_status {
+                state.resolution_block_counter += 1;
+                if state.resolution_block_counter >= rule.resolution_confirmation_blocks {
+                    // Resolve — capture incident metadata before clearing state
+                    result.transition = Some(IncidentTransition::Resolve);
+                    result.resolved = true;
+                    result.resolved_from_severity = Some(prev_sev.clone());
+                    result.incident_active_since = state.active_since;
+                    result.escalation_count = state.escalation_count;
+                    state.last_severity = None;
+                    state.active_since = None;
+                    state.last_breach_at = None;
+                    state.last_transition_at = Some(now);
+                    state.resolution_block_counter = 0;
+                    state.escalation_count = 0;
+                }
+            } else if utilization_pct >= resolution_threshold {
+                // Still above resolution threshold — reset counter
+                state.resolution_block_counter = 0;
+            }
+            // paused_status == true: don't advance the counter
+        }
+        (None, None) => {
+            // No incident, no breach — nothing to do
+        }
+    }
+
+    // Populate recommended_action for active incidents that didn't transition
+    if result.recommended_action.is_none() {
+        if let Some(ref sev_str) = state.last_severity {
+            if let Some(sev) = severity_from_str(Some(sev_str)) {
+                result.recommended_action = Some(recommended_action_for(&sev, state.paused_status));
+            }
+        }
+    }
+    result.incident_active_since = result.incident_active_since.or(state.active_since);
+    result.escalation_count = if state.escalation_count > 0 {
+        state.escalation_count
+    } else {
+        result.escalation_count
+    };
+
+    result
+}
+
 // ─── Pattern struct ───────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -540,6 +713,15 @@ struct UtilizationDetectionContext<'a> {
     severity: &'a Severity,
     transition: &'a IncidentTransition,
     observed_at: DateTime<Utc>,
+}
+
+struct ResolveDetectionContext<'a> {
+    subject_type: &'a str,
+    subject_key: &'a str,
+    resolved_severity: &'a Severity,
+    observed_at: DateTime<Utc>,
+    incident_active_since: Option<DateTime<Utc>>,
+    escalation_count: u32,
 }
 
 impl UtilizationHighPattern {
@@ -596,6 +778,12 @@ impl UtilizationHighPattern {
         oracle_context.insert(
             "transition".to_string(),
             json!(format!("{:?}", context.transition).to_ascii_lowercase()),
+        );
+        let action = recommended_action_for(context.severity, state.paused_status);
+        oracle_context.insert("recommended_action".to_string(), json!(action.as_str()));
+        oracle_context.insert(
+            "escalation_count".to_string(),
+            json!(state.escalation_count),
         );
 
         let risk_score_val = risk_score_for_severity(context.severity);
@@ -671,13 +859,15 @@ impl UtilizationHighPattern {
     fn build_resolve_detection(
         event: &UnifiedEvent,
         rule: &UtilizationHighRule,
-        subject_type: &str,
-        subject_key: &str,
-        resolved_severity: &Severity,
+        context: &ResolveDetectionContext<'_>,
         sample: &UtilizationStateEvent,
-        now: DateTime<Utc>,
     ) -> DetectionResult {
         let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
+
+        let duration_sec = context
+            .incident_active_since
+            .map(|start| (context.observed_at - start).num_seconds())
+            .unwrap_or(0);
 
         let mut oracle_context = HashMap::new();
         oracle_context.insert("protocol_id".to_string(), json!(sample.protocol_id));
@@ -688,16 +878,29 @@ impl UtilizationHighPattern {
             json!(sample.utilization_pct),
         );
         oracle_context.insert("transition".to_string(), json!("resolve"));
+        oracle_context.insert("incident_duration_sec".to_string(), json!(duration_sec));
+        oracle_context.insert(
+            "escalation_occurred".to_string(),
+            json!(context.escalation_count > 0),
+        );
+        oracle_context.insert(
+            "escalation_count".to_string(),
+            json!(context.escalation_count),
+        );
+        oracle_context.insert(
+            "original_severity".to_string(),
+            json!(severity_to_str(context.resolved_severity)),
+        );
 
         DetectionResult {
             detection_id: Uuid::new_v4(),
             pattern_id: PATTERN_ID.to_string(),
             event_key: Some(format!(
                 "utilization_high:{}:{}:{}",
-                event.tenant_id, rule.rule_id, subject_key
+                event.tenant_id, rule.rule_id, context.subject_key
             )),
-            subject_type: Some(subject_type.to_string()),
-            subject_key: Some(subject_key.to_string()),
+            subject_type: Some(context.subject_type.to_string()),
+            subject_key: Some(context.subject_key.to_string()),
             tenant_id: Some(event.tenant_id.clone()),
             chain: chain_from_slug(&sample.chain_slug),
             chain_slug: sample.chain_slug.clone(),
@@ -705,7 +908,7 @@ impl UtilizationHighPattern {
             lifecycle_state: LifecycleState::Resolved,
             requires_confirmation: false,
             attack_family: AttackFamily::HighUtilization,
-            severity: resolved_severity.clone(),
+            severity: context.resolved_severity.clone(),
             description: Some(format!(
                 "High utilization incident resolved: {:.2}% in {}/{} ({}).",
                 sample.utilization_pct,
@@ -748,7 +951,7 @@ impl UtilizationHighPattern {
             ],
             is_simulated,
             simulation_run_id,
-            created_at: now,
+            created_at: context.observed_at,
         }
     }
 
@@ -887,12 +1090,6 @@ impl DetectionPattern for UtilizationHighPattern {
 
         // ── Branch 1: utilization state update ───────────────────────────────
         if let Some(sample) = parse_utilization_state_event(event) {
-            // Gate: TVL floor
-            if sample.tvl_usd < DEFAULT_MIN_TVL_FLOOR_USD.min(1.0) {
-                // Per-rule floor is checked inside the loop; this is a fast-path for
-                // obvious zero-TVL events.
-            }
-
             let mut emitted: Option<DetectionResult> = None;
 
             for rule in rules.iter().filter(|r| {
@@ -903,18 +1100,6 @@ impl DetectionPattern for UtilizationHighPattern {
                         sample.market_id.as_deref(),
                     )
             }) {
-                // Gate: per-rule TVL floor
-                if sample.tvl_usd < rule.min_tvl_floor_usd && sample.tvl_usd > 0.0 {
-                    tracing::debug!(
-                        tenant_id = %event.tenant_id,
-                        rule_id = %rule.rule_id,
-                        tvl_usd = sample.tvl_usd,
-                        floor = rule.min_tvl_floor_usd,
-                        "utilization event suppressed — market below TVL floor"
-                    );
-                    continue;
-                }
-
                 let Some((subject_type, subject_key, _protocol_chain_key)) =
                     rule.subject_for_event(sample.market_id.as_deref())
                 else {
@@ -931,101 +1116,50 @@ impl DetectionPattern for UtilizationHighPattern {
                     .and_then(|v| serde_json::from_value(v).ok())
                     .unwrap_or_default();
 
-                // Update rolling utilization window (keep last 61 minutes)
-                state.samples.push(UtilizationSample {
-                    observed_at: now,
-                    utilization_pct: sample.utilization_pct,
-                });
-                state.samples.sort_by_key(|s| s.observed_at);
-                let window_cutoff = now - Duration::minutes(61);
-                state.samples.retain(|s| s.observed_at >= window_cutoff);
+                // Pure evaluation — all lifecycle logic delegated here
+                let eval = evaluate_utilization_state(
+                    rule,
+                    &mut state,
+                    sample.utilization_pct,
+                    sample.tvl_usd,
+                    now,
+                );
 
-                let previous_severity = severity_from_str(state.last_severity.as_deref());
-
-                // Step 2: classify new severity
-                let new_severity = classify_severity(sample.utilization_pct, rule);
-
-                // Determine what transition (if any) to emit
-                let mut transition: Option<IncidentTransition> = None;
-                let mut do_resolve = false;
-
-                match (&previous_severity, &new_severity) {
-                    (None, Some(_sev)) => {
-                        // First breach — Trigger
-                        transition = Some(IncidentTransition::Trigger);
-                        state.active_since = Some(now);
-                        state.last_breach_at = Some(now);
-                        state.last_severity =
-                            Some(severity_to_str(new_severity.as_ref().unwrap()).to_string());
-                        state.resolution_block_counter = 0;
-                    }
-                    (Some(prev), Some(new)) => {
-                        let prev_rank = severity_rank(Some(prev));
-                        let new_rank = severity_rank(Some(new));
-                        if new_rank > prev_rank {
-                            // Escalate
-                            transition = Some(IncidentTransition::Escalate);
-                            state.last_severity = Some(severity_to_str(new).to_string());
-                            state.last_breach_at = Some(now);
-                            state.resolution_block_counter = 0;
-                        } else {
-                            // Same or lower severity while incident is active → suppress
-                            state.last_breach_at = Some(now);
-                            state.resolution_block_counter = 0;
-                        }
-                    }
-                    (Some(prev_sev_str), None) => {
-                        // Below detection threshold — check resolution path
-                        let resolution_threshold = rule.resolution_threshold_for(
-                            state.last_severity.as_deref().unwrap_or("medium"),
-                        );
-
-                        if sample.utilization_pct < resolution_threshold && !state.paused_status {
-                            state.resolution_block_counter += 1;
-                            if state.resolution_block_counter >= rule.resolution_confirmation_blocks
-                            {
-                                // Emit resolution
-                                do_resolve = true;
-                                let resolved_severity_enum = prev_sev_str.clone();
-                                let resolve_detection = Self::build_resolve_detection(
-                                    event,
-                                    rule,
-                                    &subject_type,
-                                    &subject_key,
-                                    &resolved_severity_enum,
-                                    &sample,
-                                    now,
-                                );
-                                state.last_severity = None;
-                                state.active_since = None;
-                                state.last_breach_at = None;
-                                state.last_transition_at = Some(now);
-                                state.resolution_block_counter = 0;
-                                emitted = pick_higher(emitted, resolve_detection);
-                            }
-                            // else: counter incrementing — keep monitoring
-                        } else if sample.utilization_pct >= resolution_threshold {
-                            // Still above resolution threshold — reset counter
-                            state.resolution_block_counter = 0;
-                        }
-                        // paused_status == true: don't advance the counter
-                    }
-                    (None, None) => {
-                        // No incident, no breach — nothing to do
-                    }
+                if eval.tvl_floor_suppressed {
+                    tracing::debug!(
+                        tenant_id = %event.tenant_id,
+                        rule_id = %rule.rule_id,
+                        tvl_usd = sample.tvl_usd,
+                        floor = rule.min_tvl_floor_usd,
+                        "utilization event suppressed — market below TVL floor"
+                    );
+                    continue;
                 }
 
-                if let Some(ref t) = transition {
-                    state.last_transition_at = Some(now);
-                    let sev_ref = new_severity.as_ref().unwrap();
+                // Build detection result from evaluation outcome
+                if eval.resolved {
+                    let resolve_context = ResolveDetectionContext {
+                        subject_type: &subject_type,
+                        subject_key: &subject_key,
+                        resolved_severity: eval.resolved_from_severity.as_ref().unwrap(),
+                        observed_at: now,
+                        incident_active_since: eval.incident_active_since,
+                        escalation_count: eval.escalation_count,
+                    };
+                    let resolve_detection =
+                        Self::build_resolve_detection(event, rule, &resolve_context, &sample);
+                    emitted = pick_higher(emitted, resolve_detection);
+                } else if let (Some(ref transition), Some(ref severity)) =
+                    (&eval.transition, &eval.emit_severity)
+                {
                     let detection = Self::build_utilization_detection(
                         event,
                         rule,
                         &UtilizationDetectionContext {
                             subject_type: &subject_type,
                             subject_key: &subject_key,
-                            severity: sev_ref,
-                            transition: t,
+                            severity,
+                            transition,
                             observed_at: now,
                         },
                         &sample,
@@ -1045,8 +1179,8 @@ impl DetectionPattern for UtilizationHighPattern {
                     "last_severity": state.last_severity,
                     "resolution_block_counter": state.resolution_block_counter,
                     "paused_status": state.paused_status,
-                    "incident_transition": transition.as_ref().map(|t| format!("{t:?}").to_ascii_lowercase()),
-                    "do_resolve": do_resolve,
+                    "incident_transition": eval.transition.as_ref().map(|t| format!("{t:?}").to_ascii_lowercase()),
+                    "do_resolve": eval.resolved,
                 });
                 let _ = repo
                     .insert_pattern_snapshot(PatternSnapshotInsert {
@@ -1068,6 +1202,37 @@ impl DetectionPattern for UtilizationHighPattern {
                     )
                     .await;
                 self.state_cache.insert(cache_key, state);
+            }
+
+            // Enrich with concurrent_market_alerts: list other active incidents
+            // for the same tenant + protocol (Spec Sections 11.3, 12).
+            if let Some(ref mut detection) = emitted {
+                let tenant_prefix = format!("{}:", event.tenant_id);
+                let concurrent: Vec<Value> = self
+                    .state_cache
+                    .iter()
+                    .filter(|(k, s)| {
+                        k.starts_with(&tenant_prefix)
+                            && s.last_severity.is_some()
+                            && Some(k.as_str())
+                                != detection.event_key.as_deref().map(|ek| {
+                                    // strip "utilization_high:" prefix to match cache key format
+                                    ek.strip_prefix("utilization_high:").unwrap_or(ek)
+                                })
+                    })
+                    .map(|(k, s)| {
+                        json!({
+                            "state_key": k,
+                            "severity": s.last_severity,
+                            "active_since": s.active_since,
+                        })
+                    })
+                    .collect();
+                if !concurrent.is_empty() {
+                    detection
+                        .oracle_context
+                        .insert("concurrent_market_alerts".to_string(), json!(concurrent));
+                }
             }
 
             return Ok(emitted);
@@ -1177,15 +1342,18 @@ fn pick_higher(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use event_schema::SourceType;
     use serde_json::json;
+
+    // ─── Helpers ──────────────────────────────────────────────────────────
 
     fn base_rule() -> UtilizationHighRule {
         UtilizationHighRule {
             rule_id: "util-default".to_string(),
             protocol_id: "aave_v3".to_string(),
             chain_slug: "base".to_string(),
-            scope: "protocol".to_string(),
-            market_id: None,
+            scope: "market".to_string(),
+            market_id: Some("usdc".to_string()),
             medium_threshold_pct: 90.0,
             high_threshold_pct: 95.0,
             critical_threshold_pct: 99.0,
@@ -1197,6 +1365,948 @@ mod tests {
             enabled: true,
         }
     }
+
+    fn state_with_incident(severity: &str, now: DateTime<Utc>) -> UtilizationRuleState {
+        UtilizationRuleState {
+            last_severity: Some(severity.to_string()),
+            active_since: Some(now - Duration::minutes(5)),
+            last_breach_at: Some(now - Duration::seconds(12)),
+            last_transition_at: Some(now - Duration::minutes(5)),
+            paused_status: false,
+            resolution_block_counter: 0,
+            samples: vec![],
+            escalation_count: 0,
+        }
+    }
+
+    /// Shorthand: evaluate with TVL well above floor.
+    fn eval(
+        rule: &UtilizationHighRule,
+        state: &mut UtilizationRuleState,
+        utilization_pct: f64,
+    ) -> UtilizationEvalResult {
+        evaluate_utilization_state(rule, state, utilization_pct, 100_000_000.0, Utc::now())
+    }
+
+    fn eval_at(
+        rule: &UtilizationHighRule,
+        state: &mut UtilizationRuleState,
+        utilization_pct: f64,
+        tvl_usd: f64,
+        now: DateTime<Utc>,
+    ) -> UtilizationEvalResult {
+        evaluate_utilization_state(rule, state, utilization_pct, tvl_usd, now)
+    }
+
+    // ═══ Section 2: Gate Checks — Spec Section 8 Step 1 ══════════════════
+
+    /// TC-GATE-01: TVL below minimum floor — skip detection
+    #[test]
+    fn tc_gate_01_tvl_below_floor_suppresses() {
+        let rule = base_rule(); // floor = $500K
+        let mut state = UtilizationRuleState::default();
+        let result = eval_at(&rule, &mut state, 97.0, 400_000.0, Utc::now());
+        assert!(result.tvl_floor_suppressed);
+        assert!(result.transition.is_none());
+    }
+
+    /// TC-GATE-02: TVL at exactly the floor — proceed with detection
+    #[test]
+    fn tc_gate_02_tvl_at_floor_proceeds() {
+        let rule = base_rule();
+        let mut state = UtilizationRuleState::default();
+        let result = eval_at(&rule, &mut state, 96.0, 500_000.0, Utc::now());
+        assert!(!result.tvl_floor_suppressed);
+        assert!(matches!(
+            result.transition,
+            Some(IncidentTransition::Trigger)
+        ));
+        assert!(matches!(result.emit_severity, Some(Severity::High)));
+    }
+
+    /// TC-GATE-03: Utilization data null — parser returns None, no signal
+    #[test]
+    fn tc_gate_03_null_utilization_returns_none() {
+        let event = UnifiedEvent {
+            event_id: "evt-1".into(),
+            tenant_id: "t".into(),
+            source_id: "s".into(),
+            source_type: SourceType::EvmChain,
+            event_type: "protocol_state".into(),
+            timestamp: Utc::now(),
+            payload: json!({
+                "protocol_id": "aave_v3",
+                "metric": "utilization",
+                "total_supplied": 0
+                // utilization field omitted → division by zero guard
+            }),
+            chain_id: Some(8453),
+            block_number: Some(1),
+            tx_hash: None,
+            market_key: None,
+            price: None,
+        };
+        assert!(parse_utilization_state_event(&event).is_none());
+    }
+
+    /// TC-GATE-04: tenant_has_deposit defaults to true in MVP (gate is a no-op)
+    #[test]
+    fn tc_gate_04_tenant_has_deposit_always_true() {
+        let rule = base_rule();
+        let mut state = UtilizationRuleState::default();
+        let result = eval(&rule, &mut state, 96.0);
+        // No deposit gate in MVP — detection fires regardless
+        assert!(matches!(
+            result.transition,
+            Some(IncidentTransition::Trigger)
+        ));
+    }
+
+    // ═══ Section 3: Severity Classification — Spec Section 8 Step 2 ══════
+
+    /// TC-SEV-01: CRITICAL — at or above 99%
+    #[test]
+    fn tc_sev_01_critical_at_99_5() {
+        assert!(matches!(
+            classify_severity(99.5, &base_rule()),
+            Some(Severity::Critical)
+        ));
+    }
+
+    /// TC-SEV-02: HIGH — at or above 95%, below 99%
+    #[test]
+    fn tc_sev_02_high_at_96_2() {
+        assert!(matches!(
+            classify_severity(96.2, &base_rule()),
+            Some(Severity::High)
+        ));
+    }
+
+    /// TC-SEV-03: MEDIUM — at or above 90%, below 95%
+    #[test]
+    fn tc_sev_03_medium_at_92() {
+        assert!(matches!(
+            classify_severity(92.0, &base_rule()),
+            Some(Severity::Medium)
+        ));
+    }
+
+    /// TC-SEV-04: Below medium threshold — no alert
+    #[test]
+    fn tc_sev_04_below_medium_no_alert() {
+        assert!(classify_severity(88.0, &base_rule()).is_none());
+    }
+
+    /// TC-SEV-05: Boundary — exactly at medium threshold (>= condition)
+    #[test]
+    fn tc_sev_05_exactly_medium() {
+        assert!(matches!(
+            classify_severity(90.0, &base_rule()),
+            Some(Severity::Medium)
+        ));
+    }
+
+    /// TC-SEV-06: Boundary — exactly at high threshold
+    #[test]
+    fn tc_sev_06_exactly_high() {
+        assert!(matches!(
+            classify_severity(95.0, &base_rule()),
+            Some(Severity::High)
+        ));
+    }
+
+    /// TC-SEV-07: Boundary — exactly at critical threshold
+    #[test]
+    fn tc_sev_07_exactly_critical() {
+        assert!(matches!(
+            classify_severity(99.0, &base_rule()),
+            Some(Severity::Critical)
+        ));
+    }
+
+    /// TC-SEV-08: Boundary — just below medium threshold
+    #[test]
+    fn tc_sev_08_just_below_medium() {
+        assert!(classify_severity(89.9, &base_rule()).is_none());
+    }
+
+    /// TC-SEV-09: Rate of change is informational only — does not affect severity
+    #[test]
+    fn tc_sev_09_rate_of_change_informational() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = UtilizationRuleState::default();
+        // Pre-fill sample showing rapid rise
+        state.samples.push(UtilizationSample {
+            observed_at: now - Duration::minutes(10),
+            utilization_pct: 77.5,
+        });
+        let result = eval_at(&rule, &mut state, 92.0, 100_000_000.0, now);
+        // Severity is MEDIUM (92% >= 90%), NOT escalated by rate of change
+        assert!(matches!(result.emit_severity, Some(Severity::Medium)));
+        // Rate of change is computed from samples (informational only)
+        let roc = rate_of_change(&state.samples, now, 10);
+        assert!(roc.is_some());
+        assert!((roc.unwrap() - 14.5).abs() < 0.01);
+    }
+
+    // ═══ Section 4: Deduplication — Spec Section 8 Step 3 ════════════════
+
+    /// TC-DUP-01: Same severity — suppress, no duplicate
+    #[test]
+    fn tc_dup_01_same_severity_suppressed() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("high", now);
+        let result = eval_at(&rule, &mut state, 96.0, 100_000_000.0, now);
+        assert!(result.transition.is_none());
+        assert!(result.emit_severity.is_none());
+        assert_eq!(state.last_severity.as_deref(), Some("high"));
+    }
+
+    /// TC-DUP-02: Higher severity — escalate existing incident
+    #[test]
+    fn tc_dup_02_higher_severity_escalates() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("medium", now);
+        let result = eval_at(&rule, &mut state, 96.0, 100_000_000.0, now);
+        assert!(matches!(
+            result.transition,
+            Some(IncidentTransition::Escalate)
+        ));
+        assert!(matches!(result.emit_severity, Some(Severity::High)));
+        assert_eq!(state.last_severity.as_deref(), Some("high"));
+    }
+
+    /// TC-DUP-03: Lower severity — no de-escalation
+    #[test]
+    fn tc_dup_03_lower_severity_no_deescalation() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("high", now);
+        // Utilization at 92% → MEDIUM, but incident stays HIGH
+        let result = eval_at(&rule, &mut state, 92.0, 100_000_000.0, now);
+        assert!(result.transition.is_none());
+        assert_eq!(state.last_severity.as_deref(), Some("high"));
+    }
+
+    /// TC-DUP-04: Dedup key includes market_id — different markets are separate
+    #[test]
+    fn tc_dup_04_different_markets_separate_incidents() {
+        let mut rule_usdc = base_rule();
+        rule_usdc.market_id = Some("usdc".to_string());
+
+        let mut rule_weth = base_rule();
+        rule_weth.rule_id = "util-weth".to_string();
+        rule_weth.market_id = Some("weth".to_string());
+
+        let now = Utc::now();
+        let mut state_usdc = UtilizationRuleState::default();
+        let mut state_weth = UtilizationRuleState::default();
+
+        let r1 = eval_at(&rule_usdc, &mut state_usdc, 96.0, 100_000_000.0, now);
+        let r2 = eval_at(&rule_weth, &mut state_weth, 92.0, 100_000_000.0, now);
+
+        assert!(matches!(r1.emit_severity, Some(Severity::High)));
+        assert!(matches!(r2.emit_severity, Some(Severity::Medium)));
+
+        // State keys would differ
+        let key1 = UtilizationHighPattern::state_key("util-default", "aave_v3:base:usdc");
+        let key2 = UtilizationHighPattern::state_key("util-weth", "aave_v3:base:weth");
+        assert_ne!(key1, key2);
+    }
+
+    // ═══ Section 5: Auto-Resolution — Spec Section 8 Step 4, Section 13 ══
+
+    /// TC-RES-01: CRITICAL resolves below resolution_critical_pct for 10 blocks
+    #[test]
+    fn tc_res_01_critical_resolves_after_10_blocks() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("critical", now);
+
+        for i in 0..9 {
+            let t = now + Duration::seconds(12 * (i + 1));
+            let r = eval_at(&rule, &mut state, 89.0, 100_000_000.0, t);
+            assert!(!r.resolved, "should not resolve at block {}", i + 1);
+            assert_eq!(state.resolution_block_counter, (i + 1) as u32);
+        }
+        // 10th block → resolves
+        let t = now + Duration::seconds(120);
+        let r = eval_at(&rule, &mut state, 89.0, 100_000_000.0, t);
+        assert!(r.resolved);
+        assert!(matches!(r.transition, Some(IncidentTransition::Resolve)));
+        assert!(matches!(r.resolved_from_severity, Some(Severity::Critical)));
+        assert!(state.last_severity.is_none());
+    }
+
+    /// TC-RES-02: HIGH resolves below resolution_high_pct for 10 blocks
+    #[test]
+    fn tc_res_02_high_resolves_after_10_blocks() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("high", now);
+
+        for i in 0..9 {
+            let t = now + Duration::seconds(12 * (i + 1));
+            eval_at(&rule, &mut state, 87.0, 100_000_000.0, t);
+        }
+        let t = now + Duration::seconds(120);
+        let r = eval_at(&rule, &mut state, 87.0, 100_000_000.0, t);
+        assert!(r.resolved);
+        assert!(matches!(r.resolved_from_severity, Some(Severity::High)));
+    }
+
+    /// TC-RES-03: MEDIUM resolves below resolution_medium_pct for 10 blocks
+    #[test]
+    fn tc_res_03_medium_resolves_after_10_blocks() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("medium", now);
+
+        for i in 0..9 {
+            let t = now + Duration::seconds(12 * (i + 1));
+            eval_at(&rule, &mut state, 84.0, 100_000_000.0, t);
+        }
+        let t = now + Duration::seconds(120);
+        let r = eval_at(&rule, &mut state, 84.0, 100_000_000.0, t);
+        assert!(r.resolved);
+        assert!(matches!(r.resolved_from_severity, Some(Severity::Medium)));
+    }
+
+    /// TC-RES-04: Counter resets when utilization rises back above resolution threshold
+    #[test]
+    fn tc_res_04_counter_resets_on_bounce() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("high", now);
+
+        // 7 blocks below resolution_high_pct (88%)
+        for i in 0..7 {
+            let t = now + Duration::seconds(12 * (i + 1));
+            eval_at(&rule, &mut state, 87.0, 100_000_000.0, t);
+        }
+        assert_eq!(state.resolution_block_counter, 7);
+
+        // Block 8: utilization rises to 89% (above resolution_high_pct 88%)
+        let t = now + Duration::seconds(96);
+        let r = eval_at(&rule, &mut state, 89.0, 100_000_000.0, t);
+        assert!(!r.resolved);
+        assert_eq!(state.resolution_block_counter, 0);
+        assert_eq!(state.last_severity.as_deref(), Some("high"));
+    }
+
+    /// TC-RES-05: No resolution at exactly the resolution threshold
+    /// Condition is `< resolution_threshold`, NOT `<=`
+    #[test]
+    fn tc_res_05_no_resolution_at_exact_threshold() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("high", now);
+
+        // utilization = 88.0% (exactly resolution_high_pct)
+        let r = eval_at(&rule, &mut state, 88.0, 100_000_000.0, now);
+        assert!(!r.resolved);
+        assert_eq!(state.resolution_block_counter, 0); // NOT incremented
+    }
+
+    /// TC-RES-06: CRITICAL at 91% — still above resolution threshold
+    #[test]
+    fn tc_res_06_critical_91_pct_stays_active() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("critical", now);
+
+        // 91% is above resolution_critical_pct (90%)
+        // 91% >= 90% medium threshold → new_severity=Medium → lower → suppress
+        let r = eval_at(&rule, &mut state, 91.0, 100_000_000.0, now);
+        assert!(!r.resolved);
+        assert!(r.transition.is_none()); // no de-escalation
+        assert_eq!(state.last_severity.as_deref(), Some("critical"));
+    }
+
+    /// TC-RES-07: Protocol pause suspends auto-resolution
+    #[test]
+    fn tc_res_07_pause_suspends_resolution() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("critical", now);
+        state.paused_status = true;
+
+        for i in 0..20 {
+            let t = now + Duration::seconds(12 * (i + 1));
+            let r = eval_at(&rule, &mut state, 50.0, 100_000_000.0, t);
+            assert!(!r.resolved, "must never resolve while paused");
+        }
+        assert_eq!(state.resolution_block_counter, 0);
+        assert_eq!(state.last_severity.as_deref(), Some("critical"));
+    }
+
+    /// TC-RES-08: Auto-resolution resumes after unpause
+    #[test]
+    fn tc_res_08_resolution_resumes_after_unpause() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("critical", now);
+        state.paused_status = true;
+
+        // 5 blocks while paused — counter stays 0
+        for i in 0..5 {
+            let t = now + Duration::seconds(12 * (i + 1));
+            eval_at(&rule, &mut state, 85.0, 100_000_000.0, t);
+        }
+        assert_eq!(state.resolution_block_counter, 0);
+
+        // Unpause
+        state.paused_status = false;
+
+        // 10 blocks below resolution_critical_pct (90%)
+        for i in 0..10 {
+            let t = now + Duration::seconds(12 * (i + 6));
+            let r = eval_at(&rule, &mut state, 85.0, 100_000_000.0, t);
+            if i < 9 {
+                assert!(!r.resolved);
+            } else {
+                assert!(r.resolved);
+                assert!(matches!(r.resolved_from_severity, Some(Severity::Critical)));
+            }
+        }
+    }
+
+    /// TC-RES-09: Resolution clears all incident state
+    #[test]
+    fn tc_res_09_resolution_clears_incident_state() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("high", now);
+        state.active_since = Some(now - Duration::minutes(30));
+
+        for i in 0..10 {
+            let t = now + Duration::seconds(12 * (i + 1));
+            eval_at(&rule, &mut state, 87.0, 100_000_000.0, t);
+        }
+
+        assert!(state.last_severity.is_none());
+        assert!(state.active_since.is_none());
+        assert!(state.last_breach_at.is_none());
+        assert_eq!(state.resolution_block_counter, 0);
+    }
+
+    // ═══ Section 6: Escalation — Spec Section 11 ═════════════════════════
+
+    /// TC-ESC-01: MEDIUM escalates to HIGH
+    #[test]
+    fn tc_esc_01_medium_to_high() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("medium", now);
+
+        let r = eval_at(&rule, &mut state, 96.0, 100_000_000.0, now);
+        assert!(matches!(r.transition, Some(IncidentTransition::Escalate)));
+        assert!(matches!(r.emit_severity, Some(Severity::High)));
+        assert_eq!(state.last_severity.as_deref(), Some("high"));
+        // Resolution threshold now tracks HIGH's threshold
+        assert_eq!(rule.resolution_threshold_for("high"), 88.0);
+    }
+
+    /// TC-ESC-02: HIGH escalates to CRITICAL
+    #[test]
+    fn tc_esc_02_high_to_critical() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("high", now);
+
+        let r = eval_at(&rule, &mut state, 99.2, 100_000_000.0, now);
+        assert!(matches!(r.transition, Some(IncidentTransition::Escalate)));
+        assert!(matches!(r.emit_severity, Some(Severity::Critical)));
+        assert_eq!(state.last_severity.as_deref(), Some("critical"));
+    }
+
+    /// TC-ESC-03: MEDIUM escalates directly to CRITICAL (skip HIGH)
+    #[test]
+    fn tc_esc_03_medium_to_critical_skip_high() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("medium", now);
+
+        let r = eval_at(&rule, &mut state, 99.5, 100_000_000.0, now);
+        assert!(matches!(r.transition, Some(IncidentTransition::Escalate)));
+        assert!(matches!(r.emit_severity, Some(Severity::Critical)));
+        assert_eq!(state.last_severity.as_deref(), Some("critical"));
+    }
+
+    /// TC-ESC-04: No de-escalation — resolves entirely instead
+    #[test]
+    fn tc_esc_04_no_deescalation_resolves_instead() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("critical", now);
+
+        // Utilization drops to 87% — below medium threshold
+        let r = eval_at(&rule, &mut state, 87.0, 100_000_000.0, now);
+        assert!(!r.resolved); // counter = 1, need 10
+        assert!(r.transition.is_none());
+        assert_eq!(state.last_severity.as_deref(), Some("critical")); // NOT de-escalated
+
+        // 9 more blocks → resolves entirely (no de-escalation to HIGH)
+        for i in 1..10 {
+            let t = now + Duration::seconds(12 * i);
+            eval_at(&rule, &mut state, 87.0, 100_000_000.0, t);
+        }
+        assert!(state.last_severity.is_none()); // fully resolved
+    }
+
+    // ═══ Section 7: Multi-Market and Contagion — Spec Sections 11.3, 12 ══
+
+    /// TC-MULTI-01: Multiple markets create independent incidents
+    #[test]
+    fn tc_multi_01_independent_per_market() {
+        let mut rule_usdc = base_rule();
+        rule_usdc.market_id = Some("usdc".to_string());
+
+        let mut rule_eth = base_rule();
+        rule_eth.rule_id = "util-eth".to_string();
+        rule_eth.market_id = Some("eth".to_string());
+
+        let now = Utc::now();
+        let mut s_usdc = UtilizationRuleState::default();
+        let mut s_eth = UtilizationRuleState::default();
+
+        let r_usdc = eval_at(&rule_usdc, &mut s_usdc, 96.0, 100_000_000.0, now);
+        let r_eth = eval_at(&rule_eth, &mut s_eth, 92.0, 100_000_000.0, now);
+
+        // USDC: HIGH, ETH: MEDIUM — independent
+        assert!(matches!(r_usdc.emit_severity, Some(Severity::High)));
+        assert!(matches!(r_eth.emit_severity, Some(Severity::Medium)));
+    }
+
+    /// TC-MULTI-02: No cross-protocol linking for utilization alerts
+    #[test]
+    fn tc_multi_02_no_cross_protocol_linking() {
+        let rule_aave = base_rule();
+
+        let mut rule_morpho = base_rule();
+        rule_morpho.rule_id = "util-morpho".to_string();
+        rule_morpho.protocol_id = "morpho_blue".to_string();
+
+        let now = Utc::now();
+        let mut s_aave = UtilizationRuleState::default();
+        let mut s_morpho = UtilizationRuleState::default();
+
+        let r1 = eval_at(&rule_aave, &mut s_aave, 96.0, 100_000_000.0, now);
+        let r2 = eval_at(&rule_morpho, &mut s_morpho, 97.0, 100_000_000.0, now);
+
+        assert!(matches!(r1.emit_severity, Some(Severity::High)));
+        assert!(matches!(r2.emit_severity, Some(Severity::High)));
+        // No cross-protocol contagion flag
+    }
+
+    /// TC-MULTI-03: Utilization incident is independent from TVL Drop
+    #[test]
+    fn tc_multi_03_independent_from_tvl_drop() {
+        // Utilization pattern only produces HIGH_UTILIZATION incidents.
+        // TVL Drop is a separate pattern with its own state and dedup key.
+        let rule = base_rule();
+        let mut state = UtilizationRuleState::default();
+        let r = eval(&rule, &mut state, 98.0);
+        // 98% → HIGH (>= 95%, < 99%)
+        assert!(matches!(r.emit_severity, Some(Severity::High)));
+    }
+
+    // ═══ Section 8: Protocol Pause — Spec Section 8 Step 5 ═══════════════
+
+    /// TC-PAUSE-01: Pause suspends auto-resolution
+    #[test]
+    fn tc_pause_01_pause_suspends_resolution() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("critical", now);
+        state.paused_status = true;
+
+        for i in 0..15 {
+            let t = now + Duration::seconds(12 * (i + 1));
+            let r = eval_at(&rule, &mut state, 50.0, 100_000_000.0, t);
+            assert!(!r.resolved);
+        }
+        assert_eq!(state.resolution_block_counter, 0);
+        assert_eq!(state.last_severity.as_deref(), Some("critical"));
+    }
+
+    /// TC-PAUSE-02: Unpause → auto-resolution resumes
+    #[test]
+    fn tc_pause_02_unpause_resumes_resolution() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("critical", now);
+        state.paused_status = true;
+
+        // While paused — no progress
+        eval_at(&rule, &mut state, 85.0, 100_000_000.0, now);
+        assert_eq!(state.resolution_block_counter, 0);
+
+        // Unpause
+        state.paused_status = false;
+        let r = eval_at(
+            &rule,
+            &mut state,
+            85.0,
+            100_000_000.0,
+            now + Duration::seconds(12),
+        );
+        assert!(!r.resolved);
+        assert_eq!(state.resolution_block_counter, 1); // counter advances
+    }
+
+    /// Pause event parser works correctly
+    #[test]
+    fn tc_pause_parser() {
+        let event = UnifiedEvent {
+            event_id: "evt-p".into(),
+            tenant_id: "t".into(),
+            source_id: "s".into(),
+            source_type: SourceType::EvmChain,
+            event_type: "protocol_pause".into(),
+            timestamp: Utc::now(),
+            payload: json!({
+                "protocol_id": "euler_v2",
+                "chain_slug": "base",
+                "market_id": "usdc",
+                "paused": true,
+                "block_number": 1000
+            }),
+            chain_id: Some(8453),
+            block_number: Some(1000),
+            tx_hash: None,
+            market_key: None,
+            price: None,
+        };
+        let parsed = parse_utilization_pause_event(&event).unwrap();
+        assert_eq!(parsed.protocol_id, "euler_v2");
+        assert!(parsed.paused);
+    }
+
+    // ═══ Section 9: Tenant Isolation — Spec Section 7.2 ══════════════════
+
+    /// TC-TENANT-01: Two tenants, same market, different thresholds
+    #[test]
+    fn tc_tenant_01_different_thresholds() {
+        let mut rule_a = base_rule();
+        rule_a.medium_threshold_pct = 85.0;
+        rule_a.high_threshold_pct = 92.0;
+        rule_a.critical_threshold_pct = 97.0;
+        rule_a.resolution_medium_pct = 80.0;
+        rule_a.resolution_high_pct = 85.0;
+        rule_a.resolution_critical_pct = 88.0;
+
+        let mut rule_b = base_rule();
+        rule_b.medium_threshold_pct = 95.0;
+        rule_b.high_threshold_pct = 97.0;
+        rule_b.critical_threshold_pct = 99.0;
+        rule_b.resolution_medium_pct = 90.0;
+        rule_b.resolution_high_pct = 92.0;
+        rule_b.resolution_critical_pct = 94.0;
+
+        let now = Utc::now();
+        let mut state_a = UtilizationRuleState::default();
+        let mut state_b = UtilizationRuleState::default();
+
+        let r_a = eval_at(&rule_a, &mut state_a, 90.0, 100_000_000.0, now);
+        let r_b = eval_at(&rule_b, &mut state_b, 90.0, 100_000_000.0, now);
+
+        // Tenant A: 90% >= 85% → MEDIUM
+        assert!(matches!(r_a.emit_severity, Some(Severity::Medium)));
+        // Tenant B: 90% < 95% → no alert
+        assert!(r_b.transition.is_none());
+    }
+
+    /// TC-TENANT-02: Same utilization data, independent evaluation
+    #[test]
+    fn tc_tenant_02_independent_evaluation() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state_a = UtilizationRuleState::default();
+        let mut state_b = UtilizationRuleState::default();
+
+        // Both tenants trigger independently from the same data
+        let r_a = eval_at(&rule, &mut state_a, 96.0, 100_000_000.0, now);
+        let r_b = eval_at(&rule, &mut state_b, 96.0, 100_000_000.0, now);
+
+        assert!(matches!(r_a.transition, Some(IncidentTransition::Trigger)));
+        assert!(matches!(r_b.transition, Some(IncidentTransition::Trigger)));
+        assert_eq!(state_a.last_severity, state_b.last_severity);
+    }
+
+    // ═══ Section 10: Recommended Actions — Spec Section 10 ═══════════════
+
+    #[test]
+    fn tc_action_critical_not_paused_emergency_withdraw() {
+        let actions = actions_for_severity(&Severity::Critical, false);
+        assert!(actions[0].contains("EMERGENCY_WITHDRAW"));
+    }
+
+    #[test]
+    fn tc_action_critical_paused_monitor_for_unpause() {
+        let actions = actions_for_severity(&Severity::Critical, true);
+        assert!(actions[0].contains("paused") || actions[0].contains("Monitor"));
+    }
+
+    #[test]
+    fn tc_action_high_withdraw_max() {
+        let actions = actions_for_severity(&Severity::High, false);
+        assert!(actions[0].contains("WITHDRAW_MAX_AVAILABLE"));
+    }
+
+    #[test]
+    fn tc_action_medium_monitor() {
+        let actions = actions_for_severity(&Severity::Medium, false);
+        assert!(actions[0].contains("MONITOR"));
+    }
+
+    // ═══ Section 12: Section 15 Scenarios Rewritten in GWT ═══════════════
+
+    /// TC-S15-01: Classic threshold breach and auto-resolution
+    #[test]
+    fn tc_s15_01_classic_breach_escalation_resolution() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = UtilizationRuleState::default();
+
+        // Step 1: utilization rises to 90% → MEDIUM trigger
+        let r1 = eval_at(&rule, &mut state, 90.0, 100_000_000.0, now);
+        assert!(matches!(r1.transition, Some(IncidentTransition::Trigger)));
+        assert!(matches!(r1.emit_severity, Some(Severity::Medium)));
+
+        // Step 2: utilization rises to 96% → escalate to HIGH
+        let r2 = eval_at(
+            &rule,
+            &mut state,
+            96.0,
+            100_000_000.0,
+            now + Duration::seconds(12),
+        );
+        assert!(matches!(r2.transition, Some(IncidentTransition::Escalate)));
+        assert!(matches!(r2.emit_severity, Some(Severity::High)));
+
+        // Step 3: peaks at 96.2% → suppress (same severity)
+        let r3 = eval_at(
+            &rule,
+            &mut state,
+            96.2,
+            100_000_000.0,
+            now + Duration::seconds(24),
+        );
+        assert!(r3.transition.is_none());
+
+        // Step 4: drops to 84%, remains for 10 blocks → resolve
+        for i in 0..10 {
+            let t = now + Duration::seconds(36 + 12 * i);
+            let r = eval_at(&rule, &mut state, 84.0, 100_000_000.0, t);
+            if i < 9 {
+                assert!(!r.resolved);
+            } else {
+                assert!(r.resolved);
+                assert!(matches!(r.resolved_from_severity, Some(Severity::High)));
+            }
+        }
+    }
+
+    /// TC-S15-02: Direct critical breach — no intermediate alerts
+    #[test]
+    fn tc_s15_02_direct_critical_no_intermediates() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = UtilizationRuleState::default();
+        // Pre-fill sample for rate-of-change context
+        state.samples.push(UtilizationSample {
+            observed_at: now - Duration::minutes(4),
+            utilization_pct: 85.0,
+        });
+
+        let r = eval_at(&rule, &mut state, 99.5, 100_000_000.0, now);
+        assert!(matches!(r.transition, Some(IncidentTransition::Trigger)));
+        assert!(matches!(r.emit_severity, Some(Severity::Critical)));
+        // No intermediate MEDIUM or HIGH
+    }
+
+    /// TC-S15-03: Oscillation near threshold — flap prevention
+    #[test]
+    fn tc_s15_03_oscillation_flap_prevention() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = UtilizationRuleState::default();
+
+        // Crosses 95% → HIGH trigger
+        let r1 = eval_at(&rule, &mut state, 96.0, 100_000_000.0, now);
+        assert!(matches!(r1.transition, Some(IncidentTransition::Trigger)));
+        assert!(matches!(r1.emit_severity, Some(Severity::High)));
+
+        // Drops to 94% — still above resolution_high_pct (88%)
+        let r2 = eval_at(
+            &rule,
+            &mut state,
+            94.0,
+            100_000_000.0,
+            now + Duration::seconds(12),
+        );
+        assert!(r2.transition.is_none());
+        assert_eq!(state.resolution_block_counter, 0); // counter NOT started
+
+        // Rises back to 96% — no duplicate
+        let r3 = eval_at(
+            &rule,
+            &mut state,
+            96.0,
+            100_000_000.0,
+            now + Duration::seconds(24),
+        );
+        assert!(r3.transition.is_none()); // dedup suppresses
+    }
+
+    /// TC-S15-04: Multi-market same protocol
+    #[test]
+    fn tc_s15_04_multi_market_same_protocol() {
+        let mut rule_usdc = base_rule();
+        rule_usdc.market_id = Some("usdc".to_string());
+
+        let mut rule_eth = base_rule();
+        rule_eth.rule_id = "util-eth".to_string();
+        rule_eth.market_id = Some("eth".to_string());
+
+        let now = Utc::now();
+        let mut s_usdc = UtilizationRuleState::default();
+        let mut s_eth = UtilizationRuleState::default();
+
+        let r1 = eval_at(&rule_usdc, &mut s_usdc, 96.0, 100_000_000.0, now);
+        let r2 = eval_at(&rule_eth, &mut s_eth, 92.0, 100_000_000.0, now);
+
+        assert!(matches!(r1.emit_severity, Some(Severity::High)));
+        assert!(matches!(r2.emit_severity, Some(Severity::Medium)));
+    }
+
+    /// TC-S15-05: Protocol paused during active incident
+    #[test]
+    fn tc_s15_05_protocol_pause_lifecycle() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = UtilizationRuleState::default();
+
+        // Trigger CRITICAL
+        let r = eval_at(&rule, &mut state, 99.5, 100_000_000.0, now);
+        assert!(matches!(r.emit_severity, Some(Severity::Critical)));
+
+        // Pause
+        state.paused_status = true;
+
+        // Resolution suspended despite low utilization
+        for i in 0..15 {
+            let t = now + Duration::seconds(12 * (i + 1));
+            let r = eval_at(&rule, &mut state, 50.0, 100_000_000.0, t);
+            assert!(!r.resolved);
+        }
+
+        // Unpause
+        state.paused_status = false;
+
+        // 10 blocks → resolves
+        let base_t = now + Duration::seconds(12 * 16);
+        for i in 0..10 {
+            let t = base_t + Duration::seconds(12 * i);
+            let r = eval_at(&rule, &mut state, 85.0, 100_000_000.0, t);
+            if i < 9 {
+                assert!(!r.resolved);
+            } else {
+                assert!(r.resolved);
+            }
+        }
+    }
+
+    /// TC-S15-06: Below TVL floor
+    #[test]
+    fn tc_s15_06_below_tvl_floor() {
+        let rule = base_rule();
+        let mut state = UtilizationRuleState::default();
+        let r = eval_at(&rule, &mut state, 97.0, 400_000.0, Utc::now());
+        assert!(r.tvl_floor_suppressed);
+        assert!(r.transition.is_none());
+    }
+
+    /// TC-S15-07: Two tenants, same market, different thresholds
+    #[test]
+    fn tc_s15_07_two_tenants_different_thresholds() {
+        let mut rule_a = base_rule();
+        rule_a.medium_threshold_pct = 85.0;
+        rule_a.high_threshold_pct = 92.0;
+        rule_a.critical_threshold_pct = 97.0;
+        rule_a.resolution_medium_pct = 80.0;
+        rule_a.resolution_high_pct = 85.0;
+        rule_a.resolution_critical_pct = 88.0;
+
+        let mut rule_b = base_rule();
+        rule_b.medium_threshold_pct = 95.0;
+        rule_b.high_threshold_pct = 97.0;
+        rule_b.critical_threshold_pct = 99.0;
+        rule_b.resolution_medium_pct = 90.0;
+        rule_b.resolution_high_pct = 92.0;
+        rule_b.resolution_critical_pct = 94.0;
+
+        let now = Utc::now();
+        let mut state_a = UtilizationRuleState::default();
+        let mut state_b = UtilizationRuleState::default();
+
+        let r_a = eval_at(&rule_a, &mut state_a, 90.0, 100_000_000.0, now);
+        let r_b = eval_at(&rule_b, &mut state_b, 90.0, 100_000_000.0, now);
+
+        // Tenant A: 90% >= 85% → MEDIUM
+        assert!(matches!(r_a.transition, Some(IncidentTransition::Trigger)));
+        assert!(matches!(r_a.emit_severity, Some(Severity::Medium)));
+        // Tenant B: 90% < 95% → no alert
+        assert!(r_b.transition.is_none());
+    }
+
+    /// TC-S15-08: Concurrent utilization and TVL drop — independence
+    /// 98% utilization → HIGH per Section 8 Step 2 (98% >= 95%, < 99%)
+    #[test]
+    fn tc_s15_08_utilization_independent_of_tvl_drop() {
+        let rule = base_rule();
+        let mut state = UtilizationRuleState::default();
+        let r = eval(&rule, &mut state, 98.0);
+        assert!(matches!(r.emit_severity, Some(Severity::High)));
+        // TVL_DROP pattern has separate state/lifecycle
+    }
+
+    // ═══ Section 13: No-Alert Scenarios ══════════════════════════════════
+
+    /// TC-NONE-01: Normal utilization — no alert
+    #[test]
+    fn tc_none_01_normal_utilization() {
+        let rule = base_rule();
+        let mut state = UtilizationRuleState::default();
+        let r = eval(&rule, &mut state, 75.0);
+        assert!(r.transition.is_none());
+        assert!(r.emit_severity.is_none());
+    }
+
+    /// TC-NONE-02: Utilization fluctuating below medium threshold
+    #[test]
+    fn tc_none_02_fluctuating_below_threshold() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = UtilizationRuleState::default();
+
+        for i in 0..100 {
+            let utilization = 85.0 + (i as f64 % 5.0); // 85%–89%
+            let t = now + Duration::seconds(12 * i);
+            let r = eval_at(&rule, &mut state, utilization, 100_000_000.0, t);
+            assert!(
+                r.transition.is_none(),
+                "should never alert at {:.1}%",
+                utilization
+            );
+        }
+    }
+
+    // ═══ Existing / Config Tests (preserved) ═════════════════════════════
 
     #[test]
     fn parser_supports_rule_list_shape() {
@@ -1307,5 +2417,174 @@ mod tests {
 
         assert!(matches!(tenant_a, Some(Severity::Medium)));
         assert!(tenant_b.is_none());
+    }
+
+    // ═══ Gap: Recommended Action Enum (Spec Section 10) ══════════════════
+
+    #[test]
+    fn tc_action_enum_critical_not_paused() {
+        assert_eq!(
+            recommended_action_for(&Severity::Critical, false),
+            RecommendedAction::EmergencyWithdraw
+        );
+        assert_eq!(
+            RecommendedAction::EmergencyWithdraw.as_str(),
+            "EMERGENCY_WITHDRAW"
+        );
+    }
+
+    #[test]
+    fn tc_action_enum_critical_paused() {
+        assert_eq!(
+            recommended_action_for(&Severity::Critical, true),
+            RecommendedAction::MonitorForUnpause
+        );
+        assert_eq!(
+            RecommendedAction::MonitorForUnpause.as_str(),
+            "MONITOR_FOR_UNPAUSE"
+        );
+    }
+
+    #[test]
+    fn tc_action_enum_high() {
+        assert_eq!(
+            recommended_action_for(&Severity::High, false),
+            RecommendedAction::WithdrawMaxAvailable
+        );
+    }
+
+    #[test]
+    fn tc_action_enum_medium() {
+        assert_eq!(
+            recommended_action_for(&Severity::Medium, false),
+            RecommendedAction::Monitor
+        );
+    }
+
+    /// Trigger evaluation populates recommended_action
+    #[test]
+    fn tc_action_trigger_carries_recommended_action() {
+        let rule = base_rule();
+        let mut state = UtilizationRuleState::default();
+        let r = eval(&rule, &mut state, 96.0);
+        assert_eq!(
+            r.recommended_action,
+            Some(RecommendedAction::WithdrawMaxAvailable)
+        );
+    }
+
+    /// Escalation updates recommended_action
+    #[test]
+    fn tc_action_escalation_updates_recommended_action() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("high", now);
+        let r = eval_at(&rule, &mut state, 99.2, 100_000_000.0, now);
+        assert!(matches!(r.transition, Some(IncidentTransition::Escalate)));
+        assert_eq!(
+            r.recommended_action,
+            Some(RecommendedAction::EmergencyWithdraw)
+        );
+    }
+
+    /// Paused incident returns MONITOR_FOR_UNPAUSE
+    #[test]
+    fn tc_action_paused_incident() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("critical", now);
+        state.paused_status = true;
+        let r = eval_at(&rule, &mut state, 50.0, 100_000_000.0, now);
+        assert_eq!(
+            r.recommended_action,
+            Some(RecommendedAction::MonitorForUnpause)
+        );
+    }
+
+    // ═══ Gap: Resolution Notification Fields (TC-RES-09 enriched) ════════
+
+    /// Resolution carries incident_active_since for duration calculation
+    #[test]
+    fn tc_res_09_resolution_carries_duration_metadata() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = state_with_incident("high", now);
+        let trigger_time = now - Duration::minutes(30);
+        state.active_since = Some(trigger_time);
+
+        for i in 0..10 {
+            let t = now + Duration::seconds(12 * (i + 1));
+            let r = eval_at(&rule, &mut state, 87.0, 100_000_000.0, t);
+            if i == 9 {
+                assert!(r.resolved);
+                assert_eq!(r.incident_active_since, Some(trigger_time));
+                assert_eq!(r.escalation_count, 0);
+            }
+        }
+    }
+
+    /// Resolution after escalation carries escalation_count > 0
+    #[test]
+    fn tc_res_09_resolution_with_escalation_history() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = UtilizationRuleState::default();
+
+        // Trigger at MEDIUM
+        eval_at(&rule, &mut state, 92.0, 100_000_000.0, now);
+        assert_eq!(state.escalation_count, 0);
+
+        // Escalate to HIGH
+        let t1 = now + Duration::seconds(12);
+        eval_at(&rule, &mut state, 96.0, 100_000_000.0, t1);
+        assert_eq!(state.escalation_count, 1);
+
+        // Escalate to CRITICAL
+        let t2 = now + Duration::seconds(24);
+        eval_at(&rule, &mut state, 99.5, 100_000_000.0, t2);
+        assert_eq!(state.escalation_count, 2);
+
+        // Resolve after 10 blocks
+        let mut last_result = UtilizationEvalResult::default();
+        for i in 0..10 {
+            let t = now + Duration::seconds(36 + 12 * i);
+            last_result = eval_at(&rule, &mut state, 85.0, 100_000_000.0, t);
+        }
+        assert!(last_result.resolved);
+        assert_eq!(last_result.escalation_count, 2);
+        assert!(last_result.incident_active_since.is_some());
+    }
+
+    /// After resolution, escalation_count resets to 0
+    #[test]
+    fn tc_escalation_count_resets_after_resolution() {
+        let rule = base_rule();
+        let now = Utc::now();
+        let mut state = UtilizationRuleState::default();
+
+        // Trigger → Escalate
+        eval_at(&rule, &mut state, 92.0, 100_000_000.0, now);
+        eval_at(
+            &rule,
+            &mut state,
+            96.0,
+            100_000_000.0,
+            now + Duration::seconds(12),
+        );
+        assert_eq!(state.escalation_count, 1);
+
+        // Resolve
+        for i in 0..10 {
+            let t = now + Duration::seconds(24 + 12 * i);
+            eval_at(&rule, &mut state, 84.0, 100_000_000.0, t);
+        }
+        assert!(state.last_severity.is_none());
+        assert_eq!(state.escalation_count, 0); // reset
+
+        // New trigger — escalation_count starts fresh
+        let t = now + Duration::seconds(200);
+        let r = eval_at(&rule, &mut state, 92.0, 100_000_000.0, t);
+        assert!(matches!(r.transition, Some(IncidentTransition::Trigger)));
+        assert_eq!(state.escalation_count, 0);
     }
 }

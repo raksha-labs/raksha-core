@@ -17,7 +17,7 @@ VALUES
     -- CEX WebSocket Sources
     ('binance-global', 'cex_websocket', 'binance',
      '{"ws_endpoint": "wss://stream.binance.com:9443/ws"}'::jsonb,
-     '{"market_symbols": ["USDCUSDT", "USDTUSDC", "DAIUSDT"]}'::jsonb,
+     '{"market_symbols": ["USDCUSDT", "DAIUSDT"]}'::jsonb,
      'global', NULL, TRUE),
     ('coinbase-advanced', 'cex_websocket', 'coinbase',
      '{"ws_endpoint": "wss://advanced-trade-ws.coinbase.com"}'::jsonb,
@@ -41,7 +41,7 @@ VALUES
      'global', NULL, TRUE),
     ('binance-global-http', 'cex_websocket', 'binance-http',
      '{"http_url": "https://api.binance.com/api/v3/ticker/24hr?symbol={subscription_key}"}'::jsonb,
-     '{"market_symbols": ["USDCUSDT", "USDTUSDC", "DAIUSDT"]}'::jsonb,
+     '{"market_symbols": ["USDCUSDT", "DAIUSDT"]}'::jsonb,
      'global', NULL, TRUE),
     ('kraken-spot-http', 'cex_websocket', 'kraken-http',
      '{"http_url": "https://api.kraken.com/0/public/Ticker?pair={subscription_key}"}'::jsonb,
@@ -61,7 +61,7 @@ VALUES
      'global', NULL, TRUE),
     ('gate-spot-http', 'cex_websocket', 'gate-http',
      '{"http_url": "https://api.gateio.ws/api/v4/spot/tickers?currency_pair={subscription_key}"}'::jsonb,
-     '{"market_symbols": ["USDC_USDT", "USDT_USDC", "DAI_USDT"]}'::jsonb,
+     '{"market_symbols": ["USDC_USDT", "DAI_USDT"]}'::jsonb,
      'global', NULL, TRUE),
 
     -- Oracle + DEX Log Sources (Ethereum mainnet)
@@ -145,7 +145,6 @@ WITH desired_stream_configs AS (
     VALUES
       -- Binance (USDT quoted)
       ('binance-global','websocket','miniTicker','usdcusdt@miniTicker','quote','binance_miniticker_v1','USDC/USD','USDCUSDT','{"symbols":["USDCUSDT"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',NULL,TRUE,'glider'),
-      ('binance-global','websocket','miniTicker','usdtusdc@miniTicker','quote','binance_miniticker_v1','USDT/USD','USDTUSDC','{"symbols":["USDTUSDC"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',NULL,FALSE,'glider'),
       ('binance-global','websocket','miniTicker','daiusdt@miniTicker','quote','binance_miniticker_v1','DAI/USD','DAIUSDT','{"symbols":["DAIUSDT"]}'::jsonb,NULL::text,'{}'::jsonb,'$.E','ms',NULL,FALSE,'glider'),
 
       -- Coinbase (USD direct)
@@ -175,7 +174,6 @@ WITH desired_stream_configs AS (
 
       -- Public CEX HTTP polls
       ('binance-global-http','http_poll','ticker_24hr','USDCUSDT','quote','binance_miniticker_v1','USDC/USD','USDCUSDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.closeTime','ms',5000,TRUE,'glider'),
-      ('binance-global-http','http_poll','ticker_24hr','USDTUSDC','quote','binance_miniticker_v1','USDT/USD','USDTUSDC','{}'::jsonb,NULL::text,'{}'::jsonb,'$.closeTime','ms',5000,TRUE,'glider'),
       ('binance-global-http','http_poll','ticker_24hr','DAIUSDT','quote','binance_miniticker_v1','DAI/USD','DAIUSDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.closeTime','ms',5000,TRUE,'glider'),
       ('kraken-spot-http','http_poll','ticker','USDCUSD','quote','kraken_ticker_v2','USDC/USD','USDC/USD','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
       ('kraken-spot-http','http_poll','ticker','USDTUSD','quote','kraken_ticker_v2','USDT/USD','USDT/USD','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
@@ -190,7 +188,6 @@ WITH desired_stream_configs AS (
       ('gemini-spot-http','http_poll','pubticker','usdtusd','quote','gemini_marketdata_v1','USDT/USD','USDTUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.volume.timestamp','ms',5000,TRUE,'glider'),
       ('gemini-spot-http','http_poll','pubticker','daiusd','quote','gemini_marketdata_v1','DAI/USD','DAIUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.volume.timestamp','ms',5000,TRUE,'glider'),
       ('gate-spot-http','http_poll','tickers','USDC_USDT','quote','gate_ticker_v4','USDC/USD','USDC_USDT','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
-      ('gate-spot-http','http_poll','tickers','USDT_USDC','quote','gate_ticker_v4','USDT/USD','USDT_USDC','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
       ('gate-spot-http','http_poll','tickers','DAI_USDT','quote','gate_ticker_v4','DAI/USD','DAI_USDT','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
 
       -- Chainlink (Ethereum mainnet logs)
@@ -300,7 +297,6 @@ WITH desired_stream_refs AS (
   FROM (
     VALUES
       ('binance-global','miniTicker','usdcusdt@miniTicker','USDCUSDT'),
-      ('binance-global','miniTicker','usdtusdc@miniTicker','USDTUSDC'),
       ('binance-global','miniTicker','daiusdt@miniTicker','DAIUSDT'),
       ('coinbase-advanced','ticker','USDC-USD','USDC-USD'),
       ('coinbase-advanced','ticker','USDT-USD','USDT-USD'),
@@ -318,7 +314,6 @@ WITH desired_stream_refs AS (
       ('gemini-spot','marketdata','usdtusd','USDTUSD'),
       ('gemini-spot','marketdata','daiusd','DAIUSD'),
       ('binance-global-http','ticker_24hr','USDCUSDT','USDCUSDT'),
-      ('binance-global-http','ticker_24hr','USDTUSDC','USDTUSDC'),
       ('binance-global-http','ticker_24hr','DAIUSDT','DAIUSDT'),
       ('kraken-spot-http','ticker','USDCUSD','USDC/USD'),
       ('kraken-spot-http','ticker','USDTUSD','USDT/USD'),
@@ -333,7 +328,6 @@ WITH desired_stream_refs AS (
       ('gemini-spot-http','pubticker','usdtusd','USDTUSD'),
       ('gemini-spot-http','pubticker','daiusd','DAIUSD'),
       ('gate-spot-http','tickers','USDC_USDT','USDC_USDT'),
-      ('gate-spot-http','tickers','USDT_USDC','USDT_USDC'),
       ('gate-spot-http','tickers','DAI_USDT','DAI_USDT'),
       ('chainlink-eth-mainnet','logs','usdc-usd-feed','USDCUSD'),
       ('chainlink-eth-mainnet','logs','usdt-usd-feed','USDTUSD'),

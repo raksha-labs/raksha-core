@@ -118,6 +118,16 @@ impl RpcStateConnector {
             };
 
             let raw_trimmed = raw_result.trim();
+            if let Some(payload) = build_mock_state_payload(
+                &spec,
+                raw_trimmed,
+                self.chain_id,
+                block_number.as_u64(),
+                observed_at.timestamp_millis(),
+            ) {
+                self.pending.push_back(payload);
+                continue;
+            }
             let raw_u256 = parse_hex_to_u256(raw_trimmed);
             let tvl_native = raw_u256
                 .as_ref()
@@ -127,6 +137,13 @@ impl RpcStateConnector {
                     Some(native * price_usd)
                 }
                 _ => None,
+            };
+            let utilization = if spec.metric.eq_ignore_ascii_case("utilization") {
+                raw_u256
+                    .as_ref()
+                    .and_then(|value| u256_to_scaled_f64(value, spec.decimals))
+            } else {
+                None
             };
             let paused = if spec.metric.eq_ignore_ascii_case("pause")
                 || spec.metric.eq_ignore_ascii_case("protocol_pause")
@@ -159,6 +176,8 @@ impl RpcStateConnector {
                 "tvl_native": tvl_native,
                 "price_usd": spec.price_usd,
                 "tvl_usd": tvl_usd,
+                "utilization": utilization,
+                "current_utilization": utilization,
                 "paused": paused,
                 "decimals": spec.decimals,
                 "chainId": self.chain_id,
@@ -326,6 +345,122 @@ fn parse_hex_to_u256(raw: &str) -> Option<U256> {
         return None;
     }
     U256::from_str_radix(body, 16).ok()
+}
+
+fn parse_mock_state_payload(raw: &str) -> Option<Value> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .filter(Value::is_object)
+}
+
+fn read_timestamp_millis(value: Option<&Value>) -> Option<i64> {
+    if let Some(number) = value.and_then(Value::as_i64) {
+        return Some(number);
+    }
+    let text = value.and_then(Value::as_str)?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(number) = text.parse::<i64>() {
+        return Some(number);
+    }
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|ts| ts.timestamp_millis())
+}
+
+fn inferred_tvl_usd(payload: &serde_json::Map<String, Value>, price_usd: Option<f64>) -> Option<f64> {
+    read_f64(payload.get("tvl_usd"))
+        .or_else(|| read_f64(payload.get("total_supplied_tokens")))
+        .or_else(|| read_f64(payload.get("total_supplied")))
+        .or_else(|| {
+            let native = read_f64(payload.get("tvl_native"))?;
+            let price = price_usd.or_else(|| read_f64(payload.get("price_usd")))?;
+            if !price.is_finite() || price <= 0.0 {
+                return None;
+            }
+            Some(native * price)
+        })
+}
+
+fn build_mock_state_payload(
+    spec: &StateCallSpec,
+    raw_result: &str,
+    chain_id: Option<i64>,
+    block_number: u64,
+    observed_at_millis: i64,
+) -> Option<Value> {
+    let mut object = parse_mock_state_payload(raw_result)?.as_object()?.clone();
+
+    object
+        .entry("event_type".to_string())
+        .or_insert_with(|| Value::String(spec.event_type.clone().unwrap_or_else(|| "protocol_state".to_string())));
+    object
+        .entry("metric".to_string())
+        .or_insert_with(|| Value::String(spec.metric.clone()));
+    object
+        .entry("protocol_id".to_string())
+        .or_insert_with(|| Value::String(spec.protocol_id.clone()));
+    if let Some(chain_slug) = &spec.chain_slug {
+        object
+            .entry("chain_slug".to_string())
+            .or_insert_with(|| Value::String(chain_slug.clone()));
+    }
+    if let Some(market_id) = &spec.market_id {
+        object
+            .entry("market_id".to_string())
+            .or_insert_with(|| Value::String(market_id.clone()));
+    }
+    object
+        .entry("contract_address".to_string())
+        .or_insert_with(|| Value::String(spec.contract_address.clone()));
+    object
+        .entry("call_data".to_string())
+        .or_insert_with(|| Value::String(spec.call_data.clone()));
+    object.insert("chainId".to_string(), chain_id.map_or(Value::Null, |value| json!(value)));
+    object.insert("block_number".to_string(), json!(block_number));
+    object.insert(
+        "timestamp".to_string(),
+        json!(read_timestamp_millis(object.get("timestamp")).unwrap_or(observed_at_millis)),
+    );
+    object
+        .entry("decimals".to_string())
+        .or_insert_with(|| json!(spec.decimals));
+    if let Some(price_usd) = spec.price_usd {
+        object
+            .entry("price_usd".to_string())
+            .or_insert_with(|| json!(price_usd));
+    }
+
+    if spec.metric.eq_ignore_ascii_case("utilization") {
+        if let Some(utilization) = read_f64(object.get("utilization"))
+            .or_else(|| read_f64(object.get("current_utilization")))
+        {
+            object
+                .entry("utilization".to_string())
+                .or_insert_with(|| json!(utilization));
+            object
+                .entry("current_utilization".to_string())
+                .or_insert_with(|| json!(utilization));
+        }
+        if let Some(tvl_usd) = inferred_tvl_usd(&object, spec.price_usd) {
+            object
+                .entry("tvl_usd".to_string())
+                .or_insert_with(|| json!(tvl_usd));
+        }
+    } else if spec.metric.eq_ignore_ascii_case("tvl") {
+        if let Some(tvl_usd) = inferred_tvl_usd(&object, spec.price_usd) {
+            object
+                .entry("tvl_usd".to_string())
+                .or_insert_with(|| json!(tvl_usd));
+        }
+    }
+
+    Some(Value::Object(object))
 }
 
 fn u256_to_scaled_f64(value: &U256, decimals: i32) -> Option<f64> {
