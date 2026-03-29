@@ -27,6 +27,7 @@ jobs:
   build:
     uses: ./.github/workflows/reusable-image-build.yml
     with:
+      environment: ${{ inputs.target_environment }}
       aws_region: eu-west-1
       service_filter: ${{ github.event.inputs.service_filter || '' }}
       image_tag: ${{ format('sha-{0}', github.sha) }}

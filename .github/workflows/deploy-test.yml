@@ -89,6 +89,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_images == 'true' }}
     uses: ./.github/workflows/reusable-image-build.yml
     with:
+      environment: test
       aws_region: eu-west-1
       build_all: ${{ github.event.inputs.apply_infra == 'true' }}
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
