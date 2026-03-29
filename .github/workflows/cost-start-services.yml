@@ -10,7 +10,13 @@ on:
         options:
           - test
           - stage
+          - prod
         default: test
+      service_filter:
+        description: 'Optional comma-separated ECS service names to start (empty = all ECS services)'
+        required: false
+        type: string
+        default: ''
       start_ecs:
         description: 'Start ECS services'
         required: true
@@ -47,6 +53,7 @@ permissions:
 jobs:
   start-services:
     runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || 'test' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -54,13 +61,14 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod' && (secrets.AWS_PROD_DEPLOY_ROLE_ARN != '' && secrets.AWS_PROD_DEPLOY_ROLE_ARN || secrets.AWS_DEPLOY_ROLE_ARN) || github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'stage' && (secrets.AWS_STAGE_DEPLOY_ROLE_ARN != '' && secrets.AWS_STAGE_DEPLOY_ROLE_ARN || secrets.AWS_DEPLOY_ROLE_ARN) || (secrets.AWS_TEST_DEPLOY_ROLE_ARN != '' && secrets.AWS_TEST_DEPLOY_ROLE_ARN || secrets.AWS_DEPLOY_ROLE_ARN) }}
           aws-region: eu-west-1
 
       - name: Set environment for scheduled runs
         if: github.event_name == 'schedule'
         run: |
           echo "ENVIRONMENT=test" >> $GITHUB_ENV
+          echo "SERVICE_FILTER=" >> $GITHUB_ENV
           echo "START_ECS=true" >> $GITHUB_ENV
           echo "ECS_COUNT=1" >> $GITHUB_ENV
           echo "START_RDS=true" >> $GITHUB_ENV
@@ -71,11 +79,21 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: |
           echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          echo "SERVICE_FILTER=${{ github.event.inputs.service_filter }}" >> $GITHUB_ENV
           echo "START_ECS=${{ github.event.inputs.start_ecs }}" >> $GITHUB_ENV
           echo "ECS_COUNT=${{ github.event.inputs.ecs_count }}" >> $GITHUB_ENV
           echo "START_RDS=${{ github.event.inputs.start_rds }}" >> $GITHUB_ENV
           echo "RECREATE_REDIS=${{ github.event.inputs.recreate_redis }}" >> $GITHUB_ENV
           echo "RECREATE_NAT=${{ github.event.inputs.recreate_nat }}" >> $GITHUB_ENV
+
+      - name: Normalize prod-safe options
+        run: |
+          if [ "$ENVIRONMENT" = "prod" ]; then
+            echo "::warning title=Prod safety::Prod start workflow only scales ECS services. RDS/Redis/NAT actions are being disabled."
+            echo "START_RDS=false" >> $GITHUB_ENV
+            echo "RECREATE_REDIS=false" >> $GITHUB_ENV
+            echo "RECREATE_NAT=false" >> $GITHUB_ENV
+          fi
 
       - name: Setup Terraform
         if: env.RECREATE_REDIS == 'true' || env.RECREATE_NAT == 'true'
@@ -146,16 +164,19 @@ jobs:
           echo "▶️ Starting ECS services..."
           CLUSTER="raksha-${ENVIRONMENT}"
           DESIRED_COUNT=${ECS_COUNT}
-          
-          # Get all services in cluster
-          SERVICES=$(aws ecs list-services \
-            --cluster ${CLUSTER} \
-            --query 'serviceArns[*]' \
-            --output text)
-          
-          # Scale each service
-          for service_arn in $SERVICES; do
-            service_name=$(echo $service_arn | awk -F'/' '{print $NF}')
+
+          if [ -n "${SERVICE_FILTER}" ]; then
+            IFS=',' read -ra SERVICES <<< "${SERVICE_FILTER}"
+          else
+            mapfile -t SERVICES < <(aws ecs list-services \
+              --cluster ${CLUSTER} \
+              --query 'serviceArns[*]' \
+              --output text | tr '\t' '\n' | awk -F'/' 'NF {print $NF}')
+          fi
+
+          for service_name in "${SERVICES[@]}"; do
+            service_name=$(echo "${service_name}" | xargs)
+            [ -n "${service_name}" ] || continue
             
             CURRENT_COUNT=$(aws ecs describe-services \
               --cluster ${CLUSTER} \
@@ -182,12 +203,29 @@ jobs:
         run: |
           echo "⏳ Waiting for services to become healthy..."
           CLUSTER="raksha-${ENVIRONMENT}"
-          
-          # Wait up to 10 minutes for services to stabilize
-          aws ecs wait services-stable \
-            --cluster ${CLUSTER} \
-            --services $(aws ecs list-services --cluster ${CLUSTER} --query 'serviceArns[*]' --output text | tr '/' ' ' | awk '{print $NF}') \
-            || echo "⚠️ Some services may still be starting"
+
+          if [ -n "${SERVICE_FILTER}" ]; then
+            IFS=',' read -ra SERVICES <<< "${SERVICE_FILTER}"
+          else
+            mapfile -t SERVICES < <(aws ecs list-services \
+              --cluster ${CLUSTER} \
+              --query 'serviceArns[*]' \
+              --output text | tr '\t' '\n' | awk -F'/' 'NF {print $NF}')
+          fi
+
+          FILTERED_SERVICES=()
+          for service_name in "${SERVICES[@]}"; do
+            service_name=$(echo "${service_name}" | xargs)
+            [ -n "${service_name}" ] || continue
+            FILTERED_SERVICES+=("${service_name}")
+          done
+
+          if [ "${#FILTERED_SERVICES[@]}" -gt 0 ]; then
+            aws ecs wait services-stable \
+              --cluster ${CLUSTER} \
+              --services "${FILTERED_SERVICES[@]}" \
+              || echo "⚠️ Some services may still be starting"
+          fi
           
           echo "✅ Services are healthy"
 
@@ -251,6 +289,7 @@ jobs:
           # ▶️ Services Started - ${ENVIRONMENT} Environment
           
           ## Actions Taken
+          - **Service Filter**: \`${SERVICE_FILTER:-<all>}\`
           - **RDS Database**: $([ "$START_RDS" = "true" ] && echo "✅ Started" || echo "⏭️ Skipped")
           - **NAT Gateways**: $([ "$RECREATE_NAT" = "true" ] && echo "✅ Recreated" || echo "⏭️ Skipped")
           - **Redis Cache**: $([ "$RECREATE_REDIS" = "true" ] && echo "✅ Recreated" || echo "⏭️ Skipped")

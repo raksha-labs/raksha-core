@@ -43,7 +43,13 @@ variable "nat_gateway_per_az" {
 variable "service_desired_counts" {
   description = "Optional desired count overrides by service"
   type        = map(number)
-  default     = {}
+  default = {
+    indexer        = 1
+    detector       = 1
+    orchestrator   = 1
+    finality       = 1
+    history-worker = 1
+  }
 }
 
 variable "service_cpu_memory" {
@@ -52,7 +58,13 @@ variable "service_cpu_memory" {
     cpu    = number
     memory = number
   }))
-  default = {}
+  default = {
+    indexer        = { cpu = 256, memory = 512 }
+    detector       = { cpu = 512, memory = 1024 }
+    orchestrator   = { cpu = 256, memory = 512 }
+    finality       = { cpu = 256, memory = 512 }
+    history-worker = { cpu = 256, memory = 512 }
+  }
 }
 
 variable "log_retention_days" {
@@ -155,7 +167,7 @@ variable "fargate_spot_scaling_classes" {
 variable "db_instance_class" {
   description = "RDS instance class"
   type        = string
-  default     = "db.t4g.large"
+  default     = "db.t4g.medium"
 }
 
 variable "db_name" {
@@ -173,13 +185,13 @@ variable "db_username" {
 variable "cache_node_type" {
   description = "Redis node type"
   type        = string
-  default     = "cache.t4g.medium"
+  default     = "cache.t4g.small"
 }
 
 variable "cache_num_nodes" {
   description = "Redis node count"
   type        = number
-  default     = 2
+  default     = 1
 }
 
 variable "alb_ingress_cidrs" {
