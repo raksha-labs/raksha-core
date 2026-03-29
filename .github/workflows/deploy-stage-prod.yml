@@ -42,7 +42,8 @@ jobs:
       aws_region: eu-west-1
     secrets:
       aws_role_arn: ${{ inputs.target_environment == 'prod' && secrets.AWS_PROD_DEPLOY_ROLE_ARN || secrets.AWS_STAGE_DEPLOY_ROLE_ARN }}
-      tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET }}
-      tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
-      tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
-      public_certificate_arn: ${{ secrets.PUBLIC_CERTIFICATE_ARN }}
+      infra_aws_role_arn: ${{ inputs.target_environment == 'prod' && (secrets.AWS_PROD_INFRA_ROLE_ARN != '' && secrets.AWS_PROD_INFRA_ROLE_ARN || secrets.AWS_PROD_DEPLOY_ROLE_ARN) || (secrets.AWS_STAGE_INFRA_ROLE_ARN != '' && secrets.AWS_STAGE_INFRA_ROLE_ARN || secrets.AWS_STAGE_DEPLOY_ROLE_ARN) }}
+      tf_backend_bucket: ${{ inputs.target_environment == 'prod' && (secrets.TF_BACKEND_BUCKET_PROD != '' && secrets.TF_BACKEND_BUCKET_PROD || secrets.TF_BACKEND_BUCKET) || (secrets.TF_BACKEND_BUCKET_STAGE != '' && secrets.TF_BACKEND_BUCKET_STAGE || secrets.TF_BACKEND_BUCKET) }}
+      tf_backend_dynamodb_table: ${{ inputs.target_environment == 'prod' && (secrets.TF_BACKEND_DYNAMODB_TABLE_PROD != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_PROD || secrets.TF_BACKEND_DYNAMODB_TABLE) || (secrets.TF_BACKEND_DYNAMODB_TABLE_STAGE != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_STAGE || secrets.TF_BACKEND_DYNAMODB_TABLE) }}
+      tf_backend_kms_key_id: ${{ inputs.target_environment == 'prod' && (secrets.TF_BACKEND_KMS_KEY_ID_PROD != '' && secrets.TF_BACKEND_KMS_KEY_ID_PROD || secrets.TF_BACKEND_KMS_KEY_ID) || (secrets.TF_BACKEND_KMS_KEY_ID_STAGE != '' && secrets.TF_BACKEND_KMS_KEY_ID_STAGE || secrets.TF_BACKEND_KMS_KEY_ID) }}
+      public_certificate_arn: ${{ inputs.target_environment == 'prod' && (secrets.PUBLIC_CERTIFICATE_ARN_PROD != '' && secrets.PUBLIC_CERTIFICATE_ARN_PROD || secrets.PUBLIC_CERTIFICATE_ARN) || (secrets.PUBLIC_CERTIFICATE_ARN_STAGE != '' && secrets.PUBLIC_CERTIFICATE_ARN_STAGE || secrets.PUBLIC_CERTIFICATE_ARN) }}

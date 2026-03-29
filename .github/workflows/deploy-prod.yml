@@ -34,7 +34,8 @@ jobs:
       aws_region: eu-west-1
     secrets:
       aws_role_arn: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
-      tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET }}
-      tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
-      tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
-      public_certificate_arn: ${{ secrets.PUBLIC_CERTIFICATE_ARN }}
+      infra_aws_role_arn: ${{ secrets.AWS_PROD_INFRA_ROLE_ARN != '' && secrets.AWS_PROD_INFRA_ROLE_ARN || secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
+      tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET_PROD != '' && secrets.TF_BACKEND_BUCKET_PROD || secrets.TF_BACKEND_BUCKET }}
+      tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE_PROD != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_PROD || secrets.TF_BACKEND_DYNAMODB_TABLE }}
+      tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID_PROD != '' && secrets.TF_BACKEND_KMS_KEY_ID_PROD || secrets.TF_BACKEND_KMS_KEY_ID }}
+      public_certificate_arn: ${{ secrets.PUBLIC_CERTIFICATE_ARN_PROD != '' && secrets.PUBLIC_CERTIFICATE_ARN_PROD || secrets.PUBLIC_CERTIFICATE_ARN }}

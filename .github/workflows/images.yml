@@ -4,6 +4,15 @@ name: Build and Push Core Images
 on:
   workflow_dispatch:
     inputs:
+      target_environment:
+        description: AWS account/environment to push images into
+        required: true
+        default: test
+        type: choice
+        options:
+          - test
+          - stage
+          - prod
       service_filter:
         description: Comma-separated service names to build (empty = all)
         required: false
@@ -23,4 +32,4 @@ jobs:
       image_tag: ${{ format('sha-{0}', github.sha) }}
       push_latest: false
     secrets:
-      aws_role_arn: ${{ secrets.AWS_IMAGES_ROLE_ARN }}
+      aws_role_arn: ${{ inputs.target_environment == 'prod' && (secrets.AWS_IMAGES_ROLE_ARN_PROD != '' && secrets.AWS_IMAGES_ROLE_ARN_PROD || secrets.AWS_IMAGES_ROLE_ARN) || inputs.target_environment == 'stage' && (secrets.AWS_IMAGES_ROLE_ARN_STAGE != '' && secrets.AWS_IMAGES_ROLE_ARN_STAGE || secrets.AWS_IMAGES_ROLE_ARN) || (secrets.AWS_IMAGES_ROLE_ARN_TEST != '' && secrets.AWS_IMAGES_ROLE_ARN_TEST || secrets.AWS_IMAGES_ROLE_ARN != '' && secrets.AWS_IMAGES_ROLE_ARN || secrets.AWS_INFRA_ROLE_ARN) }}

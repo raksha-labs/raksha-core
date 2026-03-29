@@ -85,7 +85,7 @@ jobs:
       - name: Configure AWS credentials for raksha-platform destroy
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ inputs.environment == 'prod' && secrets.AWS_PROD_DEPLOY_ROLE_ARN || inputs.environment == 'stage' && secrets.AWS_STAGE_DEPLOY_ROLE_ARN || secrets.AWS_TEST_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ inputs.environment == 'prod' && (secrets.AWS_PROD_INFRA_ROLE_ARN != '' && secrets.AWS_PROD_INFRA_ROLE_ARN || secrets.AWS_PROD_DEPLOY_ROLE_ARN) || inputs.environment == 'stage' && (secrets.AWS_STAGE_INFRA_ROLE_ARN != '' && secrets.AWS_STAGE_INFRA_ROLE_ARN || secrets.AWS_STAGE_DEPLOY_ROLE_ARN) || (secrets.AWS_TEST_INFRA_ROLE_ARN != '' && secrets.AWS_TEST_INFRA_ROLE_ARN || secrets.AWS_INFRA_ROLE_ARN != '' && secrets.AWS_INFRA_ROLE_ARN || secrets.AWS_TEST_DEPLOY_ROLE_ARN) }}
           aws-region: eu-west-1
 
       - name: Purge raksha-platform ECR images (optional)
@@ -117,16 +117,16 @@ jobs:
         working-directory: raksha-platform
         env:
           AWS_REGION: eu-west-1
-          TF_BACKEND_BUCKET: ${{ secrets.TF_BACKEND_BUCKET }}
-          TF_BACKEND_DYNAMODB_TABLE: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
-          TF_BACKEND_KMS_KEY_ID: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
+          TF_BACKEND_BUCKET: ${{ inputs.environment == 'prod' && (secrets.TF_BACKEND_BUCKET_PROD != '' && secrets.TF_BACKEND_BUCKET_PROD || secrets.TF_BACKEND_BUCKET) || inputs.environment == 'stage' && (secrets.TF_BACKEND_BUCKET_STAGE != '' && secrets.TF_BACKEND_BUCKET_STAGE || secrets.TF_BACKEND_BUCKET) || (secrets.TF_BACKEND_BUCKET_TEST != '' && secrets.TF_BACKEND_BUCKET_TEST || secrets.TF_BACKEND_BUCKET) }}
+          TF_BACKEND_DYNAMODB_TABLE: ${{ inputs.environment == 'prod' && (secrets.TF_BACKEND_DYNAMODB_TABLE_PROD != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_PROD || secrets.TF_BACKEND_DYNAMODB_TABLE) || inputs.environment == 'stage' && (secrets.TF_BACKEND_DYNAMODB_TABLE_STAGE != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_STAGE || secrets.TF_BACKEND_DYNAMODB_TABLE) || (secrets.TF_BACKEND_DYNAMODB_TABLE_TEST != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_TEST || secrets.TF_BACKEND_DYNAMODB_TABLE) }}
+          TF_BACKEND_KMS_KEY_ID: ${{ inputs.environment == 'prod' && (secrets.TF_BACKEND_KMS_KEY_ID_PROD != '' && secrets.TF_BACKEND_KMS_KEY_ID_PROD || secrets.TF_BACKEND_KMS_KEY_ID) || inputs.environment == 'stage' && (secrets.TF_BACKEND_KMS_KEY_ID_STAGE != '' && secrets.TF_BACKEND_KMS_KEY_ID_STAGE || secrets.TF_BACKEND_KMS_KEY_ID) || (secrets.TF_BACKEND_KMS_KEY_ID_TEST != '' && secrets.TF_BACKEND_KMS_KEY_ID_TEST || secrets.TF_BACKEND_KMS_KEY_ID) }}
         run: |
           scripts/ci/terraform_destroy.sh "${{ inputs.environment }}" "destroy-${{ github.run_id }}"
 
       - name: Configure AWS credentials for raksha-simlab destroy
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ inputs.environment == 'prod' && secrets.AWS_PROD_DEPLOY_ROLE_ARN || inputs.environment == 'stage' && secrets.AWS_STAGE_DEPLOY_ROLE_ARN || secrets.AWS_TEST_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ inputs.environment == 'prod' && (secrets.AWS_PROD_INFRA_ROLE_ARN != '' && secrets.AWS_PROD_INFRA_ROLE_ARN || secrets.AWS_PROD_DEPLOY_ROLE_ARN) || inputs.environment == 'stage' && (secrets.AWS_STAGE_INFRA_ROLE_ARN != '' && secrets.AWS_STAGE_INFRA_ROLE_ARN || secrets.AWS_STAGE_DEPLOY_ROLE_ARN) || (secrets.AWS_TEST_INFRA_ROLE_ARN != '' && secrets.AWS_TEST_INFRA_ROLE_ARN || secrets.AWS_INFRA_ROLE_ARN != '' && secrets.AWS_INFRA_ROLE_ARN || secrets.AWS_TEST_DEPLOY_ROLE_ARN) }}
           aws-region: eu-west-1
 
       - name: Purge raksha-simlab ECR images (optional)
@@ -158,16 +158,16 @@ jobs:
         working-directory: raksha-simlab
         env:
           AWS_REGION: eu-west-1
-          TF_BACKEND_BUCKET: ${{ secrets.TF_BACKEND_BUCKET }}
-          TF_BACKEND_DYNAMODB_TABLE: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
-          TF_BACKEND_KMS_KEY_ID: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
+          TF_BACKEND_BUCKET: ${{ inputs.environment == 'prod' && (secrets.TF_BACKEND_BUCKET_PROD != '' && secrets.TF_BACKEND_BUCKET_PROD || secrets.TF_BACKEND_BUCKET) || inputs.environment == 'stage' && (secrets.TF_BACKEND_BUCKET_STAGE != '' && secrets.TF_BACKEND_BUCKET_STAGE || secrets.TF_BACKEND_BUCKET) || (secrets.TF_BACKEND_BUCKET_TEST != '' && secrets.TF_BACKEND_BUCKET_TEST || secrets.TF_BACKEND_BUCKET) }}
+          TF_BACKEND_DYNAMODB_TABLE: ${{ inputs.environment == 'prod' && (secrets.TF_BACKEND_DYNAMODB_TABLE_PROD != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_PROD || secrets.TF_BACKEND_DYNAMODB_TABLE) || inputs.environment == 'stage' && (secrets.TF_BACKEND_DYNAMODB_TABLE_STAGE != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_STAGE || secrets.TF_BACKEND_DYNAMODB_TABLE) || (secrets.TF_BACKEND_DYNAMODB_TABLE_TEST != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_TEST || secrets.TF_BACKEND_DYNAMODB_TABLE) }}
+          TF_BACKEND_KMS_KEY_ID: ${{ inputs.environment == 'prod' && (secrets.TF_BACKEND_KMS_KEY_ID_PROD != '' && secrets.TF_BACKEND_KMS_KEY_ID_PROD || secrets.TF_BACKEND_KMS_KEY_ID) || inputs.environment == 'stage' && (secrets.TF_BACKEND_KMS_KEY_ID_STAGE != '' && secrets.TF_BACKEND_KMS_KEY_ID_STAGE || secrets.TF_BACKEND_KMS_KEY_ID) || (secrets.TF_BACKEND_KMS_KEY_ID_TEST != '' && secrets.TF_BACKEND_KMS_KEY_ID_TEST || secrets.TF_BACKEND_KMS_KEY_ID) }}
         run: |
           scripts/ci/terraform_destroy.sh "${{ inputs.environment }}" "destroy-${{ github.run_id }}"
 
       - name: Configure AWS credentials for raksha-core destroy
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ inputs.environment == 'test' && secrets.AWS_INFRA_ROLE_ARN || inputs.environment == 'stage' && secrets.AWS_STAGE_DEPLOY_ROLE_ARN || secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ inputs.environment == 'prod' && (secrets.AWS_PROD_INFRA_ROLE_ARN != '' && secrets.AWS_PROD_INFRA_ROLE_ARN || secrets.AWS_PROD_DEPLOY_ROLE_ARN) || inputs.environment == 'stage' && (secrets.AWS_STAGE_INFRA_ROLE_ARN != '' && secrets.AWS_STAGE_INFRA_ROLE_ARN || secrets.AWS_STAGE_DEPLOY_ROLE_ARN) || (secrets.AWS_TEST_INFRA_ROLE_ARN != '' && secrets.AWS_TEST_INFRA_ROLE_ARN || secrets.AWS_INFRA_ROLE_ARN != '' && secrets.AWS_INFRA_ROLE_ARN || secrets.AWS_TEST_DEPLOY_ROLE_ARN) }}
           aws-region: eu-west-1
 
       - name: Purge raksha-core ECR images (optional)
@@ -197,9 +197,9 @@ jobs:
       - name: Destroy raksha-core
         env:
           AWS_REGION: eu-west-1
-          TF_BACKEND_BUCKET: ${{ secrets.TF_BACKEND_BUCKET }}
-          TF_BACKEND_DYNAMODB_TABLE: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
-          TF_BACKEND_KMS_KEY_ID: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
+          TF_BACKEND_BUCKET: ${{ inputs.environment == 'prod' && (secrets.TF_BACKEND_BUCKET_PROD != '' && secrets.TF_BACKEND_BUCKET_PROD || secrets.TF_BACKEND_BUCKET) || inputs.environment == 'stage' && (secrets.TF_BACKEND_BUCKET_STAGE != '' && secrets.TF_BACKEND_BUCKET_STAGE || secrets.TF_BACKEND_BUCKET) || (secrets.TF_BACKEND_BUCKET_TEST != '' && secrets.TF_BACKEND_BUCKET_TEST || secrets.TF_BACKEND_BUCKET) }}
+          TF_BACKEND_DYNAMODB_TABLE: ${{ inputs.environment == 'prod' && (secrets.TF_BACKEND_DYNAMODB_TABLE_PROD != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_PROD || secrets.TF_BACKEND_DYNAMODB_TABLE) || inputs.environment == 'stage' && (secrets.TF_BACKEND_DYNAMODB_TABLE_STAGE != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_STAGE || secrets.TF_BACKEND_DYNAMODB_TABLE) || (secrets.TF_BACKEND_DYNAMODB_TABLE_TEST != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_TEST || secrets.TF_BACKEND_DYNAMODB_TABLE) }}
+          TF_BACKEND_KMS_KEY_ID: ${{ inputs.environment == 'prod' && (secrets.TF_BACKEND_KMS_KEY_ID_PROD != '' && secrets.TF_BACKEND_KMS_KEY_ID_PROD || secrets.TF_BACKEND_KMS_KEY_ID) || inputs.environment == 'stage' && (secrets.TF_BACKEND_KMS_KEY_ID_STAGE != '' && secrets.TF_BACKEND_KMS_KEY_ID_STAGE || secrets.TF_BACKEND_KMS_KEY_ID) || (secrets.TF_BACKEND_KMS_KEY_ID_TEST != '' && secrets.TF_BACKEND_KMS_KEY_ID_TEST || secrets.TF_BACKEND_KMS_KEY_ID) }}
         run: |
           scripts/ci/terraform_destroy.sh "${{ inputs.environment }}" "destroy-${{ github.run_id }}"
 
