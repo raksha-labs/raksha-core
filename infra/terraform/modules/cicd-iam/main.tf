@@ -123,6 +123,7 @@ resource "aws_iam_role_policy" "infra" {
           "application-autoscaling:*",
           "autoscaling:*",
           "servicediscovery:*",
+          "route53:*",
           "secretsmanager:*",
           "kms:*",
           "rds:*",

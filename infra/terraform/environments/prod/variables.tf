@@ -73,6 +73,12 @@ variable "anomaly_total_impact_absolute_usd" {
   default     = 20
 }
 
+variable "create_anomaly_monitor" {
+  description = "Whether to create a Cost Explorer anomaly monitor/subscription in this account. Disable when the account already has a service monitor."
+  type        = bool
+  default     = false
+}
+
 variable "enable_billing_estimated_charges_alarm" {
   description = "Enable CloudWatch Billing EstimatedCharges alarm (only created in us-east-1)"
   type        = bool

@@ -389,6 +389,7 @@ module "cost_controls" {
   budget_limit_usd                       = var.budget_limit_usd
   alert_email_addresses                  = var.alarm_emails
   anomaly_total_impact_absolute_usd      = var.anomaly_total_impact_absolute_usd
+  create_anomaly_monitor                 = var.create_anomaly_monitor
   enable_billing_estimated_charges_alarm = var.enable_billing_estimated_charges_alarm
   billing_estimated_charges_alarm_usd    = var.billing_estimated_charges_alarm_usd
   name_prefix                            = "raksha-core"
