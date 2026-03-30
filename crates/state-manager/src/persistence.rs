@@ -578,14 +578,12 @@ impl PostgresRepository {
                   ON ds.source_id = ssc.source_id
                 WHERE ds.enabled = TRUE
                   AND ssc.enabled = TRUE
+                  AND ssc.operating_mode_profile = 'live'
                   AND EXISTS (
                     SELECT 1
                     FROM catalog.source_stream_tenant_targets sstt
-                    LEFT JOIN catalog.tenant_operating_mode tom
-                      ON tom.tenant_id = sstt.tenant_id
                     WHERE sstt.stream_config_id = ssc.stream_config_id
                       AND sstt.enabled = TRUE
-                      AND COALESCE(tom.mode, 'live') = ssc.operating_mode_profile
                   )
                 ORDER BY ssc.source_id, ssc.operating_mode_profile, ssc.stream_name, ssc.asset_pair NULLS FIRST
                 "#,
@@ -630,11 +628,10 @@ impl PostgresRepository {
         Ok(configs)
     }
 
-    /// Returns tenant targets for a stream config, filtered by operating mode.
+    /// Returns tenant targets for a stream config.
     ///
-    /// Only tenants whose operating mode matches the stream's `operating_mode_profile`
-    /// receive events from that stream.  Tenants with no row in
-    /// `catalog.tenant_operating_mode` default to `'live'`.
+    /// System is always in live mode. Returns all enabled tenant targets
+    /// for the given stream config.
     pub async fn list_stream_tenant_targets(
         &self,
         stream_config_id: &str,
@@ -646,14 +643,11 @@ impl PostgresRepository {
                 r#"
                 SELECT sstt.tenant_id
                 FROM catalog.source_stream_tenant_targets sstt
-                LEFT JOIN catalog.tenant_operating_mode tom
-                  ON tom.tenant_id = sstt.tenant_id
                 WHERE sstt.stream_config_id::text = $1
                   AND sstt.enabled = TRUE
-                  AND COALESCE(tom.mode, 'live') = $2
                 ORDER BY sstt.tenant_id
                 "#,
-                &[&stream_config_id, &operating_mode_profile],
+                &[&stream_config_id],
             )
             .await
         {
@@ -1136,11 +1130,9 @@ impl PostgresRepository {
                 JOIN catalog.source_stream_tenant_targets stt
                   ON stt.stream_config_id = ssc.stream_config_id
                  AND stt.enabled = TRUE
-                LEFT JOIN catalog.tenant_operating_mode tom
-                  ON tom.tenant_id = stt.tenant_id
                 WHERE ds.source_id = $1
                   AND ds.enabled = TRUE
-                  AND COALESCE(tom.mode, 'live') = ssc.operating_mode_profile
+                  AND ssc.operating_mode_profile = 'live'
                 LIMIT 1
                 "#,
                 &[&source_id],
