@@ -220,8 +220,17 @@ SELECT
 FROM pattern.tenant_pattern_configs tpc
 JOIN catalog.tenant_data_sources tds
   ON tds.tenant_id = tpc.tenant_id
+JOIN catalog.data_sources ds
+  ON ds.source_id = tds.source_id
 WHERE tpc.enabled = TRUE
+  AND NOT (tpc.pattern_id = 'dpeg' AND ds.source_type = 'dex_api')
 ON CONFLICT (tenant_id, pattern_id, source_id) DO NOTHING;
+
+DELETE FROM pattern.tenant_pattern_source_bindings tpsb
+USING catalog.data_sources ds
+WHERE tpsb.pattern_id = 'dpeg'
+  AND tpsb.source_id = ds.source_id
+  AND ds.source_type = 'dex_api';
 
 -- ─── Pattern Alerting Policies (backfill from tenant_policies) ──────────────
 

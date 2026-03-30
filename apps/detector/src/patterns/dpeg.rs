@@ -51,8 +51,6 @@ pub struct DpegSourceFilter {
     pub include_oracles: bool,
     #[serde(default = "default_true")]
     pub include_aggregators: bool,
-    #[serde(default = "default_true")]
-    pub include_dex: bool,
     #[serde(default = "default_min_healthy")]
     pub min_healthy_sources: usize,
 }
@@ -71,7 +69,6 @@ impl Default for DpegSourceFilter {
             cex_whitelist: Vec::new(),
             include_oracles: true,
             include_aggregators: true,
-            include_dex: true,
             min_healthy_sources: 3,
         }
     }
@@ -82,7 +79,8 @@ impl DpegSourceFilter {
         match source_kind.to_ascii_lowercase().as_str() {
             "oracle" => self.include_oracles,
             "aggregator" => self.include_aggregators,
-            "dex" => self.include_dex,
+            // DEX pool prices are intentionally excluded from DPEG consensus.
+            "dex" => false,
             "cex" => {
                 self.cex_whitelist.is_empty()
                     || self
@@ -1586,7 +1584,7 @@ fn build_detection(
         tenant_id: Some(policy.tenant_id.clone()),
         chain: Chain::Offchain,
         chain_slug: "offchain".to_string(),
-        protocol: format!("market:{}", policy.market_key),
+        protocol: "Stablecoin".to_string(),
         lifecycle_state: LifecycleState::Confirmed,
         requires_confirmation: policy.toggles.oracle_confirmation,
         attack_family: AttackFamily::PegDeviation,
