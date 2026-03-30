@@ -129,7 +129,7 @@ variable "admin_default_service" {
 }
 
 variable "enable_public_https" {
-  description = "Enable HTTPS on public ALB"
+  description = "Enable HTTPS on public/admin ALBs"
   type        = bool
   default     = true
 }
