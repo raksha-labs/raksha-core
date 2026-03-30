@@ -578,7 +578,7 @@ impl PostgresRepository {
                   ON ds.source_id = ssc.source_id
                 WHERE ds.enabled = TRUE
                   AND ssc.enabled = TRUE
-                  AND ssc.operating_mode_profile = 'live'
+                  AND ssc.operating_mode_profile IN ('live', 'test')
                   AND EXISTS (
                     SELECT 1
                     FROM catalog.source_stream_tenant_targets sstt
@@ -635,7 +635,7 @@ impl PostgresRepository {
     pub async fn list_stream_tenant_targets(
         &self,
         stream_config_id: &str,
-        operating_mode_profile: &str,
+        _operating_mode_profile: &str,
     ) -> Result<Vec<StreamTenantTarget>> {
         let rows = match self
             .client

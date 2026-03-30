@@ -16,7 +16,7 @@ locals {
     for svc in local.service_catalog_raw.services :
     svc.service_name => svc
   }
-  secret_prefix    = "raksha/${var.environment}"
+  secret_prefix = "raksha/${var.environment}"
   create_public_waf = var.enable_waf && length([
     for _, svc in local.service_catalog_map : 1
     if try(svc.exposure, "internal") == "public"

@@ -1124,7 +1124,10 @@ fn annotate_evidence_fields(
         .cloned()
         .unwrap_or_else(Map::new);
     let mut evidence = Map::new();
-    evidence.insert("sustain_window_event".to_string(), json!(sustain_window_event));
+    evidence.insert(
+        "sustain_window_event".to_string(),
+        json!(sustain_window_event),
+    );
     evidence.insert("decision_input".to_string(), json!(decision_input));
     if let Some(trace) = contributor {
         evidence.insert("source_kind".to_string(), json!(trace.source_kind));

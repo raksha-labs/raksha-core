@@ -373,7 +373,10 @@ fn read_timestamp_millis(value: Option<&Value>) -> Option<i64> {
         .map(|ts| ts.timestamp_millis())
 }
 
-fn inferred_tvl_usd(payload: &serde_json::Map<String, Value>, price_usd: Option<f64>) -> Option<f64> {
+fn inferred_tvl_usd(
+    payload: &serde_json::Map<String, Value>,
+    price_usd: Option<f64>,
+) -> Option<f64> {
     read_f64(payload.get("tvl_usd"))
         .or_else(|| read_f64(payload.get("total_supplied_tokens")))
         .or_else(|| read_f64(payload.get("total_supplied")))
@@ -396,9 +399,13 @@ fn build_mock_state_payload(
 ) -> Option<Value> {
     let mut object = parse_mock_state_payload(raw_result)?.as_object()?.clone();
 
-    object
-        .entry("event_type".to_string())
-        .or_insert_with(|| Value::String(spec.event_type.clone().unwrap_or_else(|| "protocol_state".to_string())));
+    object.entry("event_type".to_string()).or_insert_with(|| {
+        Value::String(
+            spec.event_type
+                .clone()
+                .unwrap_or_else(|| "protocol_state".to_string()),
+        )
+    });
     object
         .entry("metric".to_string())
         .or_insert_with(|| Value::String(spec.metric.clone()));
@@ -421,7 +428,10 @@ fn build_mock_state_payload(
     object
         .entry("call_data".to_string())
         .or_insert_with(|| Value::String(spec.call_data.clone()));
-    object.insert("chainId".to_string(), chain_id.map_or(Value::Null, |value| json!(value)));
+    object.insert(
+        "chainId".to_string(),
+        chain_id.map_or(Value::Null, |value| json!(value)),
+    );
     object.insert("block_number".to_string(), json!(block_number));
     object.insert(
         "timestamp".to_string(),

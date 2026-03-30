@@ -50,6 +50,7 @@ pub async fn run_stream_supervisor(
     stream: RedisStreamPublisher,
     database_url: String,
     purge_enabled: bool,
+    live_streams_enabled: bool,
     mut command_rx: mpsc::Receiver<SupervisorCommand>,
 ) -> Result<()> {
     let raw_repo = match PostgresRawRepository::from_env().await {
@@ -76,12 +77,25 @@ pub async fn run_stream_supervisor(
     let mut reconcile_tick = build_reconcile_tick(listener_connected);
     let mut purge_tick = interval(Duration::from_secs(DEFAULT_PURGE_INTERVAL_SECS));
 
-    reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await?;
+    reconcile(
+        &repo,
+        raw_repo.as_ref(),
+        &stream,
+        &mut workers,
+        live_streams_enabled,
+    )
+    .await?;
 
     loop {
         tokio::select! {
             _ = reconcile_tick.tick() => {
-                if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
+                if let Err(error) = reconcile(
+                    &repo,
+                    raw_repo.as_ref(),
+                    &stream,
+                    &mut workers,
+                    live_streams_enabled,
+                ).await {
                     common::log_error!(warn, error, "stream supervisor periodic reconcile failed");
                 }
             }
@@ -123,7 +137,13 @@ pub async fn run_stream_supervisor(
                 if !should_reconcile {
                     continue;
                 }
-                if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
+                if let Err(error) = reconcile(
+                    &repo,
+                    raw_repo.as_ref(),
+                    &stream,
+                    &mut workers,
+                    live_streams_enabled,
+                ).await {
                     common::log_error!(warn, error, "stream supervisor notify-driven reconcile failed");
                 }
             }
@@ -134,7 +154,13 @@ pub async fn run_stream_supervisor(
                     command_rx = disabled_rx;
                     continue;
                 };
-                if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
+                if let Err(error) = reconcile(
+                    &repo,
+                    raw_repo.as_ref(),
+                    &stream,
+                    &mut workers,
+                    live_streams_enabled,
+                ).await {
                     common::log_error!(warn, error, "stream supervisor explicit reconcile failed");
                 }
             }
@@ -166,19 +192,21 @@ async fn reconcile(
     raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     workers: &mut HashMap<String, WorkerHandle>,
+    live_streams_enabled: bool,
 ) -> Result<()> {
     let effective = repo.list_effective_stream_configs().await?;
     let mut desired_ids: Vec<String> = Vec::new();
 
     for cfg in effective {
-        if let Some(reason) = skipped_test_stream_reason(&cfg) {
+        if let Some(reason) = skipped_stream_reason(&cfg, live_streams_enabled) {
             info!(
                 stream_config_id = %cfg.stream_config_id,
                 source_id = %cfg.source_id,
                 stream_name = %cfg.stream_name,
                 connector_mode = %cfg.connector_mode,
+                operating_mode_profile = %cfg.operating_mode_profile,
                 reason,
-                "skipping deprecated test stream config",
+                "skipping stream config during reconcile",
             );
             continue;
         }
@@ -300,6 +328,16 @@ fn skipped_test_stream_reason(cfg: &EffectiveStreamConfig) -> Option<&'static st
         }
     }
     None
+}
+
+fn skipped_stream_reason(
+    cfg: &EffectiveStreamConfig,
+    live_streams_enabled: bool,
+) -> Option<&'static str> {
+    if cfg.operating_mode_profile == "live" && !live_streams_enabled {
+        return Some("live streams disabled by configuration");
+    }
+    skipped_test_stream_reason(cfg)
 }
 
 fn to_runtime_config(
@@ -523,7 +561,7 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<NotifySi
 
 #[cfg(test)]
 mod tests {
-    use super::skipped_test_stream_reason;
+    use super::{skipped_stream_reason, skipped_test_stream_reason};
     use state_manager::EffectiveStreamConfig;
 
     fn config_for(endpoint_key: &str, endpoint: &str) -> EffectiveStreamConfig {
@@ -581,5 +619,22 @@ mod tests {
             skipped_test_stream_reason(&cfg),
             Some("unresolved endpoint placeholder")
         );
+    }
+
+    #[test]
+    fn skips_live_streams_when_disabled() {
+        let mut cfg = config_for("rpc_url", "wss://example.invalid/feed");
+        cfg.operating_mode_profile = "live".to_string();
+        assert_eq!(
+            skipped_stream_reason(&cfg, false),
+            Some("live streams disabled by configuration")
+        );
+    }
+
+    #[test]
+    fn keeps_live_streams_when_enabled() {
+        let mut cfg = config_for("rpc_url", "wss://example.invalid/feed");
+        cfg.operating_mode_profile = "live".to_string();
+        assert_eq!(skipped_stream_reason(&cfg, true), None);
     }
 }

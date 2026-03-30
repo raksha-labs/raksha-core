@@ -137,6 +137,16 @@ VALUES
     ('glider', 'defillama-http', TRUE, '{}'::jsonb)
 ON CONFLICT (tenant_id, source_id) DO NOTHING;
 
+\if :{?seed_live_stream_targets_enabled}
+\else
+\set seed_live_stream_targets_enabled false
+\endif
+
+\if :{?seed_test_stream_targets_enabled}
+\else
+\set seed_test_stream_targets_enabled true
+\endif
+
 -- ─── Default Stream Configs (created by glider) ────────────────────────────
 
 WITH desired_stream_configs AS (
@@ -355,7 +365,10 @@ INSERT INTO catalog.source_stream_tenant_targets (
 SELECT
   ssc.stream_config_id,
   'glider',
-  TRUE,
+  CASE
+    WHEN ssc.operating_mode_profile = 'test' THEN :seed_test_stream_targets_enabled
+    ELSE :seed_live_stream_targets_enabled
+  END,
   'glider'
 FROM catalog.source_stream_configs ssc
 JOIN desired_stream_refs ds
@@ -462,17 +475,19 @@ INSERT INTO catalog.source_stream_tenant_targets (
 SELECT
   ssc.stream_config_id,
   'glider',
-  TRUE,
+  CASE
+    WHEN ssc.operating_mode_profile = 'test' THEN :seed_test_stream_targets_enabled
+    ELSE :seed_live_stream_targets_enabled
+  END,
   'glider'
 FROM catalog.source_stream_configs ssc
 WHERE ssc.source_id = 'defillama-http'
-  AND ssc.operating_mode_profile = 'live'
+  AND ssc.operating_mode_profile IN ('live', 'test', 'both')
 ON CONFLICT (stream_config_id, tenant_id) DO NOTHING;
 
 -- ─── Default Tenant Operating Mode (local/dev bootstrap) ───────────────────
--- Local bootstrap defaults Glider to TEST mode so replay workflows can start
--- without manual tenant mode changes. Replay test streams are still created
--- dynamically for simulation runs and should not exist as static seeds.
+-- Live stream targets default disabled; test stream targets default enabled.
+-- Replay test streams are still created dynamically for simulation runs.
 INSERT INTO catalog.tenant_operating_mode (
   tenant_id,
   mode,
