@@ -30,6 +30,7 @@ const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 const ALL_NOTIFICATION_CHANNELS: [&str; 5] = ["webhook", "slack", "telegram", "discord", "email"];
 const ALERT_EVIDENCE_BUFFER_BEFORE_MS: i64 = 30_000;
 const ALERT_EVIDENCE_BUFFER_AFTER_MS: i64 = 10_000;
+const DEFAULT_SUSTAINED_WINDOW_MS: i64 = 60_000;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct EvidenceContributorTrace {
@@ -1116,13 +1117,14 @@ fn annotate_evidence_fields(
     normalized_fields: &Value,
     contributor: Option<&EvidenceContributorTrace>,
     decision_input: bool,
+    sustain_window_event: bool,
 ) -> Value {
     let mut fields = normalized_fields
         .as_object()
         .cloned()
         .unwrap_or_else(Map::new);
     let mut evidence = Map::new();
-    evidence.insert("sustain_window_event".to_string(), json!(true));
+    evidence.insert("sustain_window_event".to_string(), json!(sustain_window_event));
     evidence.insert("decision_input".to_string(), json!(decision_input));
     if let Some(trace) = contributor {
         evidence.insert("source_kind".to_string(), json!(trace.source_kind));
@@ -1145,6 +1147,17 @@ fn annotate_evidence_fields(
     }
     fields.insert("__raksha_evidence".to_string(), Value::Object(evidence));
     Value::Object(fields)
+}
+
+fn is_within_sustain_window(alert: &AlertEvent, observed_at: DateTime<Utc>) -> bool {
+    let sustained_window_ms = alert
+        .oracle_context
+        .get("sustained_window_ms")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_SUSTAINED_WINDOW_MS);
+    let sustain_start = alert.created_at - ChronoDuration::milliseconds(sustained_window_ms);
+    observed_at >= sustain_start && observed_at <= alert.created_at
 }
 
 fn synthetic_evidence_record(
@@ -1170,7 +1183,12 @@ fn synthetic_evidence_record(
             "trace": contributor,
             "captured_from": "detector.quote_cache"
         }),
-        normalized_fields: annotate_evidence_fields(&json!({}), Some(contributor), true),
+        normalized_fields: annotate_evidence_fields(
+            &json!({}),
+            Some(contributor),
+            true,
+            is_within_sustain_window(alert, contributor.observed_at),
+        ),
         raw_ref_type: Some("detector.quote_cache".to_string()),
         raw_ref_id: Some(format!(
             "{}:{}",
@@ -1184,9 +1202,15 @@ fn evidence_lookup_window(
     alert: &AlertEvent,
     contributors: &[EvidenceContributorTrace],
 ) -> (DateTime<Utc>, DateTime<Utc>) {
-    let fallback_start =
-        alert.created_at - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS);
-    let fallback_end =
+    let sustained_window_ms = alert
+        .oracle_context
+        .get("sustained_window_ms")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_SUSTAINED_WINDOW_MS);
+    let required_start = alert.created_at
+        - ChronoDuration::milliseconds(sustained_window_ms + ALERT_EVIDENCE_BUFFER_BEFORE_MS);
+    let required_end =
         alert.created_at + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS);
 
     let Some(first_seen) = contributors
@@ -1194,19 +1218,25 @@ fn evidence_lookup_window(
         .map(|contributor| contributor.observed_at)
         .min()
     else {
-        return (fallback_start, fallback_end);
+        return (required_start, required_end);
     };
     let Some(last_seen) = contributors
         .iter()
         .map(|contributor| contributor.observed_at)
         .max()
     else {
-        return (fallback_start, fallback_end);
+        return (required_start, required_end);
     };
 
     (
-        first_seen - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS),
-        last_seen + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS),
+        std::cmp::min(
+            required_start,
+            first_seen - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS),
+        ),
+        std::cmp::max(
+            required_end,
+            last_seen + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS),
+        ),
     )
 }
 
@@ -1273,6 +1303,7 @@ async fn persist_alert_evidence_snapshot(
                 &row.normalized_fields,
                 matched_contributor,
                 matched_contributor.is_some(),
+                is_within_sustain_window(alert, row.observed_at),
             ),
             raw_ref_type: Some("catalog.ingest_operational_events".to_string()),
             raw_ref_id: Some(row.ingest_event_id.clone()),
@@ -1671,17 +1702,17 @@ mod tests {
     }
 
     #[test]
-    fn evidence_lookup_window_uses_contributor_timestamps() {
+    fn evidence_lookup_window_expands_to_cover_sustain_window_and_padding() {
         let alert =
             alert_from_detection(&mk_detection(Severity::Medium, IncidentTransition::Trigger));
+        let sustain_window_start =
+            alert.created_at - ChronoDuration::milliseconds(DEFAULT_SUSTAINED_WINDOW_MS);
         let contributors = vec![
             EvidenceContributorTrace {
                 source_id: "chainlink-data-streams".to_string(),
                 source_kind: "oracle".to_string(),
                 price: 0.9985,
-                observed_at: DateTime::parse_from_rfc3339("2026-03-05T14:00:40Z")
-                    .unwrap()
-                    .with_timezone(&Utc),
+                observed_at: sustain_window_start + ChronoDuration::seconds(10),
                 age_ms: 0,
                 weight: 1.0,
                 divergence_pct: 0.15,
@@ -1694,9 +1725,7 @@ mod tests {
                 source_id: "kraken-spot".to_string(),
                 source_kind: "cex".to_string(),
                 price: 0.9984,
-                observed_at: DateTime::parse_from_rfc3339("2026-03-05T14:01:10Z")
-                    .unwrap()
-                    .with_timezone(&Utc),
+                observed_at: alert.created_at - ChronoDuration::seconds(5),
                 age_ms: 0,
                 weight: 1.0,
                 divergence_pct: 0.16,
@@ -1710,15 +1739,14 @@ mod tests {
         let (window_start, window_end) = evidence_lookup_window(&alert, &contributors);
         assert_eq!(
             window_start,
-            DateTime::parse_from_rfc3339("2026-03-05T14:00:10Z")
-                .unwrap()
-                .with_timezone(&Utc)
+            alert.created_at
+                - ChronoDuration::milliseconds(
+                    DEFAULT_SUSTAINED_WINDOW_MS + ALERT_EVIDENCE_BUFFER_BEFORE_MS,
+                )
         );
         assert_eq!(
             window_end,
-            DateTime::parse_from_rfc3339("2026-03-05T14:01:20Z")
-                .unwrap()
-                .with_timezone(&Utc)
+            alert.created_at + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS)
         );
     }
 
@@ -1729,7 +1757,10 @@ mod tests {
         let (window_start, window_end) = evidence_lookup_window(&alert, &[]);
         assert_eq!(
             window_start,
-            alert.created_at - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS)
+            alert.created_at
+                - ChronoDuration::milliseconds(
+                    DEFAULT_SUSTAINED_WINDOW_MS + ALERT_EVIDENCE_BUFFER_BEFORE_MS,
+                )
         );
         assert_eq!(
             window_end,
