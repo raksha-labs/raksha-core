@@ -16,7 +16,11 @@ locals {
     for svc in local.service_catalog_raw.services :
     svc.service_name => svc
   }
-  secret_prefix = "raksha/${var.environment}"
+  secret_prefix    = "raksha/${var.environment}"
+  create_public_waf = var.enable_waf && length([
+    for _, svc in local.service_catalog_map : 1
+    if try(svc.exposure, "internal") == "public"
+  ]) > 0
 }
 
 module "network" {
@@ -313,7 +317,7 @@ resource "aws_ssm_parameter" "core_github_deploy_role_arn" {
 }
 
 resource "aws_wafv2_web_acl" "public" {
-  count = var.enable_waf && module.compute.public_alb_arn != null ? 1 : 0
+  count = local.create_public_waf ? 1 : 0
 
   name  = "raksha-${var.environment}-waf"
   scope = "REGIONAL"
@@ -376,7 +380,7 @@ resource "aws_wafv2_web_acl" "public" {
 }
 
 resource "aws_wafv2_web_acl_association" "public" {
-  count = var.enable_waf && module.compute.public_alb_arn != null ? 1 : 0
+  count = local.create_public_waf ? 1 : 0
 
   resource_arn = module.compute.public_alb_arn
   web_acl_arn  = aws_wafv2_web_acl.public[0].arn
