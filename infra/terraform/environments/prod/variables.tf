@@ -191,7 +191,7 @@ variable "cache_node_type" {
 variable "cache_num_nodes" {
   description = "Redis node count"
   type        = number
-  default     = 1
+  default     = 2
 }
 
 variable "alb_ingress_cidrs" {
