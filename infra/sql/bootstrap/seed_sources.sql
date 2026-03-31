@@ -10,6 +10,7 @@ INSERT INTO catalog.data_sources (
   connection_config,
   filters,
   scope,
+  scope_kind,
   owner_tenant_id,
   enabled
 )
@@ -18,88 +19,91 @@ VALUES
     ('binance-global', 'cex_websocket', 'binance',
      '{"ws_endpoint": "wss://stream.binance.com:9443/ws"}'::jsonb,
      '{"market_symbols": ["USDCUSDT", "DAIUSDT"]}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('coinbase-advanced', 'cex_websocket', 'coinbase',
      '{"ws_endpoint": "wss://advanced-trade-ws.coinbase.com"}'::jsonb,
      '{"market_symbols": ["USDC-USD", "USDT-USD", "DAI-USD"]}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('kraken-spot', 'cex_websocket', 'kraken',
      '{"ws_endpoint": "wss://ws.kraken.com/v2"}'::jsonb,
      '{"market_symbols": ["USDC/USD", "USDT/USD", "DAI/USD"]}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('okx-global', 'cex_websocket', 'okx',
      '{"ws_endpoint": "wss://ws.okx.com:8443/ws/v5/public"}'::jsonb,
      '{"market_symbols": ["USDC-USDT", "USDT-USDC", "DAI-USDT"]}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('bybit-spot', 'cex_websocket', 'bybit',
      '{"ws_endpoint": "wss://stream.bybit.com/v5/public/spot"}'::jsonb,
      '{"market_symbols": ["USDCUSDT", "USDTUSDC", "DAIUSDT"]}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('gemini-spot', 'cex_websocket', 'gemini',
      '{"ws_endpoint": "wss://api.gemini.com/v1/marketdata/{subscription_key}"}'::jsonb,
      '{"market_symbols": ["usdcusd", "usdtusd", "daiusd"]}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('binance-global-http', 'cex_websocket', 'binance',
      '{"http_url": "https://api.binance.com/api/v3/ticker/24hr?symbol={subscription_key}"}'::jsonb,
      '{"market_symbols": ["USDCUSDT", "DAIUSDT"], "category": "cex", "display_name": "Binance"}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('kraken-spot-http', 'cex_websocket', 'kraken',
      '{"http_url": "https://api.kraken.com/0/public/Ticker?pair={subscription_key}"}'::jsonb,
      '{"market_symbols": ["USDCUSD", "USDTUSD", "DAIUSD"], "category": "cex", "display_name": "Kraken"}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('okx-global-http', 'cex_websocket', 'okx',
      '{"http_url": "https://www.okx.com/api/v5/market/ticker?instId={subscription_key}"}'::jsonb,
      '{"market_symbols": ["USDC-USDT", "USDT-USDC", "DAI-USDT"], "category": "cex", "display_name": "OKX"}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('bybit-spot-http', 'cex_websocket', 'bybit',
      '{"http_url": "https://api.bybit.com/v5/market/tickers?category=spot&symbol={subscription_key}"}'::jsonb,
      '{"market_symbols": ["USDCUSDT", "USDTUSDC", "DAIUSDT"], "category": "cex", "display_name": "Bybit"}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('gemini-spot-http', 'cex_websocket', 'gemini',
      '{"http_url": "https://api.gemini.com/v1/pubticker/{subscription_key}"}'::jsonb,
      '{"market_symbols": ["usdcusd", "usdtusd", "daiusd"], "category": "cex", "display_name": "Gemini"}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('gate-spot-http', 'cex_websocket', 'gate',
      '{"http_url": "https://api.gateio.ws/api/v4/spot/tickers?currency_pair={subscription_key}"}'::jsonb,
      '{"market_symbols": ["USDC_USDT", "DAI_USDT"], "category": "cex", "display_name": "Gate"}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
 
     -- Oracle + DEX Log Sources (Ethereum mainnet)
     ('chainlink-eth-mainnet', 'oracle_api', 'chainlink',
      '{"rpc_url": "wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}", "chain_id": 1, "chain_slug": "ethereum"}'::jsonb,
      '{"market_symbols": ["USDC/USD", "USDT/USD", "DAI/USD"]}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('chainlink-data-streams', 'oracle_api', 'chainlink-data-streams',
      '{"endpoint": "https://api.dataengine.chain.link", "ws_endpoint": "wss://ws.dataengine.chain.link"}'::jsonb,
      '{"market_symbols": ["USDC/USD", "USDT/USD", "DAI/USD"]}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('uniswap-v2-eth-mainnet', 'dex_api', 'uniswap-v2',
      '{"rpc_url": "wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}", "chain_id": 1, "chain_slug": "ethereum"}'::jsonb,
      '{"market_symbols": ["USDC/USD", "USDT/USD", "DAI/USD"]}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('uniswap-v3-eth-mainnet', 'dex_api', 'uniswap-v3',
      '{"rpc_url": "wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}", "chain_id": 1, "chain_slug": "ethereum"}'::jsonb,
      '{"market_symbols": ["USDC/USD", "USDT/USD", "DAI/USD"]}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('sushi-v2-eth-mainnet', 'dex_api', 'sushi-v2',
      '{"rpc_url": "wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}", "chain_id": 1, "chain_slug": "ethereum"}'::jsonb,
      '{"market_symbols": ["USDC/USD", "USDT/USD", "DAI/USD"]}'::jsonb,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
 
     -- EVM Chain Sources
     ('ethereum-mainnet', 'evm_chain', 'ethereum',
      '{"chain_id": 1, "chain_slug": "ethereum", "rpc_url": "wss://eth-mainnet.g.alchemy.com/v2/{alchemy_api_key}"}'::jsonb,
      NULL,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('arbitrum-one', 'evm_chain', 'arbitrum',
      '{"chain_id": 42161, "chain_slug": "arbitrum", "rpc_url": "wss://arb-mainnet.g.alchemy.com/v2/{alchemy_api_key}"}'::jsonb,
      NULL,
-     'global', NULL, TRUE),
+     'global', 'platform', NULL, TRUE),
     ('defillama-http', 'custom_api', 'defillama',
      '{"http_base_url": "https://api.llama.fi"}'::jsonb,
      NULL,
-     'global', NULL, TRUE)
-ON CONFLICT (source_id) DO NOTHING;
+     'global', 'platform', NULL, TRUE)
+ON CONFLICT (source_id) DO UPDATE
+SET scope = EXCLUDED.scope,
+    scope_kind = EXCLUDED.scope_kind,
+    owner_tenant_id = EXCLUDED.owner_tenant_id;
 
 -- ─── Default Tenant "glider" ─────────────────────────────────────────────────
 -- Associates all default sources and patterns with the built-in tenant.
@@ -147,7 +151,7 @@ ON CONFLICT (tenant_id, source_id) DO NOTHING;
 \set seed_test_stream_targets_enabled true
 \endif
 
--- ─── Default Stream Configs (created by glider) ────────────────────────────
+-- ─── Default Platform Stream Configs ────────────────────────────────────────
 
 WITH desired_stream_configs AS (
   SELECT *
@@ -282,7 +286,7 @@ SELECT
   ds.payload_ts_unit,
   ds.poll_interval_ms,
   ds.enabled,
-  ds.created_by
+  'bootstrap:platform'
 FROM desired_stream_configs ds
 WHERE EXISTS (
   SELECT 1
@@ -298,9 +302,9 @@ AND NOT EXISTS (
     AND COALESCE(ssc.subscription_key, '') = COALESCE(ds.subscription_key, '')
 );
 
--- Grant the glider tenant access to the baseline live market/oracle streams
--- used by local development and demo scenarios. Replay test streams are
--- provisioned dynamically per tenant/run by workbench-services.
+-- Grant the glider tenant access to the baseline platform live market/oracle
+-- streams used by local development and demo scenarios. Replay test streams
+-- are provisioned dynamically per tenant/run by workbench-services.
 
 WITH desired_stream_refs AS (
   SELECT source_id, stream_name, subscription_key, asset_pair
@@ -369,7 +373,7 @@ SELECT
     WHEN ssc.operating_mode_profile = 'test' THEN :seed_test_stream_targets_enabled
     ELSE :seed_live_stream_targets_enabled
   END,
-  'glider'
+  'bootstrap:platform'
 FROM catalog.source_stream_configs ssc
 JOIN desired_stream_refs ds
   ON ds.source_id = ssc.source_id
@@ -444,7 +448,7 @@ SELECT
   psc.payload_ts_unit,
   psc.poll_interval_ms,
   psc.enabled,
-  psc.created_by
+  'bootstrap:platform'
 FROM protocol_stream_configs psc
 WHERE EXISTS (
   SELECT 1 FROM catalog.data_sources src WHERE src.source_id = psc.source_id
@@ -466,6 +470,13 @@ WHERE source_id = 'defillama-http'
   AND operating_mode_profile = 'live'
   AND (connection_config_override IS NULL OR connection_config_override->>'http_url' IS NULL);
 
+UPDATE catalog.source_stream_configs AS ssc
+SET created_by = 'bootstrap:platform'
+FROM catalog.data_sources AS src
+WHERE src.source_id = ssc.source_id
+  AND COALESCE(src.scope_kind, CASE WHEN src.scope = 'tenant' THEN 'tenant' ELSE 'platform' END) = 'platform'
+  AND ssc.created_by <> 'bootstrap:platform';
+
 INSERT INTO catalog.source_stream_tenant_targets (
   stream_config_id,
   tenant_id,
@@ -479,11 +490,21 @@ SELECT
     WHEN ssc.operating_mode_profile = 'test' THEN :seed_test_stream_targets_enabled
     ELSE :seed_live_stream_targets_enabled
   END,
-  'glider'
+  'bootstrap:platform'
 FROM catalog.source_stream_configs ssc
 WHERE ssc.source_id = 'defillama-http'
   AND ssc.operating_mode_profile IN ('live', 'test', 'both')
 ON CONFLICT (stream_config_id, tenant_id) DO NOTHING;
+
+UPDATE catalog.source_stream_tenant_targets AS stt
+SET created_by = 'bootstrap:platform'
+FROM catalog.source_stream_configs AS ssc
+JOIN catalog.data_sources AS src
+  ON src.source_id = ssc.source_id
+WHERE stt.stream_config_id = ssc.stream_config_id
+  AND stt.tenant_id = 'glider'
+  AND COALESCE(src.scope_kind, CASE WHEN src.scope = 'tenant' THEN 'tenant' ELSE 'platform' END) = 'platform'
+  AND stt.created_by <> 'bootstrap:platform';
 
 -- ─── Default Tenant Operating Mode (local/dev bootstrap) ───────────────────
 -- Live stream targets default disabled; test stream targets default enabled.

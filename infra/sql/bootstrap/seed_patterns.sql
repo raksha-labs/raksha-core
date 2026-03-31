@@ -2,30 +2,44 @@
 -- ============================================================================
 -- Raksha - Seed Data
 -- ============================================================================
--- This file seeds the database with initial patterns, data sources, and
+-- This file seeds the database with initial platform patterns plus
 -- example tenant configuration for the default "glider" tenant.
 --
 -- Run this file after bootstrap/core_schema.sql to populate initial data.
--- All inserts use ON CONFLICT DO NOTHING for safe re-running.
+-- Catalog inserts use upserts so reruns normalize platform scope metadata.
 -- ============================================================================
 
 -- ─── Pattern Catalog ─────────────────────────────────────────────────────────
 
-INSERT INTO pattern.patterns (pattern_id, pattern_name, description, enabled)
+INSERT INTO pattern.patterns (
+  pattern_id,
+  pattern_name,
+  description,
+  scope_kind,
+  owner_tenant_id,
+  status,
+  enabled
+)
 VALUES
     ('dpeg', 'Stablecoin Depeg Alert',
      'Detects sustained divergence of a pegged asset from its peg target using HTTP-polled CEX and oracle price feeds with configurable polling intervals.',
-     TRUE),
+     'platform', NULL, 'active', TRUE),
     ('dpeg_rpc', 'Stablecoin Depeg Alert (WebSocket)',
      'Detects sustained divergence of a pegged asset from its peg target using real-time WebSocket feeds from exchanges and on-chain oracles.',
-     TRUE),
+     'platform', NULL, 'active', TRUE),
     ('flash_loan', 'Flash Loan Attack', 
      'Detects flash loan attacks by monitoring EVM chain events for anomalous loan + extraction patterns.', 
-     TRUE),
+     'platform', NULL, 'active', TRUE),
     ('utilization_high', 'Protocol High Utilization',
      'Detects sustained high utilization in lending protocols using protocol_state events and per-market or protocol thresholds.',
-     TRUE)
-ON CONFLICT (pattern_id) DO NOTHING;
+     'platform', NULL, 'active', TRUE)
+ON CONFLICT (pattern_id) DO UPDATE
+SET pattern_name = EXCLUDED.pattern_name,
+    description = EXCLUDED.description,
+    scope_kind = EXCLUDED.scope_kind,
+    owner_tenant_id = EXCLUDED.owner_tenant_id,
+    status = EXCLUDED.status,
+    enabled = EXCLUDED.enabled;
 
 -- ─── Pattern Default Configurations ─────────────────────────────────────────
 
