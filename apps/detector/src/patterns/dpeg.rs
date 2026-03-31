@@ -637,21 +637,6 @@ impl DpegPattern {
             .cloned()
     }
 
-    fn accelerated_simulation_run(event: &UnifiedEvent) -> bool {
-        event
-            .payload
-            .get("simulation")
-            .and_then(Value::as_object)
-            .and_then(|simulation| simulation.get("speed_factor"))
-            .and_then(|value| match value {
-                Value::Number(number) => number.as_f64(),
-                Value::String(raw) => raw.trim().parse::<f64>().ok(),
-                _ => None,
-            })
-            .map(|speed_factor| speed_factor.is_finite() && speed_factor > 1.0)
-            .unwrap_or(false)
-    }
-
     fn classify_context(
         &self,
         policy: &DpegPolicy,
@@ -764,8 +749,6 @@ impl DetectionPattern for DpegPattern {
             return Ok(None);
         };
         let (is_simulated, simulation_run_id) = super::simulation_metadata_from_event(event);
-        let accelerated_simulation_run =
-            simulation_run_id.is_some() && Self::accelerated_simulation_run(event);
         let replay_scope = simulation_run_id
             .clone()
             .unwrap_or_else(|| "__live__".to_string());
@@ -1580,10 +1563,7 @@ fn build_detection(
         "chainlink_deviation_pct".to_string(),
         serde_json::json!(chainlink_deviation_pct),
     );
-    oracle_context.insert(
-        "pyth_price".to_string(),
-        serde_json::json!(pyth_price),
-    );
+    oracle_context.insert("pyth_price".to_string(), serde_json::json!(pyth_price));
     oracle_context.insert(
         "pyth_deviation_pct".to_string(),
         serde_json::json!(pyth_deviation_pct),
@@ -1783,7 +1763,6 @@ fn dpeg_test_mode_reason(
     }
     "breach_inactive"
 }
-
 
 fn recommended_actions_for_severity(severity: &Severity) -> Vec<String> {
     match severity {
@@ -2136,6 +2115,7 @@ mod tests {
         let mut tenant_a_policy = base_policy();
         tenant_a_policy.tenant_id = "tenant-a".to_string();
         tenant_a_policy.severity_bands.medium = 0.5;
+        tenant_a_policy.toggles.oracle_confirmation = false;
         tenant_a_policy.severity_bands_isolated = Some(DpegSeverityBands {
             medium: 0.5,
             high: 1.0,
@@ -2146,6 +2126,7 @@ mod tests {
         let mut tenant_b_policy = base_policy();
         tenant_b_policy.tenant_id = "tenant-b".to_string();
         tenant_b_policy.severity_bands.medium = 2.0;
+        tenant_b_policy.toggles.oracle_confirmation = false;
         tenant_b_policy.severity_bands_isolated = Some(DpegSeverityBands {
             medium: 2.0,
             high: 4.0,
@@ -2213,10 +2194,10 @@ mod tests {
     #[test]
     fn deescalation_requires_configured_block_count() {
         let now = Utc::now();
-        let policy = base_policy();
+        let mut policy = base_policy();
+        policy.toggles.oracle_confirmation = false;
         let quotes = vec![quote("cex-a", "cex", 0.994, now)];
         let mut state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now),
             last_divergence_pct: Some(1.2),
@@ -2257,7 +2238,6 @@ mod tests {
         let policy = base_policy();
         let quotes = vec![quote("cex-a", "cex", 0.9998, now)];
         let mut state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now),
             last_divergence_pct: Some(0.8),
@@ -2299,9 +2279,9 @@ mod tests {
         policy.cooldown_sec = 300;
         policy.min_confidence_to_fire = 0.0;
         policy.stale_timeout_ms = 300_000;
+        policy.toggles.oracle_confirmation = false;
         let quotes = vec![quote("cex-a", "cex", 0.989, now)];
         let state = DpegAlertState {
-
             cooldown_until: Some(now + Duration::seconds(120)),
             last_alerted_at: Some(now - Duration::seconds(10)),
             last_divergence_pct: Some(0.6),
@@ -2352,9 +2332,9 @@ mod tests {
         policy.deescalation_blocks = 2;
         policy.min_confidence_to_fire = 0.0;
         policy.stale_timeout_ms = 300_000;
+        policy.toggles.oracle_confirmation = false;
         let quotes = vec![quote("cex-a", "cex", 0.994, now)];
         let state = DpegAlertState {
-
             cooldown_until: Some(now + Duration::seconds(60)),
             last_alerted_at: Some(now - Duration::seconds(10)),
             last_divergence_pct: Some(1.2),
@@ -3041,7 +3021,6 @@ mod tests {
 
         // Set up state as if there was an active ISOLATED incident
         let state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3074,7 +3053,6 @@ mod tests {
         let policy = spec_policy();
 
         let state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(30)),
             last_divergence_pct: Some(1.5),
@@ -3117,7 +3095,6 @@ mod tests {
 
         // Incident was triggered under SYSTEMIC (trigger_floor_pct = 0.01)
         let state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(0.05),
@@ -3151,7 +3128,6 @@ mod tests {
         policy.resolution_blocks = 1;
 
         let state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(0.05),
@@ -3191,7 +3167,6 @@ mod tests {
         policy.resolution_blocks = 1;
 
         let state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(1.5),
@@ -3228,7 +3203,6 @@ mod tests {
         policy.resolution_blocks = 1;
 
         let state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(1.5),
@@ -3264,7 +3238,6 @@ mod tests {
         policy.resolution_blocks = 30;
 
         let mut state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3309,7 +3282,6 @@ mod tests {
         policy.resolution_blocks = 30;
 
         let state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3345,7 +3317,6 @@ mod tests {
         policy.resolution_blocks = 30;
 
         let base_state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3412,7 +3383,6 @@ mod tests {
         policy.resolution_blocks = 1; // Fast resolution
 
         let state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(1.5),
@@ -3565,7 +3535,6 @@ mod tests {
 
         // State: just resolved, cooldown active
         let state = DpegAlertState {
-
             cooldown_until: Some(now + Duration::seconds(250)),
             last_alerted_at: Some(now - Duration::seconds(5)),
             last_divergence_pct: None,
@@ -3606,7 +3575,6 @@ mod tests {
 
         // State: resolved long ago, cooldown expired
         let state = DpegAlertState {
-
             cooldown_until: Some(now - Duration::seconds(10)), // Expired
             last_alerted_at: Some(now - Duration::seconds(310)),
             last_divergence_pct: None,
@@ -3650,7 +3618,6 @@ mod tests {
 
         // State after resolution: severity cleared, cooldown active
         let state = DpegAlertState {
-
             cooldown_until: Some(now + Duration::seconds(250)),
             last_alerted_at: Some(now - Duration::seconds(5)),
             last_divergence_pct: None,
@@ -3693,7 +3660,6 @@ mod tests {
 
         // Simulate a false-positive closure: severity cleared, long cooldown
         let state = DpegAlertState {
-
             cooldown_until: Some(now + Duration::seconds(500)),
             last_alerted_at: Some(now - Duration::seconds(10)),
             last_divergence_pct: None,
@@ -3734,7 +3700,6 @@ mod tests {
 
         // Active incident at CRITICAL
         let state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(5.50),
@@ -3799,7 +3764,6 @@ mod tests {
 
         // Stale state: says HIGH but divergence is now 0.10%
         let state = DpegAlertState {
-
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(300)),
             last_divergence_pct: Some(1.50),
@@ -4414,11 +4378,23 @@ mod tests {
         );
         let oracle_context = detection.oracle_context;
 
-        assert_eq!(oracle_context.get("healthy_source_count"), Some(&serde_json::json!(5)));
-        assert_eq!(oracle_context.get("total_source_count"), Some(&serde_json::json!(5)));
-        assert_eq!(oracle_context.get("contagion_status"), Some(&serde_json::json!("isolated")));
-        assert_eq!(oracle_context.get("peg_target"), Some(&serde_json::json!(1.0)));
-        assert!(oracle_context.get("chainlink_price").is_some());
-        assert!(oracle_context.get("pyth_price").is_some());
+        assert_eq!(
+            oracle_context.get("healthy_source_count"),
+            Some(&serde_json::json!(5))
+        );
+        assert_eq!(
+            oracle_context.get("total_source_count"),
+            Some(&serde_json::json!(5))
+        );
+        assert_eq!(
+            oracle_context.get("contagion_status"),
+            Some(&serde_json::json!("isolated"))
+        );
+        assert_eq!(
+            oracle_context.get("peg_target"),
+            Some(&serde_json::json!(1.0))
+        );
+        assert!(oracle_context.contains_key("chainlink_price"));
+        assert!(oracle_context.contains_key("pyth_price"));
     }
 }

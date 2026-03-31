@@ -1168,11 +1168,7 @@ fn synthetic_evidence_record(
             "trace": contributor,
             "captured_from": "detector.quote_cache"
         }),
-        normalized_fields: annotate_evidence_fields(
-            &json!({}),
-            Some(contributor),
-            true,
-        ),
+        normalized_fields: annotate_evidence_fields(&json!({}), Some(contributor), true),
         raw_ref_type: Some("detector.quote_cache".to_string()),
         raw_ref_id: Some(format!(
             "{}:{}",
@@ -1714,7 +1710,8 @@ mod tests {
         let (window_start, window_end) = evidence_lookup_window(&alert, &contributors);
         assert_eq!(
             window_start,
-            alert.created_at - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS)
+            contributors[0].observed_at
+                - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS)
         );
         assert_eq!(
             window_end,
