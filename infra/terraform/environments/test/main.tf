@@ -335,6 +335,14 @@ resource "aws_ssm_parameter" "core_ecs_tasks_sg_id" {
   tags      = var.tags
 }
 
+resource "aws_ssm_parameter" "core_database_sg_id" {
+  name      = "/raksha/${var.environment}/core/database_sg_id"
+  type      = "String"
+  value     = module.security.database_sg_id
+  overwrite = true
+  tags      = var.tags
+}
+
 resource "aws_ssm_parameter" "core_ecs_instances_sg_id" {
   name      = "/raksha/${var.environment}/core/ecs_instances_sg_id"
   type      = "String"
