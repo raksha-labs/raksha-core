@@ -118,6 +118,7 @@ resource "aws_iam_role_policy" "infra" {
           "ecs:*",
           "ecr:*",
           "iam:*",
+          "cognito-idp:*",
           "logs:*",
           "cloudwatch:*",
           "application-autoscaling:*",
