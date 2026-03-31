@@ -561,7 +561,7 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<NotifySi
 
 #[cfg(test)]
 mod tests {
-    use super::{skipped_stream_reason, skipped_test_stream_reason};
+    use super::{hash_runtime_config, skipped_stream_reason, skipped_test_stream_reason, to_runtime_config};
     use state_manager::EffectiveStreamConfig;
 
     fn config_for(endpoint_key: &str, endpoint: &str) -> EffectiveStreamConfig {
@@ -636,5 +636,19 @@ mod tests {
         let mut cfg = config_for("rpc_url", "wss://example.invalid/feed");
         cfg.operating_mode_profile = "live".to_string();
         assert_eq!(skipped_stream_reason(&cfg, true), None);
+    }
+
+    #[test]
+    fn runtime_config_hash_changes_when_tenant_targets_change() {
+        let mut cfg = config_for("rpc_url", "wss://example.invalid/feed");
+        cfg.operating_mode_profile = "live".to_string();
+
+        let paused = to_runtime_config(cfg.clone(), vec!["tenant-a".to_string()]);
+        let resumed = to_runtime_config(
+            cfg,
+            vec!["tenant-a".to_string(), "tenant-b".to_string()],
+        );
+
+        assert_ne!(hash_runtime_config(&paused), hash_runtime_config(&resumed));
     }
 }

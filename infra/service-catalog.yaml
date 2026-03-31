@@ -13,7 +13,7 @@ services:
     desired_count:
       test: 0  # off by default — enable via streams_enabled = true in tfvars
       stage: 1
-      prod: 2
+      prod: 1
 
   - service_name: detector
     image_repo: raksha-detector
@@ -22,13 +22,13 @@ services:
     exposure: internal
     deploy_strategy: rolling
     scaling_class: worker_cpu_and_lag
-    cpu: 1024
-    memory: 2048
+    cpu: 512
+    memory: 1024
     command: ["/app/bin/detector"]
     desired_count:
       test: 0  # off by default — enable via streams_enabled = true in tfvars
       stage: 3
-      prod: 5
+      prod: 1
 
   - service_name: orchestrator
     image_repo: raksha-orchestrator
@@ -43,7 +43,7 @@ services:
     desired_count:
       test: 0  # off by default — enable via streams_enabled = true in tfvars
       stage: 2
-      prod: 3
+      prod: 1
 
   - service_name: finality
     image_repo: raksha-finality
@@ -58,7 +58,7 @@ services:
     desired_count:
       test: 0  # off by default — enable via streams_enabled = true in tfvars
       stage: 1
-      prod: 2
+      prod: 1
 
   - service_name: history-worker
     image_repo: raksha-history-worker
