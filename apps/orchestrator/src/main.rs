@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use common::{init_logging, start_health_check_server, ShutdownSignal};
 use dotenvy::dotenv;
@@ -24,7 +24,6 @@ use uuid::Uuid;
 
 const DEFAULT_BATCH_SIZE: usize = 100;
 const DEFAULT_BLOCK_MS: usize = 1000;
-const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "glider";
 const REDIS_STARTUP_RETRY_ATTEMPTS: usize = 30;
 const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 const ALL_NOTIFICATION_CHANNELS: [&str; 5] = ["webhook", "slack", "telegram", "discord", "email"];
@@ -147,10 +146,57 @@ async fn main() -> Result<()> {
                 log_sim_detection_received(&detection);
             }
 
-            let alert = alert_from_detection(&detection);
-            let alert = attach_incident_context(alert, &detection, repository.as_ref()).await;
+            let alert = match alert_from_detection(&detection) {
+                Ok(alert) => alert,
+                Err(error) => {
+                    common::log_error!(
+                        warn,
+                        error,
+                        "failed to build alert from detection",
+                        pattern_id = %detection.pattern_id,
+                        detection_id = %detection.detection_id
+                    );
+                    if use_consumer_group {
+                        stream.ack_detection(&stream_group, &entry_id).await?;
+                    }
+                    continue;
+                }
+            };
+            let alert = match attach_incident_context(alert, &detection, repository.as_ref()).await
+            {
+                Ok(alert) => alert,
+                Err(error) => {
+                    common::log_error!(
+                        warn,
+                        error,
+                        "failed to attach incident context to alert",
+                        pattern_id = %detection.pattern_id,
+                        detection_id = %detection.detection_id
+                    );
+                    if use_consumer_group {
+                        stream.ack_detection(&stream_group, &entry_id).await?;
+                    }
+                    continue;
+                }
+            };
             let dispatched =
-                dispatch_alert(&alert, &notifier_gateway, repository.as_ref(), &stream).await;
+                match dispatch_alert(&alert, &notifier_gateway, repository.as_ref(), &stream).await
+                {
+                    Ok(dispatched) => dispatched,
+                    Err(error) => {
+                        common::log_error!(
+                            warn,
+                            error,
+                            "failed to dispatch alert",
+                            alert_id = %alert.alert_id,
+                            pattern_id = %alert.pattern_id
+                        );
+                        if use_consumer_group {
+                            stream.ack_detection(&stream_group, &entry_id).await?;
+                        }
+                        continue;
+                    }
+                };
             alerts_by_event_key.insert(event_key.to_string(), dispatched);
             processed += 1;
 
@@ -275,13 +321,28 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            let dispatched = dispatch_alert(
+            let dispatched = match dispatch_alert(
                 &updated_alert,
                 &notifier_gateway,
                 repository.as_ref(),
                 &stream,
             )
-            .await;
+            .await
+            {
+                Ok(dispatched) => dispatched,
+                Err(error) => {
+                    common::log_error!(
+                        warn,
+                        error,
+                        "failed to dispatch finality-updated alert",
+                        event_key = %update.event_key
+                    );
+                    if use_consumer_group {
+                        stream.ack_finality_update(&stream_group, &entry_id).await?;
+                    }
+                    continue;
+                }
+            };
             alerts_by_event_key.insert(update.event_key.clone(), dispatched);
             processed += 1;
 
@@ -317,14 +378,17 @@ fn default_consumer_name(prefix: &str) -> String {
     format!("{prefix}-{hostname}")
 }
 
-fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
-    AlertEvent {
+fn alert_from_detection(detection: &DetectionResult) -> Result<AlertEvent> {
+    Ok(AlertEvent {
         alert_id: Uuid::new_v4(),
         incident_id: None,
         event_key: detection.event_key.clone(),
         subject_type: detection.subject_type.clone(),
         subject_key: detection.subject_key.clone(),
-        tenant_id: Some(resolve_alert_tenant_id(detection.tenant_id.clone())),
+        tenant_id: Some(require_alert_tenant_id(
+            detection.tenant_id.clone(),
+            &format!("detection {}", detection.detection_id),
+        )?),
         pattern_id: detection.pattern_id.clone(),
         chain: detection.chain.clone(),
         chain_slug: detection.chain_slug.clone(),
@@ -348,7 +412,7 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
         is_simulated: detection.is_simulated,
         simulation_run_id: detection.simulation_run_id.clone(),
         created_at: Utc::now(),
-    }
+    })
 }
 
 fn is_test_mode_detection(detection: &DetectionResult) -> bool {
@@ -444,12 +508,15 @@ async fn attach_incident_context(
     mut alert: AlertEvent,
     detection: &DetectionResult,
     repository: Option<&PostgresRepository>,
-) -> AlertEvent {
+) -> Result<AlertEvent> {
     let Some(repo) = repository else {
-        return alert;
+        return Ok(alert);
     };
 
-    let tenant_id = resolve_alert_tenant_id(alert.tenant_id.clone());
+    let tenant_id = require_alert_tenant_id(
+        alert.tenant_id.clone(),
+        &format!("alert {}", alert.alert_id),
+    )?;
     let transition = detection
         .incident_transition
         .clone()
@@ -507,7 +574,7 @@ async fn attach_incident_context(
                 tenant_id = %tenant_id,
                 pattern_id = %detection.pattern_id
             );
-            return alert;
+            return Ok(alert);
         }
     };
 
@@ -696,7 +763,7 @@ async fn attach_incident_context(
         );
     }
 
-    alert
+    Ok(alert)
 }
 
 fn incident_transition_str(value: &IncidentTransition) -> &'static str {
@@ -726,9 +793,12 @@ async fn dispatch_alert(
     notifier_gateway: &NotifierGatewayClient,
     repository: Option<&PostgresRepository>,
     stream: &RedisStreamPublisher,
-) -> AlertEvent {
+) -> Result<AlertEvent> {
     let mut normalized_alert = alert.clone();
-    let tenant_id = resolve_alert_tenant_id(normalized_alert.tenant_id.clone());
+    let tenant_id = require_alert_tenant_id(
+        normalized_alert.tenant_id.clone(),
+        &format!("alert {}", normalized_alert.alert_id),
+    )?;
     normalized_alert.tenant_id = Some(tenant_id.clone());
     let is_test_mode = is_test_mode_alert(&normalized_alert);
 
@@ -778,7 +848,7 @@ async fn dispatch_alert(
                     persist_and_publish_alert(&suppressed, repository, stream).await;
                     record_usage_event(repo, &tenant_id, "alert_suppressed_quota", &suppressed)
                         .await;
-                    return suppressed;
+                    return Ok(suppressed);
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -863,7 +933,7 @@ async fn dispatch_alert(
         record_usage_event(repo, &tenant_id, "alert_fired", &normalized_alert).await;
     }
 
-    normalized_alert
+    Ok(normalized_alert)
 }
 
 fn apply_dispatch_result_metadata(
@@ -1034,11 +1104,11 @@ fn alert_chain_id(alert: &AlertEvent) -> Option<i64> {
     }
 }
 
-fn resolve_alert_tenant_id(tenant_id: Option<String>) -> String {
-    tenant_id.unwrap_or_else(|| {
-        std::env::var("ALERT_FALLBACK_TENANT_ID")
-            .unwrap_or_else(|_| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string())
-    })
+fn require_alert_tenant_id(tenant_id: Option<String>, context: &str) -> Result<String> {
+    tenant_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("missing tenant_id for {context}"))
 }
 
 /// Extract the base asset symbol from a DPEG subject_key.
@@ -1147,13 +1217,14 @@ fn annotate_evidence_fields(
 
 fn synthetic_evidence_record(
     alert: &AlertEvent,
+    tenant_id: &str,
     market_key: Option<&str>,
     contributor: &EvidenceContributorTrace,
 ) -> AlertEvidenceSnapshotRecord {
     AlertEvidenceSnapshotRecord {
         alert_id: alert.alert_id.to_string(),
         incident_id: alert.incident_id.clone(),
-        tenant_id: resolve_alert_tenant_id(alert.tenant_id.clone()),
+        tenant_id: tenant_id.to_string(),
         pattern_id: Some(alert.pattern_id.clone()),
         source_id: contributor.source_id.clone(),
         source_type: source_type_for_kind(&contributor.source_kind),
@@ -1223,7 +1294,10 @@ async fn persist_alert_evidence_snapshot(
         return Ok(());
     }
 
-    let tenant_id = resolve_alert_tenant_id(alert.tenant_id.clone());
+    let tenant_id = require_alert_tenant_id(
+        alert.tenant_id.clone(),
+        &format!("alert {}", alert.alert_id),
+    )?;
     let market_key = extract_market_key(alert.subject_key.as_deref(), &alert.protocol);
     let (window_start, window_end) = evidence_lookup_window(alert, &contributors);
     let source_ids = contributors
@@ -1294,6 +1368,7 @@ async fn persist_alert_evidence_snapshot(
         }
         records.push(synthetic_evidence_record(
             alert,
+            &tenant_id,
             market_key.as_deref(),
             contributor,
         ));
@@ -1494,7 +1569,7 @@ mod tests {
     #[test]
     fn tc_d_800_critical_routes_to_all_channels() {
         let detection = mk_detection(Severity::Critical, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let routed = apply_dispatch_result_metadata(
             alert,
             &dispatch_result(&["webhook", "slack", "telegram", "discord", "email"], true),
@@ -1506,7 +1581,7 @@ mod tests {
     #[test]
     fn tc_d_801_high_routes_to_webhook_email() {
         let detection = mk_detection(Severity::High, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let routed =
             apply_dispatch_result_metadata(alert, &dispatch_result(&["webhook", "email"], true));
         assert_eq!(
@@ -1519,7 +1594,7 @@ mod tests {
     #[test]
     fn tc_d_802_medium_routes_to_webhook_only() {
         let detection = mk_detection(Severity::Medium, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let routed = apply_dispatch_result_metadata(alert, &dispatch_result(&["webhook"], true));
         assert_eq!(routed.channel_routes, vec!["webhook".to_string()]);
     }
@@ -1528,7 +1603,7 @@ mod tests {
     #[test]
     fn tc_d_803_quiet_hours_suppress_medium() {
         let detection = mk_detection(Severity::Medium, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let routed = apply_dispatch_result_metadata(alert, &dispatch_result(&[], false));
         assert!(routed.channel_routes.is_empty());
         assert_eq!(
@@ -1544,7 +1619,7 @@ mod tests {
     #[test]
     fn tc_d_804_quiet_hours_do_not_suppress_critical() {
         let detection = mk_detection(Severity::Critical, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let routed = apply_dispatch_result_metadata(
             alert,
             &dispatch_result(&["webhook", "slack", "telegram", "discord", "email"], true),
@@ -1667,7 +1742,7 @@ mod tests {
                 "contributes_to_breach": true
             }]),
         );
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let contributors = contributing_sources_from_alert(&alert);
         assert_eq!(contributors.len(), 1);
         assert_eq!(contributors[0].source_id, "pyth-eth-mainnet");
@@ -1677,7 +1752,8 @@ mod tests {
     #[test]
     fn evidence_lookup_window_covers_buffer_padding() {
         let alert =
-            alert_from_detection(&mk_detection(Severity::Medium, IncidentTransition::Trigger));
+            alert_from_detection(&mk_detection(Severity::Medium, IncidentTransition::Trigger))
+                .expect("alert should build");
         let contributors = vec![
             EvidenceContributorTrace {
                 source_id: "chainlink-data-streams".to_string(),
@@ -1722,7 +1798,8 @@ mod tests {
     #[test]
     fn evidence_lookup_window_falls_back_to_alert_time_without_contributors() {
         let alert =
-            alert_from_detection(&mk_detection(Severity::Medium, IncidentTransition::Trigger));
+            alert_from_detection(&mk_detection(Severity::Medium, IncidentTransition::Trigger))
+                .expect("alert should build");
         let (window_start, window_end) = evidence_lookup_window(&alert, &[]);
         assert_eq!(
             window_start,
@@ -1738,7 +1815,7 @@ mod tests {
     #[test]
     fn tc_d_1301_quota_bypass_for_critical() {
         let detection = mk_detection(Severity::Critical, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         assert!(
             !should_enforce_monthly_quota(&alert),
             "Critical alerts should bypass monthly quota"
@@ -1749,7 +1826,7 @@ mod tests {
     #[test]
     fn tc_d_1302_quota_enforced_for_non_critical() {
         let detection = mk_detection(Severity::Medium, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         assert!(
             should_enforce_monthly_quota(&alert),
             "Medium alerts should be subject to monthly quota"
@@ -1762,7 +1839,7 @@ mod tests {
     #[test]
     fn tc_d_1400_alert_payload_required_fields() {
         let detection = mk_detection(Severity::Critical, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
 
         assert!(!alert.alert_id.is_nil());
         assert_eq!(alert.pattern_id, "dpeg");
@@ -1786,8 +1863,16 @@ mod tests {
     #[test]
     fn tc_d_1401_dedup_key_matches_event_key() {
         let detection = mk_detection(Severity::High, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         assert_eq!(alert.dedup_key, detection.event_key);
+    }
+
+    #[test]
+    fn alert_from_detection_requires_tenant_id() {
+        let mut detection = mk_detection(Severity::High, IncidentTransition::Trigger);
+        detection.tenant_id = None;
+        let error = alert_from_detection(&detection).expect_err("missing tenant_id should fail");
+        assert!(error.to_string().contains("missing tenant_id"));
     }
 
     // ─── TVL Drop Resolution Workflow (TC-RES-02 to TC-RES-05) ──────────

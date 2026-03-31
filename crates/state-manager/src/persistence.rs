@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use common::{connect_postgres_client, DataSourceConfig};
 use event_schema::{AlertEvent, DetectionResult, UnifiedEvent};
@@ -7,14 +7,14 @@ use std::sync::Arc;
 use tokio_postgres::{error::SqlState, Client};
 use tracing::{info, warn};
 
-const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "glider";
-
 #[derive(Debug, Clone)]
 pub struct EffectiveStreamConfig {
     pub stream_config_id: String,
     pub source_id: String,
     pub source_type: String,
     pub source_name: String,
+    pub source_scope_kind: String,
+    pub owner_tenant_id: Option<String>,
     pub connection_config: Value,
     pub connector_mode: String,
     pub operating_mode_profile: String, // "live" | "test"
@@ -325,7 +325,10 @@ impl PostgresRepository {
 
     pub async fn save_detection(&self, detection: &DetectionResult) -> Result<()> {
         let payload = serde_json::to_value(detection)?;
-        let tenant_id = resolve_tenant_id(detection.tenant_id.as_deref());
+        let tenant_id = require_tenant_id(
+            detection.tenant_id.as_deref(),
+            &format!("detection {}", detection.detection_id),
+        )?;
         self.client
             .execute(
                 r#"
@@ -358,7 +361,10 @@ impl PostgresRepository {
 
     pub async fn save_alert(&self, alert: &AlertEvent) -> Result<()> {
         let payload = serde_json::to_value(alert)?;
-        let tenant_id = resolve_tenant_id(alert.tenant_id.as_deref());
+        let tenant_id = require_tenant_id(
+            alert.tenant_id.as_deref(),
+            &format!("alert {}", alert.alert_id),
+        )?;
         self.client
             .execute(
                 r#"
@@ -558,6 +564,8 @@ impl PostgresRepository {
                     ssc.source_id,
                     ds.source_type,
                     ds.source_name,
+                    COALESCE(ds.scope_kind, CASE WHEN ds.scope = 'tenant' THEN 'tenant' ELSE 'platform' END) AS source_scope_kind,
+                    ds.owner_tenant_id,
                     COALESCE(ssc.connection_config_override, ds.connection_config) AS connection_config,
                     ssc.connector_mode,
                     ssc.operating_mode_profile,
@@ -579,12 +587,6 @@ impl PostgresRepository {
                 WHERE ds.enabled = TRUE
                   AND ssc.enabled = TRUE
                   AND ssc.operating_mode_profile IN ('live', 'test')
-                  AND EXISTS (
-                    SELECT 1
-                    FROM catalog.source_stream_tenant_targets sstt
-                    WHERE sstt.stream_config_id = ssc.stream_config_id
-                      AND sstt.enabled = TRUE
-                  )
                 ORDER BY ssc.source_id, ssc.operating_mode_profile, ssc.stream_name, ssc.asset_pair NULLS FIRST
                 "#,
                 &[],
@@ -608,21 +610,23 @@ impl PostgresRepository {
                 source_id: row.get(1),
                 source_type: row.get(2),
                 source_name: row.get(3),
-                connection_config: row.get(4),
-                connector_mode: row.get(5),
-                operating_mode_profile: row.get(6),
-                stream_name: row.get(7),
-                subscription_key: row.get(8),
-                event_type: row.get(9),
-                parser_name: row.get(10),
-                market_key: row.get(11),
-                asset_pair: row.get(12),
-                filter_config: row.get(13),
-                auth_secret_ref: row.get(14),
-                auth_config: row.get(15),
-                payload_ts_path: row.get(16),
-                payload_ts_unit: row.get(17),
-                poll_interval_ms: row.get(18),
+                source_scope_kind: row.get(4),
+                owner_tenant_id: row.get(5),
+                connection_config: row.get(6),
+                connector_mode: row.get(7),
+                operating_mode_profile: row.get(8),
+                stream_name: row.get(9),
+                subscription_key: row.get(10),
+                event_type: row.get(11),
+                parser_name: row.get(12),
+                market_key: row.get(13),
+                asset_pair: row.get(14),
+                filter_config: row.get(15),
+                auth_secret_ref: row.get(16),
+                auth_config: row.get(17),
+                payload_ts_path: row.get(18),
+                payload_ts_unit: row.get(19),
+                poll_interval_ms: row.get(20),
             });
         }
         Ok(configs)
@@ -2029,14 +2033,11 @@ impl PostgresRepository {
     }
 }
 
-fn resolve_tenant_id(raw: Option<&str>) -> String {
+fn require_tenant_id(raw: Option<&str>, context: &str) -> Result<String> {
     raw.map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| {
-            std::env::var("ALERT_FALLBACK_TENANT_ID")
-                .unwrap_or_else(|_| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string())
-        })
+        .ok_or_else(|| anyhow!("missing tenant_id for {context}"))
 }
 
 fn parse_json_i64(value: Option<&serde_json::Value>) -> Option<i64> {

@@ -211,15 +211,7 @@ async fn reconcile(
             continue;
         }
 
-        let targets = repo
-            .list_stream_tenant_targets(&cfg.stream_config_id, &cfg.operating_mode_profile)
-            .await?
-            .into_iter()
-            .map(|target| target.tenant_id)
-            .collect::<Vec<_>>();
-        if targets.is_empty() {
-            continue;
-        }
+        let targets = resolve_runtime_tenant_targets(repo, &cfg).await?;
 
         let runtime_cfg = to_runtime_config(cfg, targets);
         log_test_mode_stream_selection(&runtime_cfg);
@@ -349,6 +341,8 @@ fn to_runtime_config(
         source_id: cfg.source_id,
         source_type: cfg.source_type,
         source_name: cfg.source_name,
+        source_scope_kind: cfg.source_scope_kind,
+        owner_tenant_id: cfg.owner_tenant_id,
         connection_config: cfg.connection_config,
         operating_mode_profile: cfg.operating_mode_profile,
         auth_secret_ref: cfg.auth_secret_ref,
@@ -376,6 +370,8 @@ fn hash_runtime_config(cfg: &RuntimeStreamConfig) -> String {
         "source_id": cfg.source_id,
         "source_type": cfg.source_type,
         "source_name": cfg.source_name,
+        "source_scope_kind": cfg.source_scope_kind,
+        "owner_tenant_id": cfg.owner_tenant_id,
         "connection_config": cfg.connection_config,
         "operating_mode_profile": cfg.operating_mode_profile,
         "auth_secret_ref": cfg.auth_secret_ref,
@@ -448,6 +444,8 @@ fn log_test_mode_stream_selection(cfg: &RuntimeStreamConfig) {
         stream_name = %cfg.stream_name,
         connector_mode = %cfg.connector_mode,
         tenant_targets = ?cfg.tenant_targets,
+        source_scope_kind = %cfg.source_scope_kind,
+        owner_tenant_id = cfg.owner_tenant_id.as_deref(),
         endpoint_host,
         endpoint_path = %endpoint_path,
         is_mock_endpoint,
@@ -481,6 +479,22 @@ fn log_test_mode_stream_selection(cfg: &RuntimeStreamConfig) {
             "selected test-mode mock endpoint is missing tenant-scoped routing parameters",
         );
     }
+}
+
+async fn resolve_runtime_tenant_targets(
+    repo: &PostgresRepository,
+    cfg: &EffectiveStreamConfig,
+) -> Result<Vec<String>> {
+    if cfg.source_scope_kind == "tenant" {
+        return Ok(cfg.owner_tenant_id.clone().into_iter().collect());
+    }
+
+    Ok(repo
+        .list_stream_tenant_targets(&cfg.stream_config_id, &cfg.operating_mode_profile)
+        .await?
+        .into_iter()
+        .map(|target| target.tenant_id)
+        .collect())
 }
 
 fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<NotifySignal> {
@@ -572,6 +586,8 @@ mod tests {
             source_id: "source-1".to_string(),
             source_type: "cex".to_string(),
             source_name: "source".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: serde_json::json!({ endpoint_key: endpoint }),
             connector_mode: "websocket".to_string(),
             operating_mode_profile: "test".to_string(),
@@ -649,5 +665,19 @@ mod tests {
         let resumed = to_runtime_config(cfg, vec!["tenant-a".to_string(), "tenant-b".to_string()]);
 
         assert_ne!(hash_runtime_config(&paused), hash_runtime_config(&resumed));
+    }
+
+    #[test]
+    fn tenant_owned_runtime_config_keeps_owner_target() {
+        let mut cfg = config_for("rpc_url", "wss://example.invalid/feed");
+        cfg.operating_mode_profile = "live".to_string();
+        cfg.source_scope_kind = "tenant".to_string();
+        cfg.owner_tenant_id = Some("tenant-a".to_string());
+
+        let runtime = to_runtime_config(cfg, vec!["tenant-a".to_string()]);
+
+        assert_eq!(runtime.source_scope_kind, "tenant");
+        assert_eq!(runtime.owner_tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(runtime.tenant_targets, vec!["tenant-a".to_string()]);
     }
 }

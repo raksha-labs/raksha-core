@@ -114,11 +114,9 @@ locals {
       AUTH_INTERNAL_SERVICE_TOKEN = "raksha-auth-token"
     }
     orchestrator = {
-      ALERT_FALLBACK_TENANT_ID = "glider"
-      NOTIFIER_GATEWAY_URL     = "http://notifier-gateway.${module.compute.service_discovery_namespace_name}:3002"
+      NOTIFIER_GATEWAY_URL = "http://notifier-gateway.${module.compute.service_discovery_namespace_name}:3002"
     }
     finality = {
-      ALERT_FALLBACK_TENANT_ID = "glider"
     }
     "history-worker" = {
       HISTORY_WORKER_INTERVAL_SECS = "30"
