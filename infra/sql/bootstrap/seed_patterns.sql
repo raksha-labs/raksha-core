@@ -13,8 +13,11 @@
 
 INSERT INTO pattern.patterns (pattern_id, pattern_name, description, enabled)
 VALUES
-    ('dpeg', 'De-Peg Detection', 
-     'Detects sustained divergence of a pegged asset from its peg target using a weighted price consensus across multiple market sources.', 
+    ('dpeg', 'Stablecoin Depeg Alert',
+     'Detects sustained divergence of a pegged asset from its peg target using HTTP-polled CEX and oracle price feeds with configurable polling intervals.',
+     TRUE),
+    ('dpeg_rpc', 'Stablecoin Depeg Alert (WebSocket)',
+     'Detects sustained divergence of a pegged asset from its peg target using real-time WebSocket feeds from exchanges and on-chain oracles.',
      TRUE),
     ('flash_loan', 'Flash Loan Attack', 
      'Detects flash loan attacks by monitoring EVM chain events for anomalous loan + extraction patterns.', 
@@ -29,6 +32,47 @@ ON CONFLICT (pattern_id) DO NOTHING;
 INSERT INTO pattern.pattern_configs (pattern_id, config)
 VALUES
     ('dpeg', '{
+        "poll_interval_ms": 5000,
+        "policies": [
+          {
+            "market_key": "USDT/USD",
+            "peg_target": 1.0,
+            "min_sources": 3,
+            "quorum_pct": 0.0,
+
+            "cooldown_sec": 300,
+            "stale_timeout_ms": 30000,
+            "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 5.0},
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
+          },
+          {
+            "market_key": "USDC/USD",
+            "peg_target": 1.0,
+            "min_sources": 3,
+            "quorum_pct": 0.0,
+
+            "cooldown_sec": 300,
+            "stale_timeout_ms": 30000,
+            "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 5.0},
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
+          },
+          {
+            "market_key": "DAI/USD",
+            "peg_target": 1.0,
+            "min_sources": 3,
+            "quorum_pct": 0.0,
+
+            "cooldown_sec": 300,
+            "stale_timeout_ms": 30000,
+            "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 5.0},
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
+          }
+        ]
+    }'::jsonb),
+    ('dpeg_rpc', '{
         "policies": [
           {
             "market_key": "USDT/USD",
@@ -106,8 +150,51 @@ ON CONFLICT (pattern_id) DO NOTHING;
 
 INSERT INTO pattern.tenant_pattern_configs (tenant_id, pattern_id, enabled, config)
 VALUES
-    -- DPEG: Example policy array monitoring USDT, USDC, and DAI
-    ('glider', 'dpeg', TRUE, '[
+    -- DPEG (HTTP): Primary — HTTP-polled CEX + oracle price feeds
+    ('glider', 'dpeg', TRUE, '{
+        "poll_interval_ms": 5000,
+        "policies": [
+          {
+            "market_key": "USDT/USD",
+            "peg_target": 1.0,
+            "min_sources": 3,
+            "quorum_pct": 0.0,
+
+            "cooldown_sec": 300,
+            "stale_timeout_ms": 30000,
+            "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 5.0},
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
+          },
+          {
+            "market_key": "USDC/USD",
+            "peg_target": 1.0,
+            "min_sources": 3,
+            "quorum_pct": 0.0,
+
+            "cooldown_sec": 300,
+            "stale_timeout_ms": 30000,
+            "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 5.0},
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
+          },
+          {
+            "market_key": "DAI/USD",
+            "peg_target": 1.0,
+            "min_sources": 3,
+            "quorum_pct": 0.0,
+
+            "cooldown_sec": 300,
+            "stale_timeout_ms": 30000,
+            "severity_bands": {"medium": 0.5, "high": 1.0, "critical": 5.0},
+            "severity_bands_systemic": {"medium": 0.01, "high": 0.25, "critical": 0.25},
+            "toggles": {"oracle_confirmation": true, "contagion_detection": true}
+          }
+        ]
+    }'::jsonb),
+
+    -- DPEG (WebSocket): Real-time WebSocket feeds from exchanges and on-chain oracles
+    ('glider', 'dpeg_rpc', TRUE, '[
         {
             "market_key": "USDT/USD",
             "peg_target": 1.0,
@@ -223,12 +310,12 @@ JOIN catalog.tenant_data_sources tds
 JOIN catalog.data_sources ds
   ON ds.source_id = tds.source_id
 WHERE tpc.enabled = TRUE
-  AND NOT (tpc.pattern_id = 'dpeg' AND ds.source_type = 'dex_api')
+  AND NOT (tpc.pattern_id IN ('dpeg', 'dpeg_rpc') AND ds.source_type = 'dex_api')
 ON CONFLICT (tenant_id, pattern_id, source_id) DO NOTHING;
 
 DELETE FROM pattern.tenant_pattern_source_bindings tpsb
 USING catalog.data_sources ds
-WHERE tpsb.pattern_id = 'dpeg'
+WHERE tpsb.pattern_id IN ('dpeg', 'dpeg_rpc')
   AND tpsb.source_id = ds.source_id
   AND ds.source_type = 'dex_api';
 
