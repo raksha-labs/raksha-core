@@ -173,12 +173,12 @@ WITH desired_stream_configs AS (
 
       -- OKX (USDT quoted)
       ('okx-global','websocket','tickers','USDC-USDT','quote','okx_tickers_v5','USDC/USD','USDC-USDT','{"subscribe_message":{"op":"subscribe","args":[{"channel":"tickers","instId":"USDC-USDT"}]}}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',NULL,TRUE,'glider'),
-      ('okx-global','websocket','tickers','USDT-USDC','quote','okx_tickers_v5','USDT/USD','USDT-USDC','{"subscribe_message":{"op":"subscribe","args":[{"channel":"tickers","instId":"USDT-USDC"}]}}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',NULL,TRUE,'glider'),
+      ('okx-global','websocket','tickers','USDC-USDT','quote','okx_tickers_v5','USDT/USD','USDT-USDC','{"subscribe_message":{"op":"subscribe","args":[{"channel":"tickers","instId":"USDC-USDT"}]}}'::jsonb,NULL::text,'{"invert_price":true,"output_asset_pair":"USDT-USDC","output_quote_asset":"USDC"}'::jsonb,'$.data[0].ts','ms',NULL,TRUE,'glider'),
       ('okx-global','websocket','tickers','DAI-USDT','quote','okx_tickers_v5','DAI/USD','DAI-USDT','{"subscribe_message":{"op":"subscribe","args":[{"channel":"tickers","instId":"DAI-USDT"}]}}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',NULL,TRUE,'glider'),
 
       -- Bybit (USDT quoted)
       ('bybit-spot','websocket','tickers','USDCUSDT','quote','bybit_tickers_v5','USDC/USD','USDCUSDT','{"subscribe_message":{"op":"subscribe","args":["tickers.USDCUSDT"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.ts','ms',NULL,TRUE,'glider'),
-      ('bybit-spot','websocket','tickers','USDTUSDC','quote','bybit_tickers_v5','USDT/USD','USDTUSDC','{"subscribe_message":{"op":"subscribe","args":["tickers.USDTUSDC"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.ts','ms',NULL,TRUE,'glider'),
+      ('bybit-spot','websocket','tickers','USDCUSDT','quote','bybit_tickers_v5','USDT/USD','USDTUSDC','{"subscribe_message":{"op":"subscribe","args":["tickers.USDCUSDT"]}}'::jsonb,NULL::text,'{"invert_price":true,"output_asset_pair":"USDTUSDC","output_quote_asset":"USDC"}'::jsonb,'$.ts','ms',NULL,TRUE,'glider'),
       ('bybit-spot','websocket','tickers','DAIUSDT','quote','bybit_tickers_v5','DAI/USD','DAIUSDT','{"subscribe_message":{"op":"subscribe","args":["tickers.DAIUSDT"]}}'::jsonb,NULL::text,'{}'::jsonb,'$.ts','ms',NULL,TRUE,'glider'),
 
       -- Gemini (USD direct, endpoint template uses subscription_key)
@@ -193,10 +193,10 @@ WITH desired_stream_configs AS (
       ('kraken-spot-http','http_poll','ticker','USDTUSD','quote','kraken_ticker_v2','USDT/USD','USDT/USD','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
       ('kraken-spot-http','http_poll','ticker','DAIUSD','quote','kraken_ticker_v2','DAI/USD','DAI/USD','{}'::jsonb,NULL::text,'{}'::jsonb,NULL,'ms',5000,TRUE,'glider'),
       ('okx-global-http','http_poll','ticker','USDC-USDT','quote','okx_tickers_v5','USDC/USD','USDC-USDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',5000,TRUE,'glider'),
-      ('okx-global-http','http_poll','ticker','USDT-USDC','quote','okx_tickers_v5','USDT/USD','USDT-USDC','{}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',5000,TRUE,'glider'),
+      ('okx-global-http','http_poll','ticker','USDC-USDT','quote','okx_tickers_v5','USDT/USD','USDT-USDC','{}'::jsonb,NULL::text,'{"invert_price":true,"output_asset_pair":"USDT-USDC","output_quote_asset":"USDC"}'::jsonb,'$.data[0].ts','ms',5000,TRUE,'glider'),
       ('okx-global-http','http_poll','ticker','DAI-USDT','quote','okx_tickers_v5','DAI/USD','DAI-USDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.data[0].ts','ms',5000,TRUE,'glider'),
       ('bybit-spot-http','http_poll','ticker','USDCUSDT','quote','bybit_tickers_v5','USDC/USD','USDCUSDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.time','ms',5000,TRUE,'glider'),
-      ('bybit-spot-http','http_poll','ticker','USDTUSDC','quote','bybit_tickers_v5','USDT/USD','USDTUSDC','{}'::jsonb,NULL::text,'{}'::jsonb,'$.time','ms',5000,TRUE,'glider'),
+      ('bybit-spot-http','http_poll','ticker','USDCUSDT','quote','bybit_tickers_v5','USDT/USD','USDTUSDC','{}'::jsonb,NULL::text,'{"invert_price":true,"output_asset_pair":"USDTUSDC","output_quote_asset":"USDC"}'::jsonb,'$.time','ms',5000,TRUE,'glider'),
       ('bybit-spot-http','http_poll','ticker','DAIUSDT','quote','bybit_tickers_v5','DAI/USD','DAIUSDT','{}'::jsonb,NULL::text,'{}'::jsonb,'$.time','ms',5000,TRUE,'glider'),
       ('gemini-spot-http','http_poll','pubticker','usdcusd','quote','gemini_marketdata_v1','USDC/USD','USDCUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.volume.timestamp','ms',5000,TRUE,'glider'),
       ('gemini-spot-http','http_poll','pubticker','usdtusd','quote','gemini_marketdata_v1','USDT/USD','USDTUSD','{}'::jsonb,NULL::text,'{}'::jsonb,'$.volume.timestamp','ms',5000,TRUE,'glider'),
@@ -319,10 +319,10 @@ WITH desired_stream_refs AS (
       ('kraken-spot','ticker','USDT/USD','USDT/USD'),
       ('kraken-spot','ticker','DAI/USD','DAI/USD'),
       ('okx-global','tickers','USDC-USDT','USDC-USDT'),
-      ('okx-global','tickers','USDT-USDC','USDT-USDC'),
+      ('okx-global','tickers','USDC-USDT','USDT-USDC'),
       ('okx-global','tickers','DAI-USDT','DAI-USDT'),
       ('bybit-spot','tickers','USDCUSDT','USDCUSDT'),
-      ('bybit-spot','tickers','USDTUSDC','USDTUSDC'),
+      ('bybit-spot','tickers','USDCUSDT','USDTUSDC'),
       ('bybit-spot','tickers','DAIUSDT','DAIUSDT'),
       ('gemini-spot','marketdata','usdcusd','USDCUSD'),
       ('gemini-spot','marketdata','usdtusd','USDTUSD'),
@@ -333,10 +333,10 @@ WITH desired_stream_refs AS (
       ('kraken-spot-http','ticker','USDTUSD','USDT/USD'),
       ('kraken-spot-http','ticker','DAIUSD','DAI/USD'),
       ('okx-global-http','ticker','USDC-USDT','USDC-USDT'),
-      ('okx-global-http','ticker','USDT-USDC','USDT-USDC'),
+      ('okx-global-http','ticker','USDC-USDT','USDT-USDC'),
       ('okx-global-http','ticker','DAI-USDT','DAI-USDT'),
       ('bybit-spot-http','ticker','USDCUSDT','USDCUSDT'),
-      ('bybit-spot-http','ticker','USDTUSDC','USDTUSDC'),
+      ('bybit-spot-http','ticker','USDCUSDT','USDTUSDC'),
       ('bybit-spot-http','ticker','DAIUSDT','DAIUSDT'),
       ('gemini-spot-http','pubticker','usdcusd','USDCUSD'),
       ('gemini-spot-http','pubticker','usdtusd','USDTUSD'),

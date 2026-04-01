@@ -37,9 +37,6 @@ on:
         required: true
         type: boolean
         default: false
-  schedule:
-    # Daily auto-stop at 00:00 CET (23:00 UTC year-round).
-    - cron: '0 23 * * *'
 
 permissions:
   id-token: write
@@ -58,16 +55,6 @@ jobs:
         with:
           role-to-assume: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod' && (secrets.AWS_PROD_DEPLOY_ROLE_ARN != '' && secrets.AWS_PROD_DEPLOY_ROLE_ARN || secrets.AWS_DEPLOY_ROLE_ARN) || github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'stage' && (secrets.AWS_STAGE_DEPLOY_ROLE_ARN != '' && secrets.AWS_STAGE_DEPLOY_ROLE_ARN || secrets.AWS_DEPLOY_ROLE_ARN) || (secrets.AWS_TEST_DEPLOY_ROLE_ARN != '' && secrets.AWS_TEST_DEPLOY_ROLE_ARN || secrets.AWS_DEPLOY_ROLE_ARN) }}
           aws-region: eu-west-1
-
-      - name: Set environment for scheduled runs
-        if: github.event_name == 'schedule'
-        run: |
-          echo "ENVIRONMENT=test" >> $GITHUB_ENV
-          echo "SERVICE_FILTER=" >> $GITHUB_ENV
-          echo "STOP_ECS=true" >> $GITHUB_ENV
-          echo "STOP_RDS=true" >> $GITHUB_ENV
-          echo "DELETE_REDIS=false" >> $GITHUB_ENV
-          echo "DESTROY_NAT=false" >> $GITHUB_ENV
 
       - name: Set environment for manual runs
         if: github.event_name == 'workflow_dispatch'
