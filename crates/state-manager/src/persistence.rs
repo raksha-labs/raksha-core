@@ -584,9 +584,12 @@ impl PostgresRepository {
                 FROM catalog.source_stream_configs ssc
                 JOIN catalog.data_sources ds
                   ON ds.source_id = ssc.source_id
-                WHERE ds.enabled = TRUE
-                  AND ssc.enabled = TRUE
+                WHERE ssc.enabled = TRUE
                   AND ssc.operating_mode_profile IN ('live', 'test')
+                  AND (
+                        ssc.operating_mode_profile = 'test'
+                        OR ds.enabled = TRUE
+                  )
                 ORDER BY ssc.source_id, ssc.operating_mode_profile, ssc.stream_name, ssc.asset_pair NULLS FIRST
                 "#,
                 &[],

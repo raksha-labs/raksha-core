@@ -2059,7 +2059,10 @@ fn to_operational_record(
         source_type: config.source_type.clone(),
         tenant_id: (config.tenant_targets.len() == 1).then(|| config.tenant_targets[0].clone()),
         event_type: parsed.event_type.clone(),
-        event_id: parsed.event_id.clone(),
+        event_id: scoped_simulation_event_id(
+            parsed.event_id.as_deref(),
+            simulation_run_id.as_deref(),
+        ),
         market_key: parsed.market_key.clone(),
         asset_pair: parsed.asset_pair.clone(),
         chain_id: parsed.chain_id,
@@ -2122,6 +2125,21 @@ fn annotate_ingestion_meta(
     }
 }
 
+fn scoped_simulation_event_id(
+    event_id: Option<&str>,
+    simulation_run_id: Option<&str>,
+) -> Option<String> {
+    let normalized_event_id = event_id.map(str::trim).filter(|value| !value.is_empty())?;
+    let normalized_run_id = simulation_run_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match normalized_run_id {
+        Some(run_id) => Some(format!("{normalized_event_id}:sim:{run_id}")),
+        None => Some(normalized_event_id.to_string()),
+    }
+}
+
 fn to_source_envelope(
     config: &RuntimeStreamConfig,
     parsed: &ParsedFeedEvent,
@@ -2167,10 +2185,9 @@ async fn fanout_unified_events(
     let source_type = map_source_type(&config.source_type);
 
     for tenant_id in &config.tenant_targets {
-        let event_id = parsed
-            .event_id
-            .clone()
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let event_id =
+            scoped_simulation_event_id(parsed.event_id.as_deref(), meta.simulation_run_id)
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
         let enriched_payload = enrich_payload_for_unified(config, payload, parsed, &meta);
         let event = UnifiedEvent {
             event_id,
@@ -3666,5 +3683,17 @@ mod tests {
         assert!(!should_skip_duplicate_quote(&config, &first, &mut state));
         assert!(should_skip_duplicate_quote(&config, &duplicate, &mut state));
         assert!(!should_skip_duplicate_quote(&config, &later, &mut state));
+    }
+
+    #[test]
+    fn scoped_simulation_event_id_appends_run_id_for_simulated_events() {
+        let scoped = scoped_simulation_event_id(Some("oracle-event-1"), Some("run-123"));
+        assert_eq!(scoped.as_deref(), Some("oracle-event-1:sim:run-123"));
+    }
+
+    #[test]
+    fn scoped_simulation_event_id_preserves_live_event_id() {
+        let scoped = scoped_simulation_event_id(Some("oracle-event-1"), None);
+        assert_eq!(scoped.as_deref(), Some("oracle-event-1"));
     }
 }

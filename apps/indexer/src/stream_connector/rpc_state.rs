@@ -49,8 +49,9 @@ impl RpcStateConnector {
     }
 
     pub async fn connect(&mut self) -> Result<()> {
-        let provider = Provider::<Http>::try_from(self.endpoint.as_str())
-            .with_context(|| format!("failed connecting rpc http endpoint: {}", self.endpoint))?;
+        let endpoint = normalize_rpc_state_http_endpoint(&self.endpoint);
+        let provider = Provider::<Http>::try_from(endpoint.as_str())
+            .with_context(|| format!("failed connecting rpc http endpoint: {endpoint}"))?;
         self.chain_id = provider
             .get_chainid()
             .await
@@ -190,6 +191,17 @@ impl RpcStateConnector {
     }
 }
 
+fn normalize_rpc_state_http_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim();
+    if let Some(rest) = trimmed.strip_prefix("wss://") {
+        return format!("https://{rest}");
+    }
+    if let Some(rest) = trimmed.strip_prefix("ws://") {
+        return format!("http://{rest}");
+    }
+    trimmed.to_string()
+}
+
 fn parse_state_call_specs(filter_config: &Value) -> Result<Vec<StateCallSpec>> {
     let mut specs = Vec::new();
 
@@ -216,6 +228,27 @@ fn parse_state_call_specs(filter_config: &Value) -> Result<Vec<StateCallSpec>> {
     }
 
     Ok(specs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_rpc_state_http_endpoint;
+
+    #[test]
+    fn normalize_rpc_state_http_endpoint_converts_secure_websocket() {
+        assert_eq!(
+            normalize_rpc_state_http_endpoint("wss://base-mainnet.g.alchemy.com/v2/demo"),
+            "https://base-mainnet.g.alchemy.com/v2/demo"
+        );
+    }
+
+    #[test]
+    fn normalize_rpc_state_http_endpoint_preserves_http_endpoint() {
+        assert_eq!(
+            normalize_rpc_state_http_endpoint("https://base-mainnet.g.alchemy.com/v2/demo"),
+            "https://base-mainnet.g.alchemy.com/v2/demo"
+        );
+    }
 }
 
 fn parse_state_call(candidate: &Value, defaults: &Value) -> Result<Option<StateCallSpec>> {

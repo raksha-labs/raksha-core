@@ -29,6 +29,7 @@ const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 const ALL_NOTIFICATION_CHANNELS: [&str; 5] = ["webhook", "slack", "telegram", "discord", "email"];
 const ALERT_EVIDENCE_BUFFER_BEFORE_MS: i64 = 30_000;
 const ALERT_EVIDENCE_BUFFER_AFTER_MS: i64 = 10_000;
+const DEFAULT_DUPLICATE_SUPPRESSION_SECONDS: i64 = 300;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct EvidenceContributorTrace {
     source_id: String,
@@ -464,11 +465,15 @@ fn log_sim_alert_dispatching(alert: &AlertEvent) {
 }
 
 fn log_sim_alert_suppressed(alert: &AlertEvent) {
+    log_sim_alert_suppressed_with_reason(alert, "monthly_quota_exceeded");
+}
+
+fn log_sim_alert_suppressed_with_reason(alert: &AlertEvent, suppression_reason: &str) {
     info!(
         pipeline_mode = "test",
         component = "orchestrator",
         stage = "alert.suppressed",
-        suppression_reason = "monthly_quota_exceeded",
+        suppression_reason = suppression_reason,
         alert_id = %alert.alert_id,
         incident_id = alert.incident_id.as_deref(),
         tenant_id = alert.tenant_id.as_deref(),
@@ -807,6 +812,34 @@ async fn dispatch_alert(
     }
 
     if let Some(repo) = repository {
+        if let Some(previous_alert) = find_dispatch_duplicate(repo, &normalized_alert).await? {
+            warn!(
+                tenant_id = %tenant_id,
+                alert_id = %normalized_alert.alert_id,
+                previous_alert_id = %previous_alert.alert_id,
+                event_key = normalized_alert.event_key.as_deref(),
+                pattern_id = %normalized_alert.pattern_id,
+                severity = ?normalized_alert.severity,
+                lifecycle_state = ?normalized_alert.lifecycle_state,
+                simulation_run_id = normalized_alert.simulation_run_id.as_deref(),
+                "suppressing duplicate alert before notifier dispatch"
+            );
+            if is_test_mode {
+                log_sim_alert_suppressed_with_reason(
+                    &normalized_alert,
+                    "duplicate_suppression_window_active",
+                );
+            }
+            record_usage_event(
+                repo,
+                &tenant_id,
+                "alert_suppressed_duplicate",
+                &normalized_alert,
+            )
+            .await;
+            return Ok(previous_alert);
+        }
+
         match should_escalate_to_all_channels_for_rate_limit(repo, &tenant_id, &normalized_alert)
             .await
         {
@@ -936,10 +969,72 @@ async fn dispatch_alert(
     Ok(normalized_alert)
 }
 
+async fn find_dispatch_duplicate(
+    repository: &PostgresRepository,
+    alert: &AlertEvent,
+) -> Result<Option<AlertEvent>> {
+    let Some(event_key) = alert.event_key.as_deref() else {
+        return Ok(None);
+    };
+    let Some(window) = duplicate_suppression_window() else {
+        return Ok(None);
+    };
+
+    let previous = repository.find_latest_alert_by_event_key(event_key).await?;
+    Ok(previous.filter(|existing| should_suppress_duplicate_alert(alert, existing, window)))
+}
+
+fn duplicate_suppression_window() -> Option<ChronoDuration> {
+    let seconds = std::env::var("ALERT_DUPLICATE_SUPPRESSION_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(DEFAULT_DUPLICATE_SUPPRESSION_SECONDS);
+    (seconds > 0).then(|| ChronoDuration::seconds(seconds))
+}
+
+fn should_suppress_duplicate_alert(
+    candidate: &AlertEvent,
+    existing: &AlertEvent,
+    window: ChronoDuration,
+) -> bool {
+    if candidate.alert_id == existing.alert_id {
+        return false;
+    }
+
+    if candidate.event_key.is_none()
+        || candidate.event_key != existing.event_key
+        || candidate.tenant_id != existing.tenant_id
+        || candidate.pattern_id != existing.pattern_id
+        || candidate.severity != existing.severity
+        || candidate.lifecycle_state != existing.lifecycle_state
+        || candidate.simulation_run_id != existing.simulation_run_id
+    {
+        return false;
+    }
+
+    match Utc::now().signed_duration_since(existing.created_at) {
+        age if age < ChronoDuration::zero() => true,
+        age => age <= window,
+    }
+}
+
 fn apply_dispatch_result_metadata(
     mut alert: AlertEvent,
     dispatch_result: &GatewayDispatchResult,
 ) -> AlertEvent {
+    let rate_limited_channels: Vec<String> = dispatch_result
+        .results
+        .iter()
+        .filter(|result| result.reason.as_deref() == Some("destination_rate_limit"))
+        .map(|result| result.channel.clone())
+        .collect();
+    let cooldown_channels: Vec<String> = dispatch_result
+        .results
+        .iter()
+        .filter(|result| result.reason.as_deref() == Some("cooldown"))
+        .map(|result| result.channel.clone())
+        .collect();
+
     alert.channel_routes = dispatch_result.resolved_channels.clone();
     alert.oracle_context.insert(
         "dispatch_resolved_channels".to_string(),
@@ -953,6 +1048,25 @@ fn apply_dispatch_result_metadata(
         alert
             .oracle_context
             .insert("dispatch_reason".to_string(), serde_json::json!(reason));
+    }
+    if !rate_limited_channels.is_empty() {
+        alert
+            .oracle_context
+            .insert("delivery_rate_limited".to_string(), serde_json::json!(true));
+        alert.oracle_context.insert(
+            "delivery_rate_limited_channels".to_string(),
+            serde_json::json!(rate_limited_channels),
+        );
+    }
+    if !cooldown_channels.is_empty() {
+        alert.oracle_context.insert(
+            "delivery_cooldown_blocked".to_string(),
+            serde_json::json!(true),
+        );
+        alert.oracle_context.insert(
+            "delivery_cooldown_channels".to_string(),
+            serde_json::json!(cooldown_channels),
+        );
     }
     alert
 }
@@ -1550,6 +1664,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tc_d_709_duplicate_suppression_blocks_same_event_within_window() {
+        let candidate =
+            alert_from_detection(&mk_detection(Severity::High, IncidentTransition::Trigger))
+                .expect("alert should build");
+        let mut existing = candidate.clone();
+        existing.alert_id = Uuid::new_v4();
+        existing.created_at = Utc::now() - ChronoDuration::seconds(30);
+
+        assert!(should_suppress_duplicate_alert(
+            &candidate,
+            &existing,
+            ChronoDuration::minutes(5),
+        ));
+    }
+
+    #[test]
+    fn tc_d_710_duplicate_suppression_allows_lifecycle_progression() {
+        let candidate =
+            alert_from_detection(&mk_detection(Severity::High, IncidentTransition::Trigger))
+                .expect("alert should build");
+        let mut existing = candidate.clone();
+        existing.alert_id = Uuid::new_v4();
+        existing.lifecycle_state = LifecycleState::Confirmed;
+        existing.created_at = Utc::now() - ChronoDuration::seconds(30);
+
+        assert!(!should_suppress_duplicate_alert(
+            &candidate,
+            &existing,
+            ChronoDuration::minutes(5),
+        ));
+    }
+
+    #[test]
+    fn tc_d_711_duplicate_suppression_is_scoped_per_simulation_run() {
+        let mut detection = mk_detection(Severity::High, IncidentTransition::Trigger);
+        detection.is_simulated = true;
+        detection.simulation_run_id = Some("run-a".to_string());
+        let candidate = alert_from_detection(&detection).expect("alert should build");
+        let mut existing = candidate.clone();
+        existing.alert_id = Uuid::new_v4();
+        existing.simulation_run_id = Some("run-b".to_string());
+        existing.created_at = Utc::now() - ChronoDuration::seconds(30);
+
+        assert!(!should_suppress_duplicate_alert(
+            &candidate,
+            &existing,
+            ChronoDuration::minutes(5),
+        ));
+    }
+
     // ─── 8. Alert Routing (TC-D-800 to TC-D-808) ─────────────────────────
 
     fn dispatch_result(resolved_channels: &[&str], delivered: bool) -> GatewayDispatchResult {
@@ -1625,6 +1790,80 @@ mod tests {
             &dispatch_result(&["webhook", "slack", "telegram", "discord", "email"], true),
         );
         assert_eq!(routed.channel_routes, all_notification_channels());
+    }
+
+    #[test]
+    fn tc_d_804a_dispatch_metadata_marks_destination_rate_limit() {
+        let alert =
+            alert_from_detection(&mk_detection(Severity::High, IncidentTransition::Trigger))
+                .expect("alert should build");
+        let routed = apply_dispatch_result_metadata(
+            alert,
+            &GatewayDispatchResult {
+                tenant_id: "tenant-a".to_string(),
+                delivered: false,
+                reason: Some("all_channels_failed".to_string()),
+                resolved_channels: vec!["webhook".to_string()],
+                results: vec![notifier::GatewayChannelResult {
+                    channel: "webhook".to_string(),
+                    delivered: false,
+                    reason: Some("destination_rate_limit".to_string()),
+                    status_code: None,
+                }],
+            },
+        );
+        assert_eq!(
+            routed
+                .oracle_context
+                .get("delivery_rate_limited")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            routed
+                .oracle_context
+                .get("delivery_rate_limited_channels")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn tc_d_804b_dispatch_metadata_marks_per_alert_cooldown_block() {
+        let alert =
+            alert_from_detection(&mk_detection(Severity::High, IncidentTransition::Trigger))
+                .expect("alert should build");
+        let routed = apply_dispatch_result_metadata(
+            alert,
+            &GatewayDispatchResult {
+                tenant_id: "tenant-a".to_string(),
+                delivered: false,
+                reason: Some("all_channels_failed".to_string()),
+                resolved_channels: vec!["webhook".to_string()],
+                results: vec![notifier::GatewayChannelResult {
+                    channel: "webhook".to_string(),
+                    delivered: false,
+                    reason: Some("cooldown".to_string()),
+                    status_code: None,
+                }],
+            },
+        );
+        assert_eq!(
+            routed
+                .oracle_context
+                .get("delivery_cooldown_blocked")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            routed
+                .oracle_context
+                .get("delivery_cooldown_channels")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len()),
+            Some(1)
+        );
     }
 
     /// TC-D-805: Rate limit hit — escalates to all channels
