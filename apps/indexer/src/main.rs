@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
         .await
         .context("failed to initialize indexer stream configuration repository")?;
     let stream_purge_enabled = read_bool_env("STREAM_PURGE_ENABLED", false);
+    let live_streams_enabled = read_bool_env("INDEXER_ENABLE_LIVE_STREAMS", true);
 
     if let Some(status) = health_status.as_ref() {
         let mut health = status.write().await;
@@ -42,17 +43,22 @@ async fn main() -> Result<()> {
             "config_source=catalog.source_stream_configs".to_string(),
             "reload_triggers=LISTEN source_stream_config_changed + POST /reload + periodic reconcile".to_string(),
             format!("stream_purge_enabled={stream_purge_enabled}"),
+            format!("live_streams_enabled={live_streams_enabled}"),
         ];
         health.is_ready = true;
     }
 
-    info!(stream_purge_enabled, "db-driven stream supervisor started");
+    info!(
+        stream_purge_enabled,
+        live_streams_enabled, "db-driven stream supervisor started"
+    );
     let supervisor_command_rx = adapt_health_commands(command_rx);
     run_stream_supervisor(
         repo,
         stream,
         database_url,
         stream_purge_enabled,
+        live_streams_enabled,
         supervisor_command_rx,
     )
     .await

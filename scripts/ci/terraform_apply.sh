@@ -492,13 +492,24 @@ import_shared_secrets_if_needed() {
   local redis_secret="raksha/${ENVIRONMENT}/shared/REDIS_URL"
   local enable_managed_data secret_module_prefix
 
-  enable_managed_data=$(trim_whitespace "$(config_string_var enable_managed_data)")
-  case "${enable_managed_data}" in
-    true|TRUE|True|1)
-      secret_module_prefix="module.data_prod[0].aws_secretsmanager_secret"
+  case "${ENVIRONMENT}" in
+    prod)
+      secret_module_prefix="module.data_prod.aws_secretsmanager_secret"
+      ;;
+    test|stage)
+      enable_managed_data=$(trim_whitespace "$(config_string_var enable_managed_data)")
+      case "${enable_managed_data}" in
+        true|TRUE|True|1)
+          secret_module_prefix="module.data_prod[0].aws_secretsmanager_secret"
+          ;;
+        *)
+          secret_module_prefix="module.data_test[0].aws_secretsmanager_secret"
+          ;;
+      esac
       ;;
     *)
-      secret_module_prefix="module.data_test[0].aws_secretsmanager_secret"
+      log "apply prep: skipping shared secret import for unsupported environment=${ENVIRONMENT}"
+      return 0
       ;;
   esac
 

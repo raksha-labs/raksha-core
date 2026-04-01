@@ -1,8 +1,11 @@
 aws_region              = "eu-west-1"
 environment             = "prod"
 compute_mode            = "fargate_mix"
+# Low-cost prod defaults are set in variables.tf while the environment is still in test mode.
+# Override these here later when you are ready for real production scale.
 budget_limit_usd        = 1000
 # Optional cost controls:
+# create_anomaly_monitor              = false  # recommended if the account already has an AWS services anomaly monitor
 # anomaly_total_impact_absolute_usd   = 20
 # enable_billing_estimated_charges_alarm = true
 # billing_estimated_charges_alarm_usd = null  # null => uses budget_limit_usd

@@ -4,10 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: Image tag to deploy
-        required: true
-        default: latest
+        description: Image tag to deploy (leave empty to reuse latest unless build_images is enabled)
+        required: false
+        default: ''
         type: string
+      build_images:
+        description: Build fresh images before deploy
+        required: true
+        default: false
+        type: boolean
       apply_infra:
         description: Apply Terraform before service rollout
         required: true
@@ -24,17 +29,35 @@ permissions:
   contents: read
 
 jobs:
+  build-images:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_images }}
+    uses: ./.github/workflows/reusable-image-build.yml
+    with:
+      environment: prod
+      aws_region: eu-west-1
+      build_all: ${{ inputs.apply_infra }}
+      service_filter: ${{ inputs.service_filter }}
+      image_tag: ${{ format('sha-{0}', github.sha) }}
+      push_latest: false
+    secrets:
+      aws_role_arn: ${{ secrets.AWS_IMAGES_ROLE_ARN_PROD != '' && secrets.AWS_IMAGES_ROLE_ARN_PROD || secrets.AWS_IMAGES_ROLE_ARN }}
+
   deploy:
+    needs: build-images
+    if: ${{ !cancelled() && (needs.build-images.result == 'success' || needs.build-images.result == 'skipped') }}
     uses: ./.github/workflows/reusable-ecs-rollout.yml
     with:
       environment: prod
-      image_tag: ${{ inputs.image_tag }}
+      image_tag: ${{ github.event_name == 'workflow_dispatch' && !inputs.build_images && inputs.image_tag != '' && inputs.image_tag || needs.build-images.result == 'success' && format('sha-{0}', github.sha) || 'latest' }}
       apply_infra: ${{ inputs.apply_infra }}
       service_filter: ${{ inputs.service_filter }}
+      expected_aws_account_id: ${{ needs.build-images.result == 'success' && needs.build-images.outputs.aws_account_id || '' }}
+      auto_build_missing_images: ${{ needs.build-images.result == 'success' }}
       aws_region: eu-west-1
     secrets:
       aws_role_arn: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
-      tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET }}
-      tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
-      tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
-      public_certificate_arn: ${{ secrets.PUBLIC_CERTIFICATE_ARN }}
+      infra_aws_role_arn: ${{ secrets.AWS_PROD_INFRA_ROLE_ARN != '' && secrets.AWS_PROD_INFRA_ROLE_ARN || secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
+      tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET_PROD != '' && secrets.TF_BACKEND_BUCKET_PROD || secrets.TF_BACKEND_BUCKET }}
+      tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE_PROD != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_PROD || secrets.TF_BACKEND_DYNAMODB_TABLE }}
+      tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID_PROD != '' && secrets.TF_BACKEND_KMS_KEY_ID_PROD || secrets.TF_BACKEND_KMS_KEY_ID }}
+      public_certificate_arn: ${{ secrets.PUBLIC_CERTIFICATE_ARN_PROD != '' && secrets.PUBLIC_CERTIFICATE_ARN_PROD || secrets.PUBLIC_CERTIFICATE_ARN }}

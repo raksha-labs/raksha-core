@@ -114,11 +114,9 @@ locals {
       AUTH_INTERNAL_SERVICE_TOKEN = "raksha-auth-token"
     }
     orchestrator = {
-      ALERT_FALLBACK_TENANT_ID = "glider"
-      NOTIFIER_GATEWAY_URL     = "http://notifier-gateway.${module.compute.service_discovery_namespace_name}:3002"
+      NOTIFIER_GATEWAY_URL = "http://notifier-gateway.${module.compute.service_discovery_namespace_name}:3002"
     }
     finality = {
-      ALERT_FALLBACK_TENANT_ID = "glider"
     }
     "history-worker" = {
       HISTORY_WORKER_INTERVAL_SECS = "30"
@@ -333,6 +331,14 @@ resource "aws_ssm_parameter" "core_ecs_tasks_sg_id" {
   name      = "/raksha/${var.environment}/core/ecs_tasks_sg_id"
   type      = "String"
   value     = module.security.ecs_tasks_sg_id
+  overwrite = true
+  tags      = var.tags
+}
+
+resource "aws_ssm_parameter" "core_database_sg_id" {
+  name      = "/raksha/${var.environment}/core/database_sg_id"
+  type      = "String"
+  value     = module.security.database_sg_id
   overwrite = true
   tags      = var.tags
 }

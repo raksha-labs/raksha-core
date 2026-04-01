@@ -43,7 +43,13 @@ variable "nat_gateway_per_az" {
 variable "service_desired_counts" {
   description = "Optional desired count overrides by service"
   type        = map(number)
-  default     = {}
+  default = {
+    indexer        = 1
+    detector       = 1
+    orchestrator   = 1
+    finality       = 1
+    history-worker = 1
+  }
 }
 
 variable "service_cpu_memory" {
@@ -52,7 +58,13 @@ variable "service_cpu_memory" {
     cpu    = number
     memory = number
   }))
-  default = {}
+  default = {
+    indexer        = { cpu = 256, memory = 512 }
+    detector       = { cpu = 512, memory = 1024 }
+    orchestrator   = { cpu = 256, memory = 512 }
+    finality       = { cpu = 256, memory = 512 }
+    history-worker = { cpu = 256, memory = 512 }
+  }
 }
 
 variable "log_retention_days" {
@@ -71,6 +83,12 @@ variable "anomaly_total_impact_absolute_usd" {
   description = "Absolute USD threshold for cost anomaly alerts"
   type        = number
   default     = 20
+}
+
+variable "create_anomaly_monitor" {
+  description = "Whether to create a Cost Explorer anomaly monitor/subscription in this account. Disable when the account already has a service monitor."
+  type        = bool
+  default     = false
 }
 
 variable "enable_billing_estimated_charges_alarm" {
@@ -111,7 +129,7 @@ variable "admin_default_service" {
 }
 
 variable "enable_public_https" {
-  description = "Enable HTTPS on public ALB"
+  description = "Enable HTTPS on public/admin ALBs"
   type        = bool
   default     = true
 }
@@ -149,7 +167,7 @@ variable "fargate_spot_scaling_classes" {
 variable "db_instance_class" {
   description = "RDS instance class"
   type        = string
-  default     = "db.t4g.large"
+  default     = "db.t4g.medium"
 }
 
 variable "db_name" {
@@ -167,7 +185,7 @@ variable "db_username" {
 variable "cache_node_type" {
   description = "Redis node type"
   type        = string
-  default     = "cache.t4g.medium"
+  default     = "cache.t4g.small"
 }
 
 variable "cache_num_nodes" {

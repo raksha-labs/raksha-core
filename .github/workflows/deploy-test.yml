@@ -89,13 +89,14 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_images == 'true' }}
     uses: ./.github/workflows/reusable-image-build.yml
     with:
+      environment: test
       aws_region: eu-west-1
       build_all: ${{ github.event.inputs.apply_infra == 'true' }}
       service_filter: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_filter || '' }}
       image_tag: ${{ format('sha-{0}', github.sha) }}
       push_latest: false
     secrets:
-      aws_role_arn: ${{ secrets.AWS_INFRA_ROLE_ARN }}
+      aws_role_arn: ${{ secrets.AWS_IMAGES_ROLE_ARN_TEST != '' && secrets.AWS_IMAGES_ROLE_ARN_TEST || secrets.AWS_IMAGES_ROLE_ARN != '' && secrets.AWS_IMAGES_ROLE_ARN || secrets.AWS_INFRA_ROLE_ARN }}
 
   deploy:
     needs: [build-images, guard-build-required, guard-image-source]
@@ -111,7 +112,8 @@ jobs:
       aws_region: eu-west-1
     secrets:
       aws_role_arn: ${{ secrets.AWS_TEST_DEPLOY_ROLE_ARN }}
-      infra_aws_role_arn: ${{ secrets.AWS_INFRA_ROLE_ARN }}
-      tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET }}
-      tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE }}
-      tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID }}
+      infra_aws_role_arn: ${{ secrets.AWS_TEST_INFRA_ROLE_ARN != '' && secrets.AWS_TEST_INFRA_ROLE_ARN || secrets.AWS_INFRA_ROLE_ARN != '' && secrets.AWS_INFRA_ROLE_ARN || secrets.AWS_TEST_DEPLOY_ROLE_ARN }}
+      tf_backend_bucket: ${{ secrets.TF_BACKEND_BUCKET_TEST != '' && secrets.TF_BACKEND_BUCKET_TEST || secrets.TF_BACKEND_BUCKET }}
+      tf_backend_dynamodb_table: ${{ secrets.TF_BACKEND_DYNAMODB_TABLE_TEST != '' && secrets.TF_BACKEND_DYNAMODB_TABLE_TEST || secrets.TF_BACKEND_DYNAMODB_TABLE }}
+      tf_backend_kms_key_id: ${{ secrets.TF_BACKEND_KMS_KEY_ID_TEST != '' && secrets.TF_BACKEND_KMS_KEY_ID_TEST || secrets.TF_BACKEND_KMS_KEY_ID }}
+      public_certificate_arn: ${{ secrets.PUBLIC_CERTIFICATE_ARN_TEST != '' && secrets.PUBLIC_CERTIFICATE_ARN_TEST || secrets.PUBLIC_CERTIFICATE_ARN }}

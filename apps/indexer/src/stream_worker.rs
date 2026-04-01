@@ -63,6 +63,8 @@ pub struct RuntimeStreamConfig {
     pub source_id: String,
     pub source_type: String,
     pub source_name: String,
+    pub source_scope_kind: String,
+    pub owner_tenant_id: Option<String>,
     pub connection_config: Value,
     pub operating_mode_profile: String,
     pub auth_secret_ref: Option<String>,
@@ -353,6 +355,93 @@ fn apply_runtime_field_mapping_overrides(
     if let Some(tx_hash) = mapped.tx_hash.filter(|value| !value.trim().is_empty()) {
         parsed.tx_hash = Some(tx_hash);
     }
+}
+
+fn apply_inverted_price_override(config: &RuntimeStreamConfig, parsed: &mut ParsedFeedEvent) {
+    let filter = match config.filter_config.as_object() {
+        Some(value) => value,
+        None => return,
+    };
+    if !filter
+        .get("invert_price")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let Some(source_price) = parsed
+        .price
+        .filter(|value| value.is_finite() && *value > 0.0)
+    else {
+        return;
+    };
+
+    let inverted_price = 1.0 / source_price;
+    if !inverted_price.is_finite() || inverted_price <= 0.0 {
+        return;
+    }
+
+    let source_asset_pair = parsed.asset_pair.clone();
+    parsed.price = Some(inverted_price);
+
+    if let Some(output_asset_pair) = filter
+        .get("output_asset_pair")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parsed.asset_pair = Some(output_asset_pair.to_string());
+    }
+
+    let output_quote_asset = filter
+        .get("output_quote_asset")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_uppercase())
+        .or_else(|| {
+            parsed
+                .asset_pair
+                .as_deref()
+                .and_then(quote_asset_from_asset_pair)
+        });
+
+    if !parsed.normalized_fields.is_object() {
+        parsed.normalized_fields = json!({});
+    }
+    if let Some(fields) = parsed.normalized_fields.as_object_mut() {
+        fields.insert("price_inverted".to_string(), Value::Bool(true));
+        fields.insert("source_raw_price".to_string(), json!(source_price));
+        if let Some(source_asset_pair) = source_asset_pair {
+            fields.insert(
+                "source_asset_pair".to_string(),
+                Value::String(source_asset_pair),
+            );
+        }
+        if let Some(output_quote_asset) = output_quote_asset {
+            fields.insert("quote_asset".to_string(), Value::String(output_quote_asset));
+        }
+    }
+}
+
+fn quote_asset_from_asset_pair(asset_pair: &str) -> Option<String> {
+    let cleaned = asset_pair.trim().to_ascii_uppercase();
+    for delimiter in ['/', '-'] {
+        if cleaned.contains(delimiter) {
+            let mut parts = cleaned.split(delimiter).filter(|part| !part.is_empty());
+            let _base = parts.next();
+            if let Some(quote) = parts.next() {
+                return Some(quote.to_string());
+            }
+        }
+    }
+    for suffix in ["USDT", "USDC", "USD"] {
+        if cleaned.ends_with(suffix) {
+            return Some(suffix.to_string());
+        }
+    }
+    None
 }
 
 fn is_static_worker_config_error(error: &anyhow::Error) -> bool {
@@ -1110,6 +1199,7 @@ async fn process_payload(
                 parsed.chain_id = payload_ctx.chain_id_hint;
             }
             apply_runtime_field_mapping_overrides(config, &payload, &mut parsed);
+            apply_inverted_price_override(config, &mut parsed);
             apply_accelerated_simulation_timestamp(
                 &mut parsed,
                 &payload,
@@ -1969,7 +2059,10 @@ fn to_operational_record(
         source_type: config.source_type.clone(),
         tenant_id: (config.tenant_targets.len() == 1).then(|| config.tenant_targets[0].clone()),
         event_type: parsed.event_type.clone(),
-        event_id: parsed.event_id.clone(),
+        event_id: scoped_simulation_event_id(
+            parsed.event_id.as_deref(),
+            simulation_run_id.as_deref(),
+        ),
         market_key: parsed.market_key.clone(),
         asset_pair: parsed.asset_pair.clone(),
         chain_id: parsed.chain_id,
@@ -2032,6 +2125,21 @@ fn annotate_ingestion_meta(
     }
 }
 
+fn scoped_simulation_event_id(
+    event_id: Option<&str>,
+    simulation_run_id: Option<&str>,
+) -> Option<String> {
+    let normalized_event_id = event_id.map(str::trim).filter(|value| !value.is_empty())?;
+    let normalized_run_id = simulation_run_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match normalized_run_id {
+        Some(run_id) => Some(format!("{normalized_event_id}:sim:{run_id}")),
+        None => Some(normalized_event_id.to_string()),
+    }
+}
+
 fn to_source_envelope(
     config: &RuntimeStreamConfig,
     parsed: &ParsedFeedEvent,
@@ -2077,10 +2185,9 @@ async fn fanout_unified_events(
     let source_type = map_source_type(&config.source_type);
 
     for tenant_id in &config.tenant_targets {
-        let event_id = parsed
-            .event_id
-            .clone()
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let event_id =
+            scoped_simulation_event_id(parsed.event_id.as_deref(), meta.simulation_run_id)
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
         let enriched_payload = enrich_payload_for_unified(config, payload, parsed, &meta);
         let event = UnifiedEvent {
             event_id,
@@ -2671,6 +2778,8 @@ mod tests {
             source_id: "pyth-eth-mainnet".to_string(),
             source_type: "oracle_api".to_string(),
             source_name: "Pyth".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({
                 "http_url": "https://hermes.pyth.network/v2/updates/price/stream?ids[]={subscription_key}"
             }),
@@ -2707,6 +2816,8 @@ mod tests {
             source_id: "pyth-eth-mainnet".to_string(),
             source_type: "oracle_api".to_string(),
             source_name: "Pyth".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({
                 "http_url": "https://hermes.pyth.network/v2/updates/price/stream?ids[]={subscription_key}"
             }),
@@ -2754,6 +2865,8 @@ mod tests {
             source_id: "binance-global".to_string(),
             source_type: "cex_api".to_string(),
             source_name: "Binance".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "http://example.invalid"}),
             operating_mode_profile: "test".to_string(),
             auth_secret_ref: None,
@@ -2817,6 +2930,8 @@ mod tests {
             source_id: "pyth-eth-mainnet".to_string(),
             source_type: "oracle_api".to_string(),
             source_name: "Pyth".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "http://example.invalid"}),
             operating_mode_profile: "test".to_string(),
             auth_secret_ref: None,
@@ -2864,6 +2979,8 @@ mod tests {
             source_id: "custom-source".to_string(),
             source_type: "custom_api".to_string(),
             source_name: "Custom".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "http://example.invalid"}),
             operating_mode_profile: "test".to_string(),
             auth_secret_ref: None,
@@ -2897,6 +3014,8 @@ mod tests {
             source_id: "pyth-eth-mainnet".to_string(),
             source_type: "oracle_api".to_string(),
             source_name: "Pyth".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "http://example.invalid"}),
             operating_mode_profile: "test".to_string(),
             auth_secret_ref: None,
@@ -2943,6 +3062,8 @@ mod tests {
             source_id: "pyth-eth-mainnet".to_string(),
             source_type: "oracle_api".to_string(),
             source_name: "Pyth".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "http://example.invalid"}),
             operating_mode_profile: "test".to_string(),
             auth_secret_ref: None,
@@ -2992,6 +3113,8 @@ mod tests {
             source_id: "custom-source".to_string(),
             source_type: "custom_api".to_string(),
             source_name: "Custom".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "http://example.invalid"}),
             operating_mode_profile: "test".to_string(),
             auth_secret_ref: None,
@@ -3066,6 +3189,8 @@ mod tests {
             source_id: "pyth-eth-mainnet".to_string(),
             source_type: "oracle_api".to_string(),
             source_name: "Pyth".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "https://hermes.pyth.network"}),
             operating_mode_profile: "live".to_string(),
             auth_secret_ref: None,
@@ -3120,6 +3245,8 @@ mod tests {
             source_id: "chainlink-data-streams".to_string(),
             source_type: "oracle_api".to_string(),
             source_name: "Chainlink".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "wss://ws.dataengine.chain.link"}),
             operating_mode_profile: "live".to_string(),
             auth_secret_ref: None,
@@ -3169,6 +3296,82 @@ mod tests {
     }
 
     #[test]
+    fn inverted_price_override_flips_supported_cex_pair_for_usdt_market() {
+        let config = RuntimeStreamConfig {
+            stream_config_id: "stream-3".to_string(),
+            source_id: "bybit-spot-http".to_string(),
+            source_type: "cex_websocket".to_string(),
+            source_name: "Bybit".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
+            connection_config: json!({"endpoint": "https://api.bybit.com/v5/market/tickers"}),
+            operating_mode_profile: "live".to_string(),
+            auth_secret_ref: None,
+            auth_config: json!({}),
+            connector_mode: "http_poll".to_string(),
+            stream_name: "ticker".to_string(),
+            subscription_key: Some("USDCUSDT".to_string()),
+            event_type: "quote".to_string(),
+            parser_name: "bybit_tickers_v5".to_string(),
+            market_key: Some("USDT/USD".to_string()),
+            asset_pair: Some("USDTUSDC".to_string()),
+            filter_config: json!({
+                "invert_price": true,
+                "output_asset_pair": "USDTUSDC",
+                "output_quote_asset": "USDC"
+            }),
+            payload_ts_path: Some("$.time".to_string()),
+            payload_ts_unit: "ms".to_string(),
+            poll_interval_ms: Some(5000),
+            tenant_targets: vec!["raksha-demo".to_string()],
+        };
+        let mut parsed = ParsedFeedEvent {
+            event_type: "quote".to_string(),
+            event_id: Some("evt-3".to_string()),
+            market_key: Some("USDT/USD".to_string()),
+            asset_pair: Some("USDCUSDT".to_string()),
+            price: Some(1.0002),
+            chain_id: None,
+            block_number: None,
+            tx_hash: None,
+            log_index: None,
+            topic0: None,
+            payload_event_ts: None,
+            observed_at: Utc.timestamp_opt(1_678_521_640, 0).single().unwrap(),
+            normalized_fields: json!({}),
+        };
+
+        apply_inverted_price_override(&config, &mut parsed);
+
+        assert_eq!(parsed.asset_pair.as_deref(), Some("USDTUSDC"));
+        assert_eq!(
+            parsed
+                .normalized_fields
+                .get("quote_asset")
+                .and_then(Value::as_str),
+            Some("USDC")
+        );
+        assert_eq!(
+            parsed
+                .normalized_fields
+                .get("price_inverted")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            parsed
+                .normalized_fields
+                .get("source_asset_pair")
+                .and_then(Value::as_str),
+            Some("USDCUSDT")
+        );
+        assert!(
+            parsed.price.expect("inverted price") > 0.999
+                && parsed.price.expect("inverted price") < 1.0
+        );
+    }
+
+    #[test]
     fn http_poll_payload_items_unwrap_events_wrapper() {
         let payload = json!({
             "events": [
@@ -3205,6 +3408,8 @@ mod tests {
             source_id: "binance-global".to_string(),
             source_type: "cex_api".to_string(),
             source_name: "Binance".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "http://example.invalid"}),
             operating_mode_profile: "test".to_string(),
             auth_secret_ref: None,
@@ -3353,6 +3558,8 @@ mod tests {
             source_id: "gemini-spot".to_string(),
             source_type: "cex_api".to_string(),
             source_name: "Gemini".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "wss://api.gemini.com/v1/marketdata"}),
             operating_mode_profile: "live".to_string(),
             auth_secret_ref: None,
@@ -3384,6 +3591,8 @@ mod tests {
             source_id: "gemini-spot".to_string(),
             source_type: "cex_api".to_string(),
             source_name: "Gemini".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "wss://api.gemini.com/v1/marketdata"}),
             operating_mode_profile: "live".to_string(),
             auth_secret_ref: None,
@@ -3412,6 +3621,8 @@ mod tests {
             source_id: "gemini-spot".to_string(),
             source_type: "cex_api".to_string(),
             source_name: "Gemini".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: json!({"endpoint": "wss://api.gemini.com/v1/marketdata"}),
             operating_mode_profile: "live".to_string(),
             auth_secret_ref: None,
@@ -3472,5 +3683,17 @@ mod tests {
         assert!(!should_skip_duplicate_quote(&config, &first, &mut state));
         assert!(should_skip_duplicate_quote(&config, &duplicate, &mut state));
         assert!(!should_skip_duplicate_quote(&config, &later, &mut state));
+    }
+
+    #[test]
+    fn scoped_simulation_event_id_appends_run_id_for_simulated_events() {
+        let scoped = scoped_simulation_event_id(Some("oracle-event-1"), Some("run-123"));
+        assert_eq!(scoped.as_deref(), Some("oracle-event-1:sim:run-123"));
+    }
+
+    #[test]
+    fn scoped_simulation_event_id_preserves_live_event_id() {
+        let scoped = scoped_simulation_event_id(Some("oracle-event-1"), None);
+        assert_eq!(scoped.as_deref(), Some("oracle-event-1"));
     }
 }

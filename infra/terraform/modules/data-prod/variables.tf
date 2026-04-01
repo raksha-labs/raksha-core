@@ -26,25 +26,25 @@ variable "redis_sg_id" {
 variable "db_instance_class" {
   description = "RDS instance class"
   type        = string
-  default     = "db.t4g.medium"
+  default     = "db.t4g.micro"
 }
 
 variable "db_allocated_storage" {
   description = "Initial RDS allocated storage in GB"
   type        = number
-  default     = 100
+  default     = 20
 }
 
 variable "db_max_allocated_storage" {
   description = "Maximum autoscaling storage in GB"
   type        = number
-  default     = 500
+  default     = 100
 }
 
 variable "db_multi_az" {
-  description = "Whether the RDS instance runs as Multi-AZ"
+  description = "Enable Multi-AZ for RDS (doubles cost, enables automatic failover)"
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "db_name" {
@@ -74,13 +74,13 @@ variable "db_deletion_protection" {
 variable "cache_node_type" {
   description = "ElastiCache node type"
   type        = string
-  default     = "cache.t4g.medium"
+  default     = "cache.t4g.micro"
 }
 
 variable "cache_num_nodes" {
-  description = "ElastiCache node count"
+  description = "ElastiCache node count (1 = no failover, 2+ = automatic failover + Multi-AZ)"
   type        = number
-  default     = 2
+  default     = 1
 }
 
 variable "tags" {

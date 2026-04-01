@@ -240,3 +240,83 @@ CREATE TABLE IF NOT EXISTS raw_ingest.export_manifest (
 
 CREATE INDEX IF NOT EXISTS idx_raw_export_manifest_entity_partition
     ON raw_ingest.export_manifest (entity, partition, created_at DESC);
+
+-- ── TTL Purge Functions ────────────────────────────────────────────────────
+-- Batched deletes to control storage growth. Skip simulated rows (owned by
+-- workbench runs that manage their own cleanup).
+
+CREATE OR REPLACE FUNCTION raw_ingest.purge_chain_events(
+    retention_interval INTERVAL DEFAULT INTERVAL '1 hour',
+    batch_size INTEGER DEFAULT 10000
+)
+RETURNS BIGINT LANGUAGE plpgsql AS $$
+DECLARE total_deleted BIGINT := 0; batch_deleted BIGINT; cutoff TIMESTAMPTZ;
+BEGIN
+    cutoff := NOW() - retention_interval;
+    LOOP
+        DELETE FROM raw_ingest.chain_events
+        WHERE ctid IN (
+            SELECT ctid FROM raw_ingest.chain_events
+            WHERE observed_at < cutoff AND NOT is_simulated
+            LIMIT batch_size
+        );
+        GET DIAGNOSTICS batch_deleted = ROW_COUNT;
+        total_deleted := total_deleted + batch_deleted;
+        EXIT WHEN batch_deleted < batch_size;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+    RETURN total_deleted;
+END; $$;
+
+CREATE OR REPLACE FUNCTION raw_ingest.purge_dex_events(
+    retention_interval INTERVAL DEFAULT INTERVAL '1 hour',
+    batch_size INTEGER DEFAULT 10000
+)
+RETURNS BIGINT LANGUAGE plpgsql AS $$
+DECLARE total_deleted BIGINT := 0; batch_deleted BIGINT; cutoff TIMESTAMPTZ;
+BEGIN
+    cutoff := NOW() - retention_interval;
+    LOOP
+        DELETE FROM raw_ingest.dex_events
+        WHERE ctid IN (
+            SELECT ctid FROM raw_ingest.dex_events
+            WHERE observed_at < cutoff AND NOT is_simulated
+            LIMIT batch_size
+        );
+        GET DIAGNOSTICS batch_deleted = ROW_COUNT;
+        total_deleted := total_deleted + batch_deleted;
+        EXIT WHEN batch_deleted < batch_size;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+    RETURN total_deleted;
+END; $$;
+
+CREATE OR REPLACE FUNCTION raw_ingest.purge_cex_ticks(
+    retention_interval INTERVAL DEFAULT INTERVAL '1 hour',
+    batch_size INTEGER DEFAULT 10000
+)
+RETURNS BIGINT LANGUAGE plpgsql AS $$
+DECLARE total_deleted BIGINT := 0; batch_deleted BIGINT; cutoff TIMESTAMPTZ;
+BEGIN
+    cutoff := NOW() - retention_interval;
+    LOOP
+        DELETE FROM raw_ingest.cex_ticks
+        WHERE ctid IN (
+            SELECT ctid FROM raw_ingest.cex_ticks
+            WHERE observed_at < cutoff AND NOT is_simulated
+            LIMIT batch_size
+        );
+        GET DIAGNOSTICS batch_deleted = ROW_COUNT;
+        total_deleted := total_deleted + batch_deleted;
+        EXIT WHEN batch_deleted < batch_size;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+    RETURN total_deleted;
+END; $$;
+
+CREATE INDEX IF NOT EXISTS idx_raw_chain_events_observed_at
+    ON raw_ingest.chain_events (observed_at);
+CREATE INDEX IF NOT EXISTS idx_raw_dex_events_observed_at
+    ON raw_ingest.dex_events (observed_at);
+CREATE INDEX IF NOT EXISTS idx_raw_cex_ticks_observed_at
+    ON raw_ingest.cex_ticks (observed_at);

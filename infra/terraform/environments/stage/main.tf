@@ -17,6 +17,10 @@ locals {
     svc.service_name => svc
   }
   secret_prefix = "raksha/${var.environment}"
+  create_public_waf = var.enable_waf && length([
+    for _, svc in local.service_catalog_map : 1
+    if try(svc.exposure, "internal") == "public"
+  ]) > 0
 }
 
 module "network" {
@@ -83,11 +87,9 @@ locals {
       AUTH_INTERNAL_SERVICE_TOKEN = "raksha-auth-token"
     }
     orchestrator = {
-      ALERT_FALLBACK_TENANT_ID = "glider"
-      NOTIFIER_GATEWAY_URL     = "http://notifier-gateway.${module.compute.service_discovery_namespace_name}:3002"
+      NOTIFIER_GATEWAY_URL = "http://notifier-gateway.${module.compute.service_discovery_namespace_name}:3002"
     }
     finality = {
-      ALERT_FALLBACK_TENANT_ID = "glider"
     }
     "history-worker" = {
       HISTORY_WORKER_INTERVAL_SECS = "30"
@@ -253,6 +255,14 @@ resource "aws_ssm_parameter" "core_ecs_tasks_sg_id" {
   tags      = var.tags
 }
 
+resource "aws_ssm_parameter" "core_database_sg_id" {
+  name      = "/raksha/${var.environment}/core/database_sg_id"
+  type      = "String"
+  value     = module.security.database_sg_id
+  overwrite = true
+  tags      = var.tags
+}
+
 resource "aws_ssm_parameter" "core_ecs_instances_sg_id" {
   name      = "/raksha/${var.environment}/core/ecs_instances_sg_id"
   type      = "String"
@@ -318,7 +328,7 @@ resource "aws_ssm_parameter" "core_github_deploy_role_arn" {
 }
 
 resource "aws_wafv2_web_acl" "public" {
-  count = var.enable_waf && module.compute.public_alb_arn != null ? 1 : 0
+  count = local.create_public_waf ? 1 : 0
 
   name  = "raksha-${var.environment}-waf"
   scope = "REGIONAL"
@@ -350,8 +360,59 @@ resource "aws_wafv2_web_acl" "public" {
   }
 
   rule {
-    name     = "AWSManagedRulesCommonRuleSet"
+    name     = "AllowScenarioImportBundle"
     priority = 2
+
+    action {
+      allow {}
+    }
+
+    statement {
+      and_statement {
+        statement {
+          byte_match_statement {
+            search_string         = "POST"
+            positional_constraint = "EXACTLY"
+
+            field_to_match {
+              method {}
+            }
+
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+
+        statement {
+          byte_match_statement {
+            search_string         = "/api/workbench/simulation/scenarios/import-bundle"
+            positional_constraint = "EXACTLY"
+
+            field_to_match {
+              uri_path {}
+            }
+
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "raksha-${var.environment}-allow-scenario-import-bundle"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 3
 
     override_action {
       none {}
@@ -381,7 +442,7 @@ resource "aws_wafv2_web_acl" "public" {
 }
 
 resource "aws_wafv2_web_acl_association" "public" {
-  count = var.enable_waf && module.compute.public_alb_arn != null ? 1 : 0
+  count = local.create_public_waf ? 1 : 0
 
   resource_arn = module.compute.public_alb_arn
   web_acl_arn  = aws_wafv2_web_acl.public[0].arn

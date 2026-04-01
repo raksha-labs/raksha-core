@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use common::{init_logging, start_health_check_server, ShutdownSignal};
 use dotenvy::dotenv;
@@ -24,13 +24,12 @@ use uuid::Uuid;
 
 const DEFAULT_BATCH_SIZE: usize = 100;
 const DEFAULT_BLOCK_MS: usize = 1000;
-const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "glider";
 const REDIS_STARTUP_RETRY_ATTEMPTS: usize = 30;
 const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 const ALL_NOTIFICATION_CHANNELS: [&str; 5] = ["webhook", "slack", "telegram", "discord", "email"];
 const ALERT_EVIDENCE_BUFFER_BEFORE_MS: i64 = 30_000;
 const ALERT_EVIDENCE_BUFFER_AFTER_MS: i64 = 10_000;
-
+const DEFAULT_DUPLICATE_SUPPRESSION_SECONDS: i64 = 300;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct EvidenceContributorTrace {
     source_id: String,
@@ -148,10 +147,57 @@ async fn main() -> Result<()> {
                 log_sim_detection_received(&detection);
             }
 
-            let alert = alert_from_detection(&detection);
-            let alert = attach_incident_context(alert, &detection, repository.as_ref()).await;
+            let alert = match alert_from_detection(&detection) {
+                Ok(alert) => alert,
+                Err(error) => {
+                    common::log_error!(
+                        warn,
+                        error,
+                        "failed to build alert from detection",
+                        pattern_id = %detection.pattern_id,
+                        detection_id = %detection.detection_id
+                    );
+                    if use_consumer_group {
+                        stream.ack_detection(&stream_group, &entry_id).await?;
+                    }
+                    continue;
+                }
+            };
+            let alert = match attach_incident_context(alert, &detection, repository.as_ref()).await
+            {
+                Ok(alert) => alert,
+                Err(error) => {
+                    common::log_error!(
+                        warn,
+                        error,
+                        "failed to attach incident context to alert",
+                        pattern_id = %detection.pattern_id,
+                        detection_id = %detection.detection_id
+                    );
+                    if use_consumer_group {
+                        stream.ack_detection(&stream_group, &entry_id).await?;
+                    }
+                    continue;
+                }
+            };
             let dispatched =
-                dispatch_alert(&alert, &notifier_gateway, repository.as_ref(), &stream).await;
+                match dispatch_alert(&alert, &notifier_gateway, repository.as_ref(), &stream).await
+                {
+                    Ok(dispatched) => dispatched,
+                    Err(error) => {
+                        common::log_error!(
+                            warn,
+                            error,
+                            "failed to dispatch alert",
+                            alert_id = %alert.alert_id,
+                            pattern_id = %alert.pattern_id
+                        );
+                        if use_consumer_group {
+                            stream.ack_detection(&stream_group, &entry_id).await?;
+                        }
+                        continue;
+                    }
+                };
             alerts_by_event_key.insert(event_key.to_string(), dispatched);
             processed += 1;
 
@@ -276,13 +322,28 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            let dispatched = dispatch_alert(
+            let dispatched = match dispatch_alert(
                 &updated_alert,
                 &notifier_gateway,
                 repository.as_ref(),
                 &stream,
             )
-            .await;
+            .await
+            {
+                Ok(dispatched) => dispatched,
+                Err(error) => {
+                    common::log_error!(
+                        warn,
+                        error,
+                        "failed to dispatch finality-updated alert",
+                        event_key = %update.event_key
+                    );
+                    if use_consumer_group {
+                        stream.ack_finality_update(&stream_group, &entry_id).await?;
+                    }
+                    continue;
+                }
+            };
             alerts_by_event_key.insert(update.event_key.clone(), dispatched);
             processed += 1;
 
@@ -318,14 +379,17 @@ fn default_consumer_name(prefix: &str) -> String {
     format!("{prefix}-{hostname}")
 }
 
-fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
-    AlertEvent {
+fn alert_from_detection(detection: &DetectionResult) -> Result<AlertEvent> {
+    Ok(AlertEvent {
         alert_id: Uuid::new_v4(),
         incident_id: None,
         event_key: detection.event_key.clone(),
         subject_type: detection.subject_type.clone(),
         subject_key: detection.subject_key.clone(),
-        tenant_id: Some(resolve_alert_tenant_id(detection.tenant_id.clone())),
+        tenant_id: Some(require_alert_tenant_id(
+            detection.tenant_id.clone(),
+            &format!("detection {}", detection.detection_id),
+        )?),
         pattern_id: detection.pattern_id.clone(),
         chain: detection.chain.clone(),
         chain_slug: detection.chain_slug.clone(),
@@ -349,7 +413,7 @@ fn alert_from_detection(detection: &DetectionResult) -> AlertEvent {
         is_simulated: detection.is_simulated,
         simulation_run_id: detection.simulation_run_id.clone(),
         created_at: Utc::now(),
-    }
+    })
 }
 
 fn is_test_mode_detection(detection: &DetectionResult) -> bool {
@@ -401,11 +465,15 @@ fn log_sim_alert_dispatching(alert: &AlertEvent) {
 }
 
 fn log_sim_alert_suppressed(alert: &AlertEvent) {
+    log_sim_alert_suppressed_with_reason(alert, "monthly_quota_exceeded");
+}
+
+fn log_sim_alert_suppressed_with_reason(alert: &AlertEvent, suppression_reason: &str) {
     info!(
         pipeline_mode = "test",
         component = "orchestrator",
         stage = "alert.suppressed",
-        suppression_reason = "monthly_quota_exceeded",
+        suppression_reason = suppression_reason,
         alert_id = %alert.alert_id,
         incident_id = alert.incident_id.as_deref(),
         tenant_id = alert.tenant_id.as_deref(),
@@ -445,12 +513,15 @@ async fn attach_incident_context(
     mut alert: AlertEvent,
     detection: &DetectionResult,
     repository: Option<&PostgresRepository>,
-) -> AlertEvent {
+) -> Result<AlertEvent> {
     let Some(repo) = repository else {
-        return alert;
+        return Ok(alert);
     };
 
-    let tenant_id = resolve_alert_tenant_id(alert.tenant_id.clone());
+    let tenant_id = require_alert_tenant_id(
+        alert.tenant_id.clone(),
+        &format!("alert {}", alert.alert_id),
+    )?;
     let transition = detection
         .incident_transition
         .clone()
@@ -508,7 +579,7 @@ async fn attach_incident_context(
                 tenant_id = %tenant_id,
                 pattern_id = %detection.pattern_id
             );
-            return alert;
+            return Ok(alert);
         }
     };
 
@@ -697,7 +768,7 @@ async fn attach_incident_context(
         );
     }
 
-    alert
+    Ok(alert)
 }
 
 fn incident_transition_str(value: &IncidentTransition) -> &'static str {
@@ -727,9 +798,12 @@ async fn dispatch_alert(
     notifier_gateway: &NotifierGatewayClient,
     repository: Option<&PostgresRepository>,
     stream: &RedisStreamPublisher,
-) -> AlertEvent {
+) -> Result<AlertEvent> {
     let mut normalized_alert = alert.clone();
-    let tenant_id = resolve_alert_tenant_id(normalized_alert.tenant_id.clone());
+    let tenant_id = require_alert_tenant_id(
+        normalized_alert.tenant_id.clone(),
+        &format!("alert {}", normalized_alert.alert_id),
+    )?;
     normalized_alert.tenant_id = Some(tenant_id.clone());
     let is_test_mode = is_test_mode_alert(&normalized_alert);
 
@@ -738,6 +812,34 @@ async fn dispatch_alert(
     }
 
     if let Some(repo) = repository {
+        if let Some(previous_alert) = find_dispatch_duplicate(repo, &normalized_alert).await? {
+            warn!(
+                tenant_id = %tenant_id,
+                alert_id = %normalized_alert.alert_id,
+                previous_alert_id = %previous_alert.alert_id,
+                event_key = normalized_alert.event_key.as_deref(),
+                pattern_id = %normalized_alert.pattern_id,
+                severity = ?normalized_alert.severity,
+                lifecycle_state = ?normalized_alert.lifecycle_state,
+                simulation_run_id = normalized_alert.simulation_run_id.as_deref(),
+                "suppressing duplicate alert before notifier dispatch"
+            );
+            if is_test_mode {
+                log_sim_alert_suppressed_with_reason(
+                    &normalized_alert,
+                    "duplicate_suppression_window_active",
+                );
+            }
+            record_usage_event(
+                repo,
+                &tenant_id,
+                "alert_suppressed_duplicate",
+                &normalized_alert,
+            )
+            .await;
+            return Ok(previous_alert);
+        }
+
         match should_escalate_to_all_channels_for_rate_limit(repo, &tenant_id, &normalized_alert)
             .await
         {
@@ -779,7 +881,7 @@ async fn dispatch_alert(
                     persist_and_publish_alert(&suppressed, repository, stream).await;
                     record_usage_event(repo, &tenant_id, "alert_suppressed_quota", &suppressed)
                         .await;
-                    return suppressed;
+                    return Ok(suppressed);
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -864,13 +966,75 @@ async fn dispatch_alert(
         record_usage_event(repo, &tenant_id, "alert_fired", &normalized_alert).await;
     }
 
-    normalized_alert
+    Ok(normalized_alert)
+}
+
+async fn find_dispatch_duplicate(
+    repository: &PostgresRepository,
+    alert: &AlertEvent,
+) -> Result<Option<AlertEvent>> {
+    let Some(event_key) = alert.event_key.as_deref() else {
+        return Ok(None);
+    };
+    let Some(window) = duplicate_suppression_window() else {
+        return Ok(None);
+    };
+
+    let previous = repository.find_latest_alert_by_event_key(event_key).await?;
+    Ok(previous.filter(|existing| should_suppress_duplicate_alert(alert, existing, window)))
+}
+
+fn duplicate_suppression_window() -> Option<ChronoDuration> {
+    let seconds = std::env::var("ALERT_DUPLICATE_SUPPRESSION_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(DEFAULT_DUPLICATE_SUPPRESSION_SECONDS);
+    (seconds > 0).then(|| ChronoDuration::seconds(seconds))
+}
+
+fn should_suppress_duplicate_alert(
+    candidate: &AlertEvent,
+    existing: &AlertEvent,
+    window: ChronoDuration,
+) -> bool {
+    if candidate.alert_id == existing.alert_id {
+        return false;
+    }
+
+    if candidate.event_key.is_none()
+        || candidate.event_key != existing.event_key
+        || candidate.tenant_id != existing.tenant_id
+        || candidate.pattern_id != existing.pattern_id
+        || candidate.severity != existing.severity
+        || candidate.lifecycle_state != existing.lifecycle_state
+        || candidate.simulation_run_id != existing.simulation_run_id
+    {
+        return false;
+    }
+
+    match Utc::now().signed_duration_since(existing.created_at) {
+        age if age < ChronoDuration::zero() => true,
+        age => age <= window,
+    }
 }
 
 fn apply_dispatch_result_metadata(
     mut alert: AlertEvent,
     dispatch_result: &GatewayDispatchResult,
 ) -> AlertEvent {
+    let rate_limited_channels: Vec<String> = dispatch_result
+        .results
+        .iter()
+        .filter(|result| result.reason.as_deref() == Some("destination_rate_limit"))
+        .map(|result| result.channel.clone())
+        .collect();
+    let cooldown_channels: Vec<String> = dispatch_result
+        .results
+        .iter()
+        .filter(|result| result.reason.as_deref() == Some("cooldown"))
+        .map(|result| result.channel.clone())
+        .collect();
+
     alert.channel_routes = dispatch_result.resolved_channels.clone();
     alert.oracle_context.insert(
         "dispatch_resolved_channels".to_string(),
@@ -884,6 +1048,25 @@ fn apply_dispatch_result_metadata(
         alert
             .oracle_context
             .insert("dispatch_reason".to_string(), serde_json::json!(reason));
+    }
+    if !rate_limited_channels.is_empty() {
+        alert
+            .oracle_context
+            .insert("delivery_rate_limited".to_string(), serde_json::json!(true));
+        alert.oracle_context.insert(
+            "delivery_rate_limited_channels".to_string(),
+            serde_json::json!(rate_limited_channels),
+        );
+    }
+    if !cooldown_channels.is_empty() {
+        alert.oracle_context.insert(
+            "delivery_cooldown_blocked".to_string(),
+            serde_json::json!(true),
+        );
+        alert.oracle_context.insert(
+            "delivery_cooldown_channels".to_string(),
+            serde_json::json!(cooldown_channels),
+        );
     }
     alert
 }
@@ -1035,11 +1218,11 @@ fn alert_chain_id(alert: &AlertEvent) -> Option<i64> {
     }
 }
 
-fn resolve_alert_tenant_id(tenant_id: Option<String>) -> String {
-    tenant_id.unwrap_or_else(|| {
-        std::env::var("ALERT_FALLBACK_TENANT_ID")
-            .unwrap_or_else(|_| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string())
-    })
+fn require_alert_tenant_id(tenant_id: Option<String>, context: &str) -> Result<String> {
+    tenant_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("missing tenant_id for {context}"))
 }
 
 /// Extract the base asset symbol from a DPEG subject_key.
@@ -1122,7 +1305,6 @@ fn annotate_evidence_fields(
         .cloned()
         .unwrap_or_else(Map::new);
     let mut evidence = Map::new();
-    evidence.insert("sustain_window_event".to_string(), json!(true));
     evidence.insert("decision_input".to_string(), json!(decision_input));
     if let Some(trace) = contributor {
         evidence.insert("source_kind".to_string(), json!(trace.source_kind));
@@ -1149,13 +1331,14 @@ fn annotate_evidence_fields(
 
 fn synthetic_evidence_record(
     alert: &AlertEvent,
+    tenant_id: &str,
     market_key: Option<&str>,
     contributor: &EvidenceContributorTrace,
 ) -> AlertEvidenceSnapshotRecord {
     AlertEvidenceSnapshotRecord {
         alert_id: alert.alert_id.to_string(),
         incident_id: alert.incident_id.clone(),
-        tenant_id: resolve_alert_tenant_id(alert.tenant_id.clone()),
+        tenant_id: tenant_id.to_string(),
         pattern_id: Some(alert.pattern_id.clone()),
         source_id: contributor.source_id.clone(),
         source_type: source_type_for_kind(&contributor.source_kind),
@@ -1184,9 +1367,9 @@ fn evidence_lookup_window(
     alert: &AlertEvent,
     contributors: &[EvidenceContributorTrace],
 ) -> (DateTime<Utc>, DateTime<Utc>) {
-    let fallback_start =
+    let required_start =
         alert.created_at - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS);
-    let fallback_end =
+    let required_end =
         alert.created_at + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS);
 
     let Some(first_seen) = contributors
@@ -1194,19 +1377,25 @@ fn evidence_lookup_window(
         .map(|contributor| contributor.observed_at)
         .min()
     else {
-        return (fallback_start, fallback_end);
+        return (required_start, required_end);
     };
     let Some(last_seen) = contributors
         .iter()
         .map(|contributor| contributor.observed_at)
         .max()
     else {
-        return (fallback_start, fallback_end);
+        return (required_start, required_end);
     };
 
     (
-        first_seen - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS),
-        last_seen + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS),
+        std::cmp::min(
+            required_start,
+            first_seen - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS),
+        ),
+        std::cmp::max(
+            required_end,
+            last_seen + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS),
+        ),
     )
 }
 
@@ -1219,7 +1408,10 @@ async fn persist_alert_evidence_snapshot(
         return Ok(());
     }
 
-    let tenant_id = resolve_alert_tenant_id(alert.tenant_id.clone());
+    let tenant_id = require_alert_tenant_id(
+        alert.tenant_id.clone(),
+        &format!("alert {}", alert.alert_id),
+    )?;
     let market_key = extract_market_key(alert.subject_key.as_deref(), &alert.protocol);
     let (window_start, window_end) = evidence_lookup_window(alert, &contributors);
     let source_ids = contributors
@@ -1290,6 +1482,7 @@ async fn persist_alert_evidence_snapshot(
         }
         records.push(synthetic_evidence_record(
             alert,
+            &tenant_id,
             market_key.as_deref(),
             contributor,
         ));
@@ -1471,6 +1664,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tc_d_709_duplicate_suppression_blocks_same_event_within_window() {
+        let candidate =
+            alert_from_detection(&mk_detection(Severity::High, IncidentTransition::Trigger))
+                .expect("alert should build");
+        let mut existing = candidate.clone();
+        existing.alert_id = Uuid::new_v4();
+        existing.created_at = Utc::now() - ChronoDuration::seconds(30);
+
+        assert!(should_suppress_duplicate_alert(
+            &candidate,
+            &existing,
+            ChronoDuration::minutes(5),
+        ));
+    }
+
+    #[test]
+    fn tc_d_710_duplicate_suppression_allows_lifecycle_progression() {
+        let candidate =
+            alert_from_detection(&mk_detection(Severity::High, IncidentTransition::Trigger))
+                .expect("alert should build");
+        let mut existing = candidate.clone();
+        existing.alert_id = Uuid::new_v4();
+        existing.lifecycle_state = LifecycleState::Confirmed;
+        existing.created_at = Utc::now() - ChronoDuration::seconds(30);
+
+        assert!(!should_suppress_duplicate_alert(
+            &candidate,
+            &existing,
+            ChronoDuration::minutes(5),
+        ));
+    }
+
+    #[test]
+    fn tc_d_711_duplicate_suppression_is_scoped_per_simulation_run() {
+        let mut detection = mk_detection(Severity::High, IncidentTransition::Trigger);
+        detection.is_simulated = true;
+        detection.simulation_run_id = Some("run-a".to_string());
+        let candidate = alert_from_detection(&detection).expect("alert should build");
+        let mut existing = candidate.clone();
+        existing.alert_id = Uuid::new_v4();
+        existing.simulation_run_id = Some("run-b".to_string());
+        existing.created_at = Utc::now() - ChronoDuration::seconds(30);
+
+        assert!(!should_suppress_duplicate_alert(
+            &candidate,
+            &existing,
+            ChronoDuration::minutes(5),
+        ));
+    }
+
     // ─── 8. Alert Routing (TC-D-800 to TC-D-808) ─────────────────────────
 
     fn dispatch_result(resolved_channels: &[&str], delivered: bool) -> GatewayDispatchResult {
@@ -1490,7 +1734,7 @@ mod tests {
     #[test]
     fn tc_d_800_critical_routes_to_all_channels() {
         let detection = mk_detection(Severity::Critical, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let routed = apply_dispatch_result_metadata(
             alert,
             &dispatch_result(&["webhook", "slack", "telegram", "discord", "email"], true),
@@ -1502,7 +1746,7 @@ mod tests {
     #[test]
     fn tc_d_801_high_routes_to_webhook_email() {
         let detection = mk_detection(Severity::High, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let routed =
             apply_dispatch_result_metadata(alert, &dispatch_result(&["webhook", "email"], true));
         assert_eq!(
@@ -1515,7 +1759,7 @@ mod tests {
     #[test]
     fn tc_d_802_medium_routes_to_webhook_only() {
         let detection = mk_detection(Severity::Medium, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let routed = apply_dispatch_result_metadata(alert, &dispatch_result(&["webhook"], true));
         assert_eq!(routed.channel_routes, vec!["webhook".to_string()]);
     }
@@ -1524,7 +1768,7 @@ mod tests {
     #[test]
     fn tc_d_803_quiet_hours_suppress_medium() {
         let detection = mk_detection(Severity::Medium, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let routed = apply_dispatch_result_metadata(alert, &dispatch_result(&[], false));
         assert!(routed.channel_routes.is_empty());
         assert_eq!(
@@ -1540,12 +1784,86 @@ mod tests {
     #[test]
     fn tc_d_804_quiet_hours_do_not_suppress_critical() {
         let detection = mk_detection(Severity::Critical, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let routed = apply_dispatch_result_metadata(
             alert,
             &dispatch_result(&["webhook", "slack", "telegram", "discord", "email"], true),
         );
         assert_eq!(routed.channel_routes, all_notification_channels());
+    }
+
+    #[test]
+    fn tc_d_804a_dispatch_metadata_marks_destination_rate_limit() {
+        let alert =
+            alert_from_detection(&mk_detection(Severity::High, IncidentTransition::Trigger))
+                .expect("alert should build");
+        let routed = apply_dispatch_result_metadata(
+            alert,
+            &GatewayDispatchResult {
+                tenant_id: "tenant-a".to_string(),
+                delivered: false,
+                reason: Some("all_channels_failed".to_string()),
+                resolved_channels: vec!["webhook".to_string()],
+                results: vec![notifier::GatewayChannelResult {
+                    channel: "webhook".to_string(),
+                    delivered: false,
+                    reason: Some("destination_rate_limit".to_string()),
+                    status_code: None,
+                }],
+            },
+        );
+        assert_eq!(
+            routed
+                .oracle_context
+                .get("delivery_rate_limited")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            routed
+                .oracle_context
+                .get("delivery_rate_limited_channels")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn tc_d_804b_dispatch_metadata_marks_per_alert_cooldown_block() {
+        let alert =
+            alert_from_detection(&mk_detection(Severity::High, IncidentTransition::Trigger))
+                .expect("alert should build");
+        let routed = apply_dispatch_result_metadata(
+            alert,
+            &GatewayDispatchResult {
+                tenant_id: "tenant-a".to_string(),
+                delivered: false,
+                reason: Some("all_channels_failed".to_string()),
+                resolved_channels: vec!["webhook".to_string()],
+                results: vec![notifier::GatewayChannelResult {
+                    channel: "webhook".to_string(),
+                    delivered: false,
+                    reason: Some("cooldown".to_string()),
+                    status_code: None,
+                }],
+            },
+        );
+        assert_eq!(
+            routed
+                .oracle_context
+                .get("delivery_cooldown_blocked")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            routed
+                .oracle_context
+                .get("delivery_cooldown_channels")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len()),
+            Some(1)
+        );
     }
 
     /// TC-D-805: Rate limit hit — escalates to all channels
@@ -1663,7 +1981,7 @@ mod tests {
                 "contributes_to_breach": true
             }]),
         );
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         let contributors = contributing_sources_from_alert(&alert);
         assert_eq!(contributors.len(), 1);
         assert_eq!(contributors[0].source_id, "pyth-eth-mainnet");
@@ -1671,17 +1989,16 @@ mod tests {
     }
 
     #[test]
-    fn evidence_lookup_window_uses_contributor_timestamps() {
+    fn evidence_lookup_window_covers_buffer_padding() {
         let alert =
-            alert_from_detection(&mk_detection(Severity::Medium, IncidentTransition::Trigger));
+            alert_from_detection(&mk_detection(Severity::Medium, IncidentTransition::Trigger))
+                .expect("alert should build");
         let contributors = vec![
             EvidenceContributorTrace {
                 source_id: "chainlink-data-streams".to_string(),
                 source_kind: "oracle".to_string(),
                 price: 0.9985,
-                observed_at: DateTime::parse_from_rfc3339("2026-03-05T14:00:40Z")
-                    .unwrap()
-                    .with_timezone(&Utc),
+                observed_at: alert.created_at - ChronoDuration::seconds(10),
                 age_ms: 0,
                 weight: 1.0,
                 divergence_pct: 0.15,
@@ -1694,9 +2011,7 @@ mod tests {
                 source_id: "kraken-spot".to_string(),
                 source_kind: "cex".to_string(),
                 price: 0.9984,
-                observed_at: DateTime::parse_from_rfc3339("2026-03-05T14:01:10Z")
-                    .unwrap()
-                    .with_timezone(&Utc),
+                observed_at: alert.created_at - ChronoDuration::seconds(5),
                 age_ms: 0,
                 weight: 1.0,
                 divergence_pct: 0.16,
@@ -1710,22 +2025,20 @@ mod tests {
         let (window_start, window_end) = evidence_lookup_window(&alert, &contributors);
         assert_eq!(
             window_start,
-            DateTime::parse_from_rfc3339("2026-03-05T14:00:10Z")
-                .unwrap()
-                .with_timezone(&Utc)
+            contributors[0].observed_at
+                - ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_BEFORE_MS)
         );
         assert_eq!(
             window_end,
-            DateTime::parse_from_rfc3339("2026-03-05T14:01:20Z")
-                .unwrap()
-                .with_timezone(&Utc)
+            alert.created_at + ChronoDuration::milliseconds(ALERT_EVIDENCE_BUFFER_AFTER_MS)
         );
     }
 
     #[test]
     fn evidence_lookup_window_falls_back_to_alert_time_without_contributors() {
         let alert =
-            alert_from_detection(&mk_detection(Severity::Medium, IncidentTransition::Trigger));
+            alert_from_detection(&mk_detection(Severity::Medium, IncidentTransition::Trigger))
+                .expect("alert should build");
         let (window_start, window_end) = evidence_lookup_window(&alert, &[]);
         assert_eq!(
             window_start,
@@ -1741,7 +2054,7 @@ mod tests {
     #[test]
     fn tc_d_1301_quota_bypass_for_critical() {
         let detection = mk_detection(Severity::Critical, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         assert!(
             !should_enforce_monthly_quota(&alert),
             "Critical alerts should bypass monthly quota"
@@ -1752,7 +2065,7 @@ mod tests {
     #[test]
     fn tc_d_1302_quota_enforced_for_non_critical() {
         let detection = mk_detection(Severity::Medium, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         assert!(
             should_enforce_monthly_quota(&alert),
             "Medium alerts should be subject to monthly quota"
@@ -1765,7 +2078,7 @@ mod tests {
     #[test]
     fn tc_d_1400_alert_payload_required_fields() {
         let detection = mk_detection(Severity::Critical, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
 
         assert!(!alert.alert_id.is_nil());
         assert_eq!(alert.pattern_id, "dpeg");
@@ -1789,8 +2102,16 @@ mod tests {
     #[test]
     fn tc_d_1401_dedup_key_matches_event_key() {
         let detection = mk_detection(Severity::High, IncidentTransition::Trigger);
-        let alert = alert_from_detection(&detection);
+        let alert = alert_from_detection(&detection).expect("alert should build");
         assert_eq!(alert.dedup_key, detection.event_key);
+    }
+
+    #[test]
+    fn alert_from_detection_requires_tenant_id() {
+        let mut detection = mk_detection(Severity::High, IncidentTransition::Trigger);
+        detection.tenant_id = None;
+        let error = alert_from_detection(&detection).expect_err("missing tenant_id should fail");
+        assert!(error.to_string().contains("missing tenant_id"));
     }
 
     // ─── TVL Drop Resolution Workflow (TC-RES-02 to TC-RES-05) ──────────

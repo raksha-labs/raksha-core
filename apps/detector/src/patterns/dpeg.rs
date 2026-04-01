@@ -51,8 +51,6 @@ pub struct DpegSourceFilter {
     pub include_oracles: bool,
     #[serde(default = "default_true")]
     pub include_aggregators: bool,
-    #[serde(default = "default_true")]
-    pub include_dex: bool,
     #[serde(default = "default_min_healthy")]
     pub min_healthy_sources: usize,
 }
@@ -70,8 +68,7 @@ impl Default for DpegSourceFilter {
         Self {
             cex_whitelist: Vec::new(),
             include_oracles: true,
-            include_aggregators: true,
-            include_dex: true,
+            include_aggregators: false,
             min_healthy_sources: 3,
         }
     }
@@ -82,7 +79,8 @@ impl DpegSourceFilter {
         match source_kind.to_ascii_lowercase().as_str() {
             "oracle" => self.include_oracles,
             "aggregator" => self.include_aggregators,
-            "dex" => self.include_dex,
+            // DEX pool prices are intentionally excluded from DPEG consensus.
+            "dex" => false,
             "cex" => {
                 self.cex_whitelist.is_empty()
                     || self
@@ -90,12 +88,12 @@ impl DpegSourceFilter {
                         .iter()
                         .any(|a| a.eq_ignore_ascii_case(source_id))
             }
-            _ => true,
+            _ => false,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DpegToggles {
     #[serde(default)]
     pub oracle_confirmation: bool,
@@ -105,6 +103,17 @@ pub struct DpegToggles {
     pub contagion_detection: bool,
     #[serde(default)]
     pub liquidity_depth_check: bool,
+}
+
+impl Default for DpegToggles {
+    fn default() -> Self {
+        Self {
+            oracle_confirmation: true,
+            volume_confirmation: false,
+            contagion_detection: true,
+            liquidity_depth_check: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,7 +149,6 @@ pub struct DpegPolicy {
     pub peg_target: f64,
     pub min_sources: usize,
     pub quorum_pct: f64,
-    pub sustained_window_ms: i64,
     pub cooldown_sec: i64,
     pub stale_timeout_ms: i64,
     #[serde(default)]
@@ -186,7 +194,7 @@ fn default_resolution_blocks() -> i64 {
 }
 
 fn default_min_confidence_to_fire() -> f64 {
-    50.0
+    0.0
 }
 
 fn deserialize_source_overrides<'de, D>(
@@ -227,9 +235,6 @@ impl DpegPolicy {
         }
         if !(0.0..=1.0).contains(&self.quorum_pct) {
             return Err(anyhow!("quorum_pct must be between 0 and 1"));
-        }
-        if self.sustained_window_ms <= 0 {
-            return Err(anyhow!("sustained_window_ms must be > 0"));
         }
         if self.cooldown_sec < 0 {
             return Err(anyhow!("cooldown_sec must be >= 0"));
@@ -361,7 +366,6 @@ struct EvidenceContributor {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct DpegAlertState {
-    pub breach_started_at: Option<DateTime<Utc>>,
     pub cooldown_until: Option<DateTime<Utc>>,
     pub last_alerted_at: Option<DateTime<Utc>>,
     pub last_divergence_pct: Option<f64>,
@@ -583,19 +587,9 @@ impl DpegPattern {
         }
 
         let mut policy = object.clone();
-        if !policy.contains_key("sustained_window_ms") {
-            if let Some(window_sec) = policy.remove("window_sec") {
-                if let Some(seconds) = window_sec.as_i64() {
-                    policy.insert(
-                        "sustained_window_ms".to_string(),
-                        Value::from(seconds.saturating_mul(1000)),
-                    );
-                }
-            }
-        }
         policy
             .entry("quorum_pct".to_string())
-            .or_insert_with(|| Value::from(0.5));
+            .or_insert_with(|| Value::from(0.0));
         policy
             .entry("stale_timeout_ms".to_string())
             .or_insert_with(|| Value::from(30_000));
@@ -641,21 +635,6 @@ impl DpegPattern {
         self.policies
             .get(&(tenant_id.to_string(), market_key.to_string()))
             .cloned()
-    }
-
-    fn accelerated_simulation_run(event: &UnifiedEvent) -> bool {
-        event
-            .payload
-            .get("simulation")
-            .and_then(Value::as_object)
-            .and_then(|simulation| simulation.get("speed_factor"))
-            .and_then(|value| match value {
-                Value::Number(number) => number.as_f64(),
-                Value::String(raw) => raw.trim().parse::<f64>().ok(),
-                _ => None,
-            })
-            .map(|speed_factor| speed_factor.is_finite() && speed_factor > 1.0)
-            .unwrap_or(false)
     }
 
     fn classify_context(
@@ -770,8 +749,6 @@ impl DetectionPattern for DpegPattern {
             return Ok(None);
         };
         let (is_simulated, simulation_run_id) = super::simulation_metadata_from_event(event);
-        let accelerated_simulation_run =
-            simulation_run_id.is_some() && Self::accelerated_simulation_run(event);
         let replay_scope = simulation_run_id
             .clone()
             .unwrap_or_else(|| "__live__".to_string());
@@ -846,36 +823,12 @@ impl DetectionPattern for DpegPattern {
         // Guard: events from concurrent source streams can arrive at Redis out of
         // event-timestamp order (live jitter or simulation speed-factor collapse).
         // The quote is already in the cache above; skip state transitions for late
-        // events so a stale delivery cannot clear breach_started_at or cooldown_until.
+        // events so a stale delivery cannot regress cooldown_until or resolution counters.
         let late_delivery = current_state
             .high_water_mark
             .map(|hwm| evaluation_time < hwm)
             .unwrap_or(false);
         if late_delivery {
-            if accelerated_simulation_run {
-                if let Some(backfilled_state) =
-                    backfill_late_simulated_breach_start(&current_state, &outcome, evaluation_time)
-                {
-                    let state_value = serde_json::to_value(&backfilled_state)?;
-                    let _ = repo
-                        .upsert_pattern_state(&policy_key.0, PATTERN_ID, &state_key, state_value)
-                        .await;
-                    tracing::info!(
-                        pipeline_mode = "test",
-                        component = "detector",
-                        pattern_id = PATTERN_ID,
-                        tenant_id = %event.tenant_id,
-                        source_id = %event.source_id,
-                        event_id = %event.event_id,
-                        event_type = %event.event_type,
-                        market_key,
-                        simulation_run_id = simulation_run_id.as_deref(),
-                        evaluation_time = %evaluation_time,
-                        high_water_mark = ?current_state.high_water_mark,
-                        "backfilled late simulated dpeg breach start"
-                    );
-                }
-            }
             return Ok(None);
         }
 
@@ -911,7 +864,6 @@ impl DetectionPattern for DpegPattern {
             "confidence_breakdown": outcome.snapshot.confidence_breakdown,
             "incident_transition": outcome.transition,
             "peg_target": policy.peg_target,
-            "sustained_window_ms": policy.sustained_window_ms,
             "contributing_sources": outcome.snapshot.contributors,
         });
         let severity_str = outcome
@@ -989,6 +941,7 @@ fn evaluate_policy(
 ) -> Result<EvaluationOutcome> {
     let mut weighted_points = Vec::<(f64, f64)>::new();
     let mut eligible_quotes = Vec::<QuoteInput>::new();
+    let mut total_source_count = 0usize;
     for quote in quotes {
         if !policy.source_enabled(&quote.source_id, &quote.source_kind) {
             continue;
@@ -996,6 +949,7 @@ fn evaluate_policy(
         if !(quote.price.is_finite() && quote.price > 0.0) {
             continue;
         }
+        total_source_count += 1;
         let stale_ms = policy.source_stale_timeout_ms(&quote.source_id);
         let age_ms = now
             .signed_duration_since(quote.observed_at)
@@ -1029,7 +983,7 @@ fn evaluate_policy(
                 weighted_median_price: policy.peg_target,
                 divergence_pct: 0.0,
                 source_count: 0,
-                eligible_source_count: 0,
+                eligible_source_count: total_source_count,
                 quorum_met: false,
                 breach_active: false,
                 oracle_confirmed: false,
@@ -1102,13 +1056,6 @@ fn evaluate_policy(
     let previous_active = severity_from_str(next_state.last_severity.as_deref());
 
     if breach_active {
-        if next_state.breach_started_at.is_none() {
-            next_state.breach_started_at = Some(now);
-        }
-        let breach_started = next_state.breach_started_at.unwrap();
-        let sustained = now.signed_duration_since(breach_started).num_milliseconds()
-            >= policy.sustained_window_ms;
-
         let cooldown_active = next_state
             .cooldown_until
             .map(|until| until > now)
@@ -1119,7 +1066,7 @@ fn evaluate_policy(
         let is_new_incident = previous_active.is_none();
 
         if is_new_incident {
-            if sustained && !cooldown_active {
+            if !cooldown_active {
                 if let Some(curr_severity) = severity.clone() {
                     should_emit_alert = true;
                     transition = Some(IncidentTransition::Trigger);
@@ -1177,7 +1124,6 @@ fn evaluate_policy(
         }
         next_state.below_trigger_blocks = 0;
     } else {
-        next_state.breach_started_at = None;
         next_state.last_divergence_pct = Some(divergence_pct);
         next_state.below_severity_blocks = 0;
 
@@ -1214,7 +1160,7 @@ fn evaluate_policy(
             weighted_median_price,
             divergence_pct,
             source_count,
-            eligible_source_count: enabled_source_count,
+            eligible_source_count: total_source_count,
             quorum_met,
             breach_active,
             oracle_confirmed,
@@ -1490,11 +1436,30 @@ fn context_classification_str(value: &ContextClassification) -> &'static str {
 /// Map `SourceType` debug string ("CexWebsocket", "DexApi", etc.) to a dpeg source_kind.
 fn infer_source_kind(source_type: &str) -> String {
     match source_type.to_ascii_lowercase().as_str() {
-        "cexwebsocket" => "cex".to_string(),
+        "cexwebsocket" | "cexapi" => "cex".to_string(),
         "dexapi" => "dex".to_string(),
         "oracleapi" => "oracle".to_string(),
+        "customapi" => "custom".to_string(),
+        "evmchain" => "chain".to_string(),
         _ => "unknown".to_string(),
     }
+}
+
+fn oracle_price_fields(
+    contributors: &[EvidenceContributor],
+    source_hint: &str,
+) -> (Option<f64>, Option<f64>) {
+    contributors
+        .iter()
+        .find(|contributor| {
+            contributor.source_kind == "oracle"
+                && contributor
+                    .source_id
+                    .to_ascii_lowercase()
+                    .contains(source_hint)
+        })
+        .map(|contributor| (Some(contributor.price), Some(contributor.divergence_pct)))
+        .unwrap_or((None, None))
 }
 
 fn build_detection(
@@ -1543,6 +1508,9 @@ fn build_detection(
     };
 
     let mut oracle_context = std::collections::HashMap::new();
+    let (chainlink_price, chainlink_deviation_pct) =
+        oracle_price_fields(&snapshot.contributors, "chainlink");
+    let (pyth_price, pyth_deviation_pct) = oracle_price_fields(&snapshot.contributors, "pyth");
     oracle_context.insert(
         "oracle_confirmed".to_string(),
         serde_json::json!(snapshot.oracle_confirmed),
@@ -1560,6 +1528,10 @@ fn build_detection(
         serde_json::json!(context_classification_str(&snapshot.classification)),
     );
     oracle_context.insert(
+        "contagion_status".to_string(),
+        serde_json::json!(context_classification_str(&snapshot.classification)),
+    );
+    oracle_context.insert(
         "source_count".to_string(),
         serde_json::json!(snapshot.source_count),
     );
@@ -1568,8 +1540,33 @@ fn build_detection(
         serde_json::json!(snapshot.eligible_source_count),
     );
     oracle_context.insert(
-        "sustained_window_ms".to_string(),
-        serde_json::json!(policy.sustained_window_ms),
+        "healthy_source_count".to_string(),
+        serde_json::json!(snapshot.source_count),
+    );
+    oracle_context.insert(
+        "total_source_count".to_string(),
+        serde_json::json!(snapshot.eligible_source_count),
+    );
+    oracle_context.insert(
+        "divergence_pct".to_string(),
+        serde_json::json!(snapshot.divergence_pct),
+    );
+    oracle_context.insert(
+        "peg_target".to_string(),
+        serde_json::json!(policy.peg_target),
+    );
+    oracle_context.insert(
+        "chainlink_price".to_string(),
+        serde_json::json!(chainlink_price),
+    );
+    oracle_context.insert(
+        "chainlink_deviation_pct".to_string(),
+        serde_json::json!(chainlink_deviation_pct),
+    );
+    oracle_context.insert("pyth_price".to_string(), serde_json::json!(pyth_price));
+    oracle_context.insert(
+        "pyth_deviation_pct".to_string(),
+        serde_json::json!(pyth_deviation_pct),
     );
     oracle_context.insert(
         "contributing_sources".to_string(),
@@ -1586,7 +1583,7 @@ fn build_detection(
         tenant_id: Some(policy.tenant_id.clone()),
         chain: Chain::Offchain,
         chain_slug: "offchain".to_string(),
-        protocol: format!("market:{}", policy.market_key),
+        protocol: "Stablecoin".to_string(),
         lifecycle_state: LifecycleState::Confirmed,
         requires_confirmation: policy.toggles.oracle_confirmation,
         attack_family: AttackFamily::PegDeviation,
@@ -1631,12 +1628,6 @@ fn log_test_mode_decision(
         .get("total")
         .copied()
         .unwrap_or_default();
-    let breach_started_at = outcome.next_state.breach_started_at;
-    let breach_age_ms = breach_started_at
-        .map(|started| now.signed_duration_since(started).num_milliseconds())
-        .unwrap_or(0);
-    let sustained_met =
-        outcome.snapshot.breach_active && breach_age_ms >= policy.sustained_window_ms;
     let cooldown_until = current_state.cooldown_until;
     let cooldown_active = cooldown_until.map(|until| until > now).unwrap_or(false);
     let suppression_reason =
@@ -1678,10 +1669,6 @@ fn log_test_mode_decision(
         quorum_met = outcome.snapshot.quorum_met,
         oracle_confirmed = outcome.snapshot.oracle_confirmed,
         breach_active = outcome.snapshot.breach_active,
-        breach_started_at = ?breach_started_at,
-        breach_age_ms,
-        sustained_window_ms = policy.sustained_window_ms,
-        sustained_met,
         current_severity = severity.as_deref(),
         previous_severity = previous_severity.as_deref(),
         current_rank,
@@ -1725,17 +1712,9 @@ fn dpeg_test_mode_reason(
         .cooldown_until
         .map(|until| until > now)
         .unwrap_or(false);
-    let breach_age_ms = outcome
-        .next_state
-        .breach_started_at
-        .map(|started| now.signed_duration_since(started).num_milliseconds())
-        .unwrap_or(0);
 
     if outcome.snapshot.breach_active {
         if previous_active.is_none() {
-            if breach_age_ms < policy.sustained_window_ms {
-                return "sustained_window_not_met";
-            }
             if cooldown_active {
                 return "cooldown_active_for_trigger";
             }
@@ -1785,36 +1764,6 @@ fn dpeg_test_mode_reason(
     "breach_inactive"
 }
 
-fn backfill_late_simulated_breach_start(
-    current_state: &DpegAlertState,
-    outcome: &EvaluationOutcome,
-    evaluation_time: DateTime<Utc>,
-) -> Option<DpegAlertState> {
-    if !outcome.snapshot.breach_active || current_state.last_severity.is_some() {
-        return None;
-    }
-
-    let should_backfill = current_state
-        .breach_started_at
-        .map(|started_at| evaluation_time < started_at)
-        .unwrap_or(true);
-    if !should_backfill {
-        return None;
-    }
-
-    let mut next_state = current_state.clone();
-    next_state.breach_started_at = Some(evaluation_time);
-    next_state.last_divergence_pct = Some(outcome.snapshot.divergence_pct);
-    next_state.last_classification =
-        Some(context_classification_str(&outcome.snapshot.classification).to_string());
-    if next_state.trigger_floor_pct.is_none() {
-        next_state.trigger_floor_pct = Some(outcome.snapshot.trigger_floor_pct);
-    }
-    next_state.below_trigger_blocks = 0;
-    next_state.below_severity_blocks = 0;
-    Some(next_state)
-}
-
 fn recommended_actions_for_severity(severity: &Severity) -> Vec<String> {
     match severity {
         Severity::Critical => vec![
@@ -1847,7 +1796,6 @@ mod tests {
             peg_target: 1.0,
             min_sources: 1,
             quorum_pct: 0.0,
-            sustained_window_ms: 0,
             cooldown_sec: 0,
             stale_timeout_ms: 60_000,
             severity_bands: DpegSeverityBands {
@@ -1875,7 +1823,7 @@ mod tests {
             },
             toggles: DpegToggles::default(),
             confidence_weights: DpegConfidenceWeights::default(),
-            min_confidence_to_fire: 50.0,
+            min_confidence_to_fire: 0.0,
             source_overrides: HashMap::new(),
         }
     }
@@ -1977,74 +1925,6 @@ mod tests {
     }
 
     #[test]
-    fn late_simulated_breach_start_is_backfilled_for_new_incidents() {
-        let now = Utc::now();
-        let state = DpegAlertState {
-            high_water_mark: Some(now + Duration::seconds(30)),
-            ..DpegAlertState::default()
-        };
-        let outcome = EvaluationOutcome {
-            snapshot: ConsensusSnapshot {
-                weighted_median_price: 0.88,
-                divergence_pct: 12.0,
-                source_count: 5,
-                eligible_source_count: 5,
-                quorum_met: true,
-                breach_active: true,
-                oracle_confirmed: true,
-                classification: ContextClassification::Isolated,
-                trigger_floor_pct: 0.5,
-                confidence_breakdown: HashMap::new(),
-                severity: Some(Severity::Critical),
-                contributors: Vec::new(),
-            },
-            should_emit_alert: false,
-            next_state: state.clone(),
-            transition: None,
-            emitted_severity: None,
-        };
-
-        let backfilled =
-            backfill_late_simulated_breach_start(&state, &outcome, now).expect("backfilled state");
-
-        assert_eq!(backfilled.breach_started_at, Some(now));
-        assert_eq!(backfilled.last_divergence_pct, Some(12.0));
-        assert_eq!(backfilled.last_classification.as_deref(), Some("isolated"));
-    }
-
-    #[test]
-    fn late_simulated_breach_start_does_not_overwrite_active_incident_state() {
-        let now = Utc::now();
-        let state = DpegAlertState {
-            breach_started_at: Some(now + Duration::seconds(10)),
-            last_severity: Some("critical".to_string()),
-            ..DpegAlertState::default()
-        };
-        let outcome = EvaluationOutcome {
-            snapshot: ConsensusSnapshot {
-                weighted_median_price: 0.88,
-                divergence_pct: 12.0,
-                source_count: 5,
-                eligible_source_count: 5,
-                quorum_met: true,
-                breach_active: true,
-                oracle_confirmed: true,
-                classification: ContextClassification::Isolated,
-                trigger_floor_pct: 0.5,
-                confidence_breakdown: HashMap::new(),
-                severity: Some(Severity::Critical),
-                contributors: Vec::new(),
-            },
-            should_emit_alert: false,
-            next_state: state.clone(),
-            transition: None,
-            emitted_severity: None,
-        };
-
-        assert!(backfill_late_simulated_breach_start(&state, &outcome, now).is_none());
-    }
-
-    #[test]
     fn contagion_toggle_off_forces_isolated_classification() {
         let now = Utc::now();
         let mut pattern = DpegPattern::default();
@@ -2072,7 +1952,6 @@ mod tests {
                     "peg_target": 1.0,
                     "min_sources": 1,
                     "quorum_pct": 0.0,
-                    "sustained_window_ms": 1,
                     "cooldown_sec": 0,
                     "stale_timeout_ms": 60000,
                     "severity_bands": { "medium": 0.5, "high": 1.0, "critical": 5.0 }
@@ -2087,7 +1966,6 @@ mod tests {
                     "peg_target": 0.98,
                     "min_sources": 3,
                     "quorum_pct": 0.8,
-                    "sustained_window_ms": 30000,
                     "cooldown_sec": 600,
                     "stale_timeout_ms": 120000,
                     "severity_bands": { "medium": 2.0, "high": 4.0, "critical": 8.0 }
@@ -2216,7 +2094,6 @@ mod tests {
             "market_key": "USDC/USD",
             "peg_target": 1.0,
             "min_sources": 2,
-            "window_sec": 60,
             "cooldown_sec": 300,
             "severity_bands": { "medium": 1.0, "high": 3.0, "critical": 5.0 }
         });
@@ -2226,8 +2103,7 @@ mod tests {
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0].tenant_id, "tenant-a");
         assert_eq!(policies[0].market_key, "USDC/USD");
-        assert_eq!(policies[0].sustained_window_ms, 60_000);
-        assert_eq!(policies[0].quorum_pct, 0.5);
+        assert_eq!(policies[0].quorum_pct, 0.0);
         assert_eq!(policies[0].stale_timeout_ms, 30_000);
     }
 
@@ -2239,6 +2115,7 @@ mod tests {
         let mut tenant_a_policy = base_policy();
         tenant_a_policy.tenant_id = "tenant-a".to_string();
         tenant_a_policy.severity_bands.medium = 0.5;
+        tenant_a_policy.toggles.oracle_confirmation = false;
         tenant_a_policy.severity_bands_isolated = Some(DpegSeverityBands {
             medium: 0.5,
             high: 1.0,
@@ -2249,6 +2126,7 @@ mod tests {
         let mut tenant_b_policy = base_policy();
         tenant_b_policy.tenant_id = "tenant-b".to_string();
         tenant_b_policy.severity_bands.medium = 2.0;
+        tenant_b_policy.toggles.oracle_confirmation = false;
         tenant_b_policy.severity_bands_isolated = Some(DpegSeverityBands {
             medium: 2.0,
             high: 4.0,
@@ -2316,10 +2194,10 @@ mod tests {
     #[test]
     fn deescalation_requires_configured_block_count() {
         let now = Utc::now();
-        let policy = base_policy();
+        let mut policy = base_policy();
+        policy.toggles.oracle_confirmation = false;
         let quotes = vec![quote("cex-a", "cex", 0.994, now)];
         let mut state = DpegAlertState {
-            breach_started_at: Some(now),
             cooldown_until: None,
             last_alerted_at: Some(now),
             last_divergence_pct: Some(1.2),
@@ -2360,7 +2238,6 @@ mod tests {
         let policy = base_policy();
         let quotes = vec![quote("cex-a", "cex", 0.9998, now)];
         let mut state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: None,
             last_alerted_at: Some(now),
             last_divergence_pct: Some(0.8),
@@ -2402,9 +2279,9 @@ mod tests {
         policy.cooldown_sec = 300;
         policy.min_confidence_to_fire = 0.0;
         policy.stale_timeout_ms = 300_000;
+        policy.toggles.oracle_confirmation = false;
         let quotes = vec![quote("cex-a", "cex", 0.989, now)];
         let state = DpegAlertState {
-            breach_started_at: Some(now - Duration::seconds(120)),
             cooldown_until: Some(now + Duration::seconds(120)),
             last_alerted_at: Some(now - Duration::seconds(10)),
             last_divergence_pct: Some(0.6),
@@ -2455,9 +2332,9 @@ mod tests {
         policy.deescalation_blocks = 2;
         policy.min_confidence_to_fire = 0.0;
         policy.stale_timeout_ms = 300_000;
+        policy.toggles.oracle_confirmation = false;
         let quotes = vec![quote("cex-a", "cex", 0.994, now)];
         let state = DpegAlertState {
-            breach_started_at: Some(now - Duration::seconds(120)),
             cooldown_until: Some(now + Duration::seconds(60)),
             last_alerted_at: Some(now - Duration::seconds(10)),
             last_divergence_pct: Some(1.2),
@@ -3144,7 +3021,6 @@ mod tests {
 
         // Set up state as if there was an active ISOLATED incident
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3177,7 +3053,6 @@ mod tests {
         let policy = spec_policy();
 
         let state = DpegAlertState {
-            breach_started_at: Some(now - Duration::seconds(60)),
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(30)),
             last_divergence_pct: Some(1.5),
@@ -3220,7 +3095,6 @@ mod tests {
 
         // Incident was triggered under SYSTEMIC (trigger_floor_pct = 0.01)
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(0.05),
@@ -3254,7 +3128,6 @@ mod tests {
         policy.resolution_blocks = 1;
 
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(0.05),
@@ -3294,7 +3167,6 @@ mod tests {
         policy.resolution_blocks = 1;
 
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(1.5),
@@ -3331,7 +3203,6 @@ mod tests {
         policy.resolution_blocks = 1;
 
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(1.5),
@@ -3367,7 +3238,6 @@ mod tests {
         policy.resolution_blocks = 30;
 
         let mut state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3412,7 +3282,6 @@ mod tests {
         policy.resolution_blocks = 30;
 
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3448,7 +3317,6 @@ mod tests {
         policy.resolution_blocks = 30;
 
         let base_state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3515,7 +3383,6 @@ mod tests {
         policy.resolution_blocks = 1; // Fast resolution
 
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(1.5),
@@ -3668,7 +3535,6 @@ mod tests {
 
         // State: just resolved, cooldown active
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: Some(now + Duration::seconds(250)),
             last_alerted_at: Some(now - Duration::seconds(5)),
             last_divergence_pct: None,
@@ -3709,7 +3575,6 @@ mod tests {
 
         // State: resolved long ago, cooldown expired
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: Some(now - Duration::seconds(10)), // Expired
             last_alerted_at: Some(now - Duration::seconds(310)),
             last_divergence_pct: None,
@@ -3753,7 +3618,6 @@ mod tests {
 
         // State after resolution: severity cleared, cooldown active
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: Some(now + Duration::seconds(250)),
             last_alerted_at: Some(now - Duration::seconds(5)),
             last_divergence_pct: None,
@@ -3796,7 +3660,6 @@ mod tests {
 
         // Simulate a false-positive closure: severity cleared, long cooldown
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: Some(now + Duration::seconds(500)),
             last_alerted_at: Some(now - Duration::seconds(10)),
             last_divergence_pct: None,
@@ -3837,7 +3700,6 @@ mod tests {
 
         // Active incident at CRITICAL
         let state = DpegAlertState {
-            breach_started_at: Some(now - Duration::seconds(120)),
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(5.50),
@@ -3902,7 +3764,6 @@ mod tests {
 
         // Stale state: says HIGH but divergence is now 0.10%
         let state = DpegAlertState {
-            breach_started_at: None,
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(300)),
             last_divergence_pct: Some(1.50),
@@ -4379,7 +4240,6 @@ mod tests {
     #[test]
     fn tc_d_1416_policy_validation() {
         let mut p = base_policy();
-        p.sustained_window_ms = 1; // base_policy uses 0, but validate requires > 0
         assert!(p.validate().is_ok());
 
         p.peg_target = 0.0;
@@ -4393,12 +4253,6 @@ mod tests {
         p.quorum_pct = 1.5;
         assert!(p.validate().is_err());
         p.quorum_pct = 0.5;
-
-        p.sustained_window_ms = -1;
-        assert!(p.validate().is_err());
-        p.sustained_window_ms = 0; // Also invalid (must be > 0)
-        assert!(p.validate().is_err());
-        p.sustained_window_ms = 1;
 
         p.resolution_blocks = 0;
         assert!(p.validate().is_err());
@@ -4468,5 +4322,79 @@ mod tests {
         let out2 = eval_fresh(&policy, &quotes_slow, now, ContextClassification::Isolated);
         assert_eq!(out2.snapshot.source_count, 1);
         assert!(out2.snapshot.breach_active);
+    }
+
+    #[test]
+    fn tc_d_1419_custom_sources_are_out_of_scope_for_default_consensus() {
+        let now = Utc::now();
+        let policy = base_policy();
+        let outcome = eval_fresh(
+            &policy,
+            &[quote("custom-feed", "custom", 0.92, now)],
+            now,
+            ContextClassification::Isolated,
+        );
+
+        assert_eq!(outcome.snapshot.source_count, 0);
+        assert!(!outcome.snapshot.breach_active);
+    }
+
+    #[test]
+    fn tc_d_1420_detection_payload_exposes_spec_context_fields() {
+        let now = Utc::now();
+        let policy = spec_policy();
+        let outcome = eval_fresh(
+            &policy,
+            &[
+                quote("coinbase-advanced", "cex", 0.9940, now),
+                quote("kraken-spot", "cex", 0.9941, now),
+                quote("okx-global", "cex", 0.9940, now),
+                quote("chainlink-data-streams", "oracle", 0.9948, now),
+                quote("pyth-eth-mainnet", "oracle", 0.9949, now),
+            ],
+            now,
+            ContextClassification::Isolated,
+        );
+        let detection = build_detection(
+            &event_schema::UnifiedEvent {
+                event_id: "evt-1".to_string(),
+                tenant_id: policy.tenant_id.clone(),
+                source_id: "coinbase-advanced".to_string(),
+                source_type: event_schema::SourceType::CexWebsocket,
+                event_type: "ticker".to_string(),
+                timestamp: now,
+                payload: serde_json::json!({}),
+                chain_id: None,
+                block_number: None,
+                tx_hash: None,
+                market_key: Some(policy.market_key.clone()),
+                price: Some(0.9940),
+            },
+            &policy,
+            &outcome.snapshot,
+            Severity::Medium,
+            Some(IncidentTransition::Trigger),
+            now,
+        );
+        let oracle_context = detection.oracle_context;
+
+        assert_eq!(
+            oracle_context.get("healthy_source_count"),
+            Some(&serde_json::json!(5))
+        );
+        assert_eq!(
+            oracle_context.get("total_source_count"),
+            Some(&serde_json::json!(5))
+        );
+        assert_eq!(
+            oracle_context.get("contagion_status"),
+            Some(&serde_json::json!("isolated"))
+        );
+        assert_eq!(
+            oracle_context.get("peg_target"),
+            Some(&serde_json::json!(1.0))
+        );
+        assert!(oracle_context.contains_key("chainlink_price"));
+        assert!(oracle_context.contains_key("pyth_price"));
     }
 }

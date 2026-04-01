@@ -88,7 +88,6 @@ docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT id, tenant
 
 - `min_sources`: 3
 - `quorum_pct`: 0.67
-- `sustained_window_ms`: 20000
 - `cooldown_sec`: 300
 - `stale_timeout_ms`: 15000
 - `severity_bands`: `medium=1.0`, `high=3.0`, `critical=5.0`

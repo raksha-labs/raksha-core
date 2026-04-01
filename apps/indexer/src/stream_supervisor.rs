@@ -50,6 +50,7 @@ pub async fn run_stream_supervisor(
     stream: RedisStreamPublisher,
     database_url: String,
     purge_enabled: bool,
+    live_streams_enabled: bool,
     mut command_rx: mpsc::Receiver<SupervisorCommand>,
 ) -> Result<()> {
     let raw_repo = match PostgresRawRepository::from_env().await {
@@ -76,12 +77,25 @@ pub async fn run_stream_supervisor(
     let mut reconcile_tick = build_reconcile_tick(listener_connected);
     let mut purge_tick = interval(Duration::from_secs(DEFAULT_PURGE_INTERVAL_SECS));
 
-    reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await?;
+    reconcile(
+        &repo,
+        raw_repo.as_ref(),
+        &stream,
+        &mut workers,
+        live_streams_enabled,
+    )
+    .await?;
 
     loop {
         tokio::select! {
             _ = reconcile_tick.tick() => {
-                if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
+                if let Err(error) = reconcile(
+                    &repo,
+                    raw_repo.as_ref(),
+                    &stream,
+                    &mut workers,
+                    live_streams_enabled,
+                ).await {
                     common::log_error!(warn, error, "stream supervisor periodic reconcile failed");
                 }
             }
@@ -123,7 +137,13 @@ pub async fn run_stream_supervisor(
                 if !should_reconcile {
                     continue;
                 }
-                if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
+                if let Err(error) = reconcile(
+                    &repo,
+                    raw_repo.as_ref(),
+                    &stream,
+                    &mut workers,
+                    live_streams_enabled,
+                ).await {
                     common::log_error!(warn, error, "stream supervisor notify-driven reconcile failed");
                 }
             }
@@ -134,7 +154,13 @@ pub async fn run_stream_supervisor(
                     command_rx = disabled_rx;
                     continue;
                 };
-                if let Err(error) = reconcile(&repo, raw_repo.as_ref(), &stream, &mut workers).await {
+                if let Err(error) = reconcile(
+                    &repo,
+                    raw_repo.as_ref(),
+                    &stream,
+                    &mut workers,
+                    live_streams_enabled,
+                ).await {
                     common::log_error!(warn, error, "stream supervisor explicit reconcile failed");
                 }
             }
@@ -166,32 +192,26 @@ async fn reconcile(
     raw_repo: Option<&PostgresRawRepository>,
     stream: &RedisStreamPublisher,
     workers: &mut HashMap<String, WorkerHandle>,
+    live_streams_enabled: bool,
 ) -> Result<()> {
     let effective = repo.list_effective_stream_configs().await?;
     let mut desired_ids: Vec<String> = Vec::new();
 
     for cfg in effective {
-        if let Some(reason) = skipped_test_stream_reason(&cfg) {
+        if let Some(reason) = skipped_stream_reason(&cfg, live_streams_enabled) {
             info!(
                 stream_config_id = %cfg.stream_config_id,
                 source_id = %cfg.source_id,
                 stream_name = %cfg.stream_name,
                 connector_mode = %cfg.connector_mode,
+                operating_mode_profile = %cfg.operating_mode_profile,
                 reason,
-                "skipping deprecated test stream config",
+                "skipping stream config during reconcile",
             );
             continue;
         }
 
-        let targets = repo
-            .list_stream_tenant_targets(&cfg.stream_config_id, &cfg.operating_mode_profile)
-            .await?
-            .into_iter()
-            .map(|target| target.tenant_id)
-            .collect::<Vec<_>>();
-        if targets.is_empty() {
-            continue;
-        }
+        let targets = resolve_runtime_tenant_targets(repo, &cfg).await?;
 
         let runtime_cfg = to_runtime_config(cfg, targets);
         log_test_mode_stream_selection(&runtime_cfg);
@@ -302,6 +322,16 @@ fn skipped_test_stream_reason(cfg: &EffectiveStreamConfig) -> Option<&'static st
     None
 }
 
+fn skipped_stream_reason(
+    cfg: &EffectiveStreamConfig,
+    live_streams_enabled: bool,
+) -> Option<&'static str> {
+    if cfg.operating_mode_profile == "live" && !live_streams_enabled {
+        return Some("live streams disabled by configuration");
+    }
+    skipped_test_stream_reason(cfg)
+}
+
 fn to_runtime_config(
     cfg: EffectiveStreamConfig,
     tenant_targets: Vec<String>,
@@ -311,6 +341,8 @@ fn to_runtime_config(
         source_id: cfg.source_id,
         source_type: cfg.source_type,
         source_name: cfg.source_name,
+        source_scope_kind: cfg.source_scope_kind,
+        owner_tenant_id: cfg.owner_tenant_id,
         connection_config: cfg.connection_config,
         operating_mode_profile: cfg.operating_mode_profile,
         auth_secret_ref: cfg.auth_secret_ref,
@@ -338,6 +370,8 @@ fn hash_runtime_config(cfg: &RuntimeStreamConfig) -> String {
         "source_id": cfg.source_id,
         "source_type": cfg.source_type,
         "source_name": cfg.source_name,
+        "source_scope_kind": cfg.source_scope_kind,
+        "owner_tenant_id": cfg.owner_tenant_id,
         "connection_config": cfg.connection_config,
         "operating_mode_profile": cfg.operating_mode_profile,
         "auth_secret_ref": cfg.auth_secret_ref,
@@ -410,6 +444,8 @@ fn log_test_mode_stream_selection(cfg: &RuntimeStreamConfig) {
         stream_name = %cfg.stream_name,
         connector_mode = %cfg.connector_mode,
         tenant_targets = ?cfg.tenant_targets,
+        source_scope_kind = %cfg.source_scope_kind,
+        owner_tenant_id = cfg.owner_tenant_id.as_deref(),
         endpoint_host,
         endpoint_path = %endpoint_path,
         is_mock_endpoint,
@@ -443,6 +479,22 @@ fn log_test_mode_stream_selection(cfg: &RuntimeStreamConfig) {
             "selected test-mode mock endpoint is missing tenant-scoped routing parameters",
         );
     }
+}
+
+async fn resolve_runtime_tenant_targets(
+    repo: &PostgresRepository,
+    cfg: &EffectiveStreamConfig,
+) -> Result<Vec<String>> {
+    if cfg.source_scope_kind == "tenant" {
+        return Ok(cfg.owner_tenant_id.clone().into_iter().collect());
+    }
+
+    Ok(repo
+        .list_stream_tenant_targets(&cfg.stream_config_id, &cfg.operating_mode_profile)
+        .await?
+        .into_iter()
+        .map(|target| target.tenant_id)
+        .collect())
 }
 
 fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<NotifySignal> {
@@ -523,7 +575,9 @@ fn spawn_config_notify_listener(database_url: String) -> mpsc::Receiver<NotifySi
 
 #[cfg(test)]
 mod tests {
-    use super::skipped_test_stream_reason;
+    use super::{
+        hash_runtime_config, skipped_stream_reason, skipped_test_stream_reason, to_runtime_config,
+    };
     use state_manager::EffectiveStreamConfig;
 
     fn config_for(endpoint_key: &str, endpoint: &str) -> EffectiveStreamConfig {
@@ -532,6 +586,8 @@ mod tests {
             source_id: "source-1".to_string(),
             source_type: "cex".to_string(),
             source_name: "source".to_string(),
+            source_scope_kind: "platform".to_string(),
+            owner_tenant_id: None,
             connection_config: serde_json::json!({ endpoint_key: endpoint }),
             connector_mode: "websocket".to_string(),
             operating_mode_profile: "test".to_string(),
@@ -581,5 +637,47 @@ mod tests {
             skipped_test_stream_reason(&cfg),
             Some("unresolved endpoint placeholder")
         );
+    }
+
+    #[test]
+    fn skips_live_streams_when_disabled() {
+        let mut cfg = config_for("rpc_url", "wss://example.invalid/feed");
+        cfg.operating_mode_profile = "live".to_string();
+        assert_eq!(
+            skipped_stream_reason(&cfg, false),
+            Some("live streams disabled by configuration")
+        );
+    }
+
+    #[test]
+    fn keeps_live_streams_when_enabled() {
+        let mut cfg = config_for("rpc_url", "wss://example.invalid/feed");
+        cfg.operating_mode_profile = "live".to_string();
+        assert_eq!(skipped_stream_reason(&cfg, true), None);
+    }
+
+    #[test]
+    fn runtime_config_hash_changes_when_tenant_targets_change() {
+        let mut cfg = config_for("rpc_url", "wss://example.invalid/feed");
+        cfg.operating_mode_profile = "live".to_string();
+
+        let paused = to_runtime_config(cfg.clone(), vec!["tenant-a".to_string()]);
+        let resumed = to_runtime_config(cfg, vec!["tenant-a".to_string(), "tenant-b".to_string()]);
+
+        assert_ne!(hash_runtime_config(&paused), hash_runtime_config(&resumed));
+    }
+
+    #[test]
+    fn tenant_owned_runtime_config_keeps_owner_target() {
+        let mut cfg = config_for("rpc_url", "wss://example.invalid/feed");
+        cfg.operating_mode_profile = "live".to_string();
+        cfg.source_scope_kind = "tenant".to_string();
+        cfg.owner_tenant_id = Some("tenant-a".to_string());
+
+        let runtime = to_runtime_config(cfg, vec!["tenant-a".to_string()]);
+
+        assert_eq!(runtime.source_scope_kind, "tenant");
+        assert_eq!(runtime.owner_tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(runtime.tenant_targets, vec!["tenant-a".to_string()]);
     }
 }

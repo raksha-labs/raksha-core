@@ -49,8 +49,9 @@ impl RpcStateConnector {
     }
 
     pub async fn connect(&mut self) -> Result<()> {
-        let provider = Provider::<Http>::try_from(self.endpoint.as_str())
-            .with_context(|| format!("failed connecting rpc http endpoint: {}", self.endpoint))?;
+        let endpoint = normalize_rpc_state_http_endpoint(&self.endpoint);
+        let provider = Provider::<Http>::try_from(endpoint.as_str())
+            .with_context(|| format!("failed connecting rpc http endpoint: {endpoint}"))?;
         self.chain_id = provider
             .get_chainid()
             .await
@@ -190,6 +191,17 @@ impl RpcStateConnector {
     }
 }
 
+fn normalize_rpc_state_http_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim();
+    if let Some(rest) = trimmed.strip_prefix("wss://") {
+        return format!("https://{rest}");
+    }
+    if let Some(rest) = trimmed.strip_prefix("ws://") {
+        return format!("http://{rest}");
+    }
+    trimmed.to_string()
+}
+
 fn parse_state_call_specs(filter_config: &Value) -> Result<Vec<StateCallSpec>> {
     let mut specs = Vec::new();
 
@@ -216,6 +228,27 @@ fn parse_state_call_specs(filter_config: &Value) -> Result<Vec<StateCallSpec>> {
     }
 
     Ok(specs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_rpc_state_http_endpoint;
+
+    #[test]
+    fn normalize_rpc_state_http_endpoint_converts_secure_websocket() {
+        assert_eq!(
+            normalize_rpc_state_http_endpoint("wss://base-mainnet.g.alchemy.com/v2/demo"),
+            "https://base-mainnet.g.alchemy.com/v2/demo"
+        );
+    }
+
+    #[test]
+    fn normalize_rpc_state_http_endpoint_preserves_http_endpoint() {
+        assert_eq!(
+            normalize_rpc_state_http_endpoint("https://base-mainnet.g.alchemy.com/v2/demo"),
+            "https://base-mainnet.g.alchemy.com/v2/demo"
+        );
+    }
 }
 
 fn parse_state_call(candidate: &Value, defaults: &Value) -> Result<Option<StateCallSpec>> {
@@ -373,7 +406,10 @@ fn read_timestamp_millis(value: Option<&Value>) -> Option<i64> {
         .map(|ts| ts.timestamp_millis())
 }
 
-fn inferred_tvl_usd(payload: &serde_json::Map<String, Value>, price_usd: Option<f64>) -> Option<f64> {
+fn inferred_tvl_usd(
+    payload: &serde_json::Map<String, Value>,
+    price_usd: Option<f64>,
+) -> Option<f64> {
     read_f64(payload.get("tvl_usd"))
         .or_else(|| read_f64(payload.get("total_supplied_tokens")))
         .or_else(|| read_f64(payload.get("total_supplied")))
@@ -396,9 +432,13 @@ fn build_mock_state_payload(
 ) -> Option<Value> {
     let mut object = parse_mock_state_payload(raw_result)?.as_object()?.clone();
 
-    object
-        .entry("event_type".to_string())
-        .or_insert_with(|| Value::String(spec.event_type.clone().unwrap_or_else(|| "protocol_state".to_string())));
+    object.entry("event_type".to_string()).or_insert_with(|| {
+        Value::String(
+            spec.event_type
+                .clone()
+                .unwrap_or_else(|| "protocol_state".to_string()),
+        )
+    });
     object
         .entry("metric".to_string())
         .or_insert_with(|| Value::String(spec.metric.clone()));
@@ -421,7 +461,10 @@ fn build_mock_state_payload(
     object
         .entry("call_data".to_string())
         .or_insert_with(|| Value::String(spec.call_data.clone()));
-    object.insert("chainId".to_string(), chain_id.map_or(Value::Null, |value| json!(value)));
+    object.insert(
+        "chainId".to_string(),
+        chain_id.map_or(Value::Null, |value| json!(value)),
+    );
     object.insert("block_number".to_string(), json!(block_number));
     object.insert(
         "timestamp".to_string(),

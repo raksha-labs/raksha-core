@@ -38,7 +38,7 @@ output "raw_database_url_secret_arn" {
 }
 
 output "waf_arn" {
-  value       = var.enable_waf && module.compute.public_alb_arn != null ? aws_wafv2_web_acl.public[0].arn : null
+  value       = local.create_public_waf ? aws_wafv2_web_acl.public[0].arn : null
   description = "WAF ARN"
 }
 

@@ -650,13 +650,24 @@ BEGIN
         SELECT
             ssc.stream_config_id,
             NEW.subscribing_tenant_id,
-            TRUE,
+            CASE
+                WHEN ssc.operating_mode_profile = 'test' THEN TRUE
+                ELSE FALSE
+            END,
             'source-sharing',
             NOW()
         FROM source_stream_configs ssc
         WHERE ssc.source_id = v_source_id
         ON CONFLICT (stream_config_id, tenant_id) DO UPDATE SET
-            enabled = TRUE,
+            enabled = CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM source_stream_configs ssc_mode
+                    WHERE ssc_mode.stream_config_id = excluded.stream_config_id
+                      AND ssc_mode.operating_mode_profile = 'test'
+                ) THEN TRUE
+                ELSE FALSE
+            END,
             updated_by = 'source-sharing',
             updated_at = NOW();
 

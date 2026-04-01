@@ -7,7 +7,6 @@ use serde_json::json;
 use tracing::{info, warn};
 
 const DEFAULT_NOTIFIER_GATEWAY_URL: &str = "http://localhost:3002";
-const DEFAULT_ALERT_FALLBACK_TENANT_ID: &str = "default";
 
 #[derive(Debug, Clone)]
 pub struct GatewayChannelResult {
@@ -51,7 +50,7 @@ impl NotifierGatewayHttp {
         let tenant_id = alert
             .tenant_id
             .clone()
-            .unwrap_or_else(|| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string());
+            .ok_or_else(|| anyhow!("missing tenant_id for alert {}", alert.alert_id))?;
         let dedup_key = format!(
             "{}:{}:{}:{}",
             format!("{:?}", alert.chain).to_lowercase(),
@@ -94,7 +93,6 @@ impl NotifierGatewayHttp {
 #[derive(Clone)]
 pub struct NotifierGatewayClient {
     http: NotifierGatewayHttp,
-    fallback_tenant_id: String,
 }
 
 impl Default for NotifierGatewayClient {
@@ -107,8 +105,6 @@ impl NotifierGatewayClient {
     pub fn from_env() -> Self {
         Self {
             http: NotifierGatewayHttp::from_env(),
-            fallback_tenant_id: std::env::var("ALERT_FALLBACK_TENANT_ID")
-                .unwrap_or_else(|_| DEFAULT_ALERT_FALLBACK_TENANT_ID.to_string()),
         }
     }
 
@@ -116,7 +112,7 @@ impl NotifierGatewayClient {
         let tenant_id = alert
             .tenant_id
             .clone()
-            .unwrap_or_else(|| self.fallback_tenant_id.clone());
+            .ok_or_else(|| anyhow!("missing tenant_id for alert {}", alert.alert_id))?;
         let requested_channels = alert
             .channel_routes
             .iter()

@@ -3,6 +3,9 @@ name: Reusable Image Build
 on:
   workflow_call:
     inputs:
+      environment:
+        required: true
+        type: string
       aws_region:
         required: false
         type: string
@@ -38,6 +41,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
     outputs:
       aws_account_id: ${{ steps.resolve-account.outputs.aws_account_id }}
 

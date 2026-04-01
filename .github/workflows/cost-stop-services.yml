@@ -10,7 +10,13 @@ on:
         options:
           - test
           - stage
+          - prod
         default: test
+      service_filter:
+        description: 'Optional comma-separated ECS service names to stop (empty = all ECS services)'
+        required: false
+        type: string
+        default: ''
       stop_ecs:
         description: 'Stop ECS services (scale to 0)'
         required: true
@@ -31,9 +37,6 @@ on:
         required: true
         type: boolean
         default: false
-  schedule:
-    # Daily auto-stop at 00:00 CET (23:00 UTC year-round).
-    - cron: '0 23 * * *'
 
 permissions:
   id-token: write
@@ -42,6 +45,7 @@ permissions:
 jobs:
   stop-services:
     runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || 'test' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -49,26 +53,27 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod' && (secrets.AWS_PROD_DEPLOY_ROLE_ARN != '' && secrets.AWS_PROD_DEPLOY_ROLE_ARN || secrets.AWS_DEPLOY_ROLE_ARN) || github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'stage' && (secrets.AWS_STAGE_DEPLOY_ROLE_ARN != '' && secrets.AWS_STAGE_DEPLOY_ROLE_ARN || secrets.AWS_DEPLOY_ROLE_ARN) || (secrets.AWS_TEST_DEPLOY_ROLE_ARN != '' && secrets.AWS_TEST_DEPLOY_ROLE_ARN || secrets.AWS_DEPLOY_ROLE_ARN) }}
           aws-region: eu-west-1
-
-      - name: Set environment for scheduled runs
-        if: github.event_name == 'schedule'
-        run: |
-          echo "ENVIRONMENT=test" >> $GITHUB_ENV
-          echo "STOP_ECS=true" >> $GITHUB_ENV
-          echo "STOP_RDS=true" >> $GITHUB_ENV
-          echo "DELETE_REDIS=false" >> $GITHUB_ENV
-          echo "DESTROY_NAT=false" >> $GITHUB_ENV
 
       - name: Set environment for manual runs
         if: github.event_name == 'workflow_dispatch'
         run: |
           echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          echo "SERVICE_FILTER=${{ github.event.inputs.service_filter }}" >> $GITHUB_ENV
           echo "STOP_ECS=${{ github.event.inputs.stop_ecs }}" >> $GITHUB_ENV
           echo "STOP_RDS=${{ github.event.inputs.stop_rds }}" >> $GITHUB_ENV
           echo "DELETE_REDIS=${{ github.event.inputs.delete_redis }}" >> $GITHUB_ENV
           echo "DESTROY_NAT=${{ github.event.inputs.destroy_nat }}" >> $GITHUB_ENV
+
+      - name: Normalize prod-safe options
+        run: |
+          if [ "$ENVIRONMENT" = "prod" ]; then
+            echo "::warning title=Prod safety::Prod stop workflow only scales ECS services. RDS/Redis/NAT actions are being disabled."
+            echo "STOP_RDS=false" >> $GITHUB_ENV
+            echo "DELETE_REDIS=false" >> $GITHUB_ENV
+            echo "DESTROY_NAT=false" >> $GITHUB_ENV
+          fi
 
       - name: Get current costs
         id: costs
@@ -97,16 +102,19 @@ jobs:
         run: |
           echo "⏸️ Stopping ECS services..."
           CLUSTER="raksha-${ENVIRONMENT}"
-          
-          # Get all services in cluster
-          SERVICES=$(aws ecs list-services \
-            --cluster ${CLUSTER} \
-            --query 'serviceArns[*]' \
-            --output text)
-          
-          # Scale each service to 0
-          for service_arn in $SERVICES; do
-            service_name=$(echo $service_arn | awk -F'/' '{print $NF}')
+
+          if [ -n "${SERVICE_FILTER}" ]; then
+            IFS=',' read -ra SERVICES <<< "${SERVICE_FILTER}"
+          else
+            mapfile -t SERVICES < <(aws ecs list-services \
+              --cluster ${CLUSTER} \
+              --query 'serviceArns[*]' \
+              --output text | tr '\t' '\n' | awk -F'/' 'NF {print $NF}')
+          fi
+
+          for service_name in "${SERVICES[@]}"; do
+            service_name=$(echo "${service_name}" | xargs)
+            [ -n "${service_name}" ] || continue
             echo "Scaling $service_name to 0..."
             aws ecs update-service \
               --cluster ${CLUSTER} \
@@ -221,6 +229,7 @@ jobs:
           # 🛑 Services Stopped - ${ENVIRONMENT} Environment
           
           ## Actions Taken
+          - **Service Filter**: \`${SERVICE_FILTER:-<all>}\`
           - **ECS Services**: $([ "$STOP_ECS" = "true" ] && echo "✅ Scaled to 0" || echo "⏭️ Skipped")
           - **RDS Database**: $([ "$STOP_RDS" = "true" ] && echo "✅ Stopped" || echo "⏭️ Skipped")
           - **Redis Cache**: $([ "$DELETE_REDIS" = "true" ] && echo "🗑️ Deleted" || echo "⏭️ Skipped")
