@@ -1,9 +1,9 @@
-//! DPEG (De-Peg) detection pattern.
+//! DEPEG (De-Peg) detection pattern.
 //!
 //! Monitors price-feed market events (`UnifiedEvent` with `market_key` + `price`) and
 //! computes a per-tenant, per-market weighted median across all contributing sources.
 //! Fires a `DetectionResult` when a sustained depeg breach is detected based on the
-//! per-tenant `DpegPolicy` stored in `tenant_pattern_configs`.
+//! per-tenant `DepegPolicy` stored in `tenant_pattern_configs`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,18 +22,18 @@ use uuid::Uuid;
 
 use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
 
-pub const PATTERN_ID: &str = "dpeg";
+pub const PATTERN_ID: &str = "depeg";
 
-// ─── Policy types (inlined from crates/dpeg-engine) ──────────────────────────
+// ─── Policy types (inlined from crates/depeg-engine) ──────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DpegSeverityBands {
+pub struct DepegSeverityBands {
     pub medium: f64,
     pub high: f64,
     pub critical: f64,
 }
 
-impl Default for DpegSeverityBands {
+impl Default for DepegSeverityBands {
     fn default() -> Self {
         Self {
             medium: 1.0,
@@ -44,7 +44,7 @@ impl Default for DpegSeverityBands {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DpegSourceFilter {
+pub struct DepegSourceFilter {
     #[serde(default)]
     pub cex_whitelist: Vec<String>,
     #[serde(default = "default_true")]
@@ -63,7 +63,7 @@ fn default_min_healthy() -> usize {
     3
 }
 
-impl Default for DpegSourceFilter {
+impl Default for DepegSourceFilter {
     fn default() -> Self {
         Self {
             cex_whitelist: Vec::new(),
@@ -74,12 +74,12 @@ impl Default for DpegSourceFilter {
     }
 }
 
-impl DpegSourceFilter {
+impl DepegSourceFilter {
     fn source_kind_allowed(&self, source_id: &str, source_kind: &str) -> bool {
         match source_kind.to_ascii_lowercase().as_str() {
             "oracle" => self.include_oracles,
             "aggregator" => self.include_aggregators,
-            // DEX pool prices are intentionally excluded from DPEG consensus.
+            // DEX pool prices are intentionally excluded from DEPEG consensus.
             "dex" => false,
             "cex" => {
                 self.cex_whitelist.is_empty()
@@ -94,7 +94,7 @@ impl DpegSourceFilter {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DpegToggles {
+pub struct DepegToggles {
     #[serde(default)]
     pub oracle_confirmation: bool,
     #[serde(default)]
@@ -105,7 +105,7 @@ pub struct DpegToggles {
     pub liquidity_depth_check: bool,
 }
 
-impl Default for DpegToggles {
+impl Default for DepegToggles {
     fn default() -> Self {
         Self {
             oracle_confirmation: true,
@@ -117,13 +117,13 @@ impl Default for DpegToggles {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DpegConfidenceWeights {
+pub struct DepegConfidenceWeights {
     pub source_agreement: f64,
     pub oracle_confirmation: f64,
     pub volume_confirmation: f64,
 }
 
-impl Default for DpegConfidenceWeights {
+impl Default for DepegConfidenceWeights {
     fn default() -> Self {
         Self {
             source_agreement: 60.0,
@@ -134,7 +134,7 @@ impl Default for DpegConfidenceWeights {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DpegSourceOverride {
+pub struct DepegSourceOverride {
     pub source_id: String,
     pub weight: f64,
     pub enabled: bool,
@@ -142,7 +142,7 @@ pub struct DpegSourceOverride {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DpegPolicy {
+pub struct DepegPolicy {
     #[serde(default)]
     pub tenant_id: String,
     pub market_key: String,
@@ -152,11 +152,11 @@ pub struct DpegPolicy {
     pub cooldown_sec: i64,
     pub stale_timeout_ms: i64,
     #[serde(default)]
-    pub severity_bands: DpegSeverityBands,
+    pub severity_bands: DepegSeverityBands,
     #[serde(default)]
-    pub severity_bands_isolated: Option<DpegSeverityBands>,
+    pub severity_bands_isolated: Option<DepegSeverityBands>,
     #[serde(default)]
-    pub severity_bands_systemic: Option<DpegSeverityBands>,
+    pub severity_bands_systemic: Option<DepegSeverityBands>,
     #[serde(default = "default_isolated_floor_pct")]
     pub isolated_floor_pct: f64,
     #[serde(default = "default_systemic_floor_pct")]
@@ -166,15 +166,15 @@ pub struct DpegPolicy {
     #[serde(default = "default_resolution_blocks")]
     pub resolution_blocks: i64,
     #[serde(default)]
-    pub source_filter: DpegSourceFilter,
+    pub source_filter: DepegSourceFilter,
     #[serde(default)]
-    pub toggles: DpegToggles,
+    pub toggles: DepegToggles,
     #[serde(default)]
-    pub confidence_weights: DpegConfidenceWeights,
+    pub confidence_weights: DepegConfidenceWeights,
     #[serde(default = "default_min_confidence_to_fire")]
     pub min_confidence_to_fire: f64,
     #[serde(default, deserialize_with = "deserialize_source_overrides")]
-    pub source_overrides: HashMap<String, DpegSourceOverride>,
+    pub source_overrides: HashMap<String, DepegSourceOverride>,
 }
 
 fn default_isolated_floor_pct() -> f64 {
@@ -199,7 +199,7 @@ fn default_min_confidence_to_fire() -> f64 {
 
 fn deserialize_source_overrides<'de, D>(
     deserializer: D,
-) -> Result<HashMap<String, DpegSourceOverride>, D::Error>
+) -> Result<HashMap<String, DepegSourceOverride>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -207,11 +207,11 @@ where
     match value {
         Value::Null => Ok(HashMap::new()),
         Value::Object(map) => {
-            serde_json::from_value::<HashMap<String, DpegSourceOverride>>(Value::Object(map))
+            serde_json::from_value::<HashMap<String, DepegSourceOverride>>(Value::Object(map))
                 .map_err(de::Error::custom)
         }
         Value::Array(items) => {
-            let parsed = serde_json::from_value::<Vec<DpegSourceOverride>>(Value::Array(items))
+            let parsed = serde_json::from_value::<Vec<DepegSourceOverride>>(Value::Array(items))
                 .map_err(de::Error::custom)?;
             let mut mapped = HashMap::with_capacity(parsed.len());
             for entry in parsed {
@@ -225,7 +225,7 @@ where
     }
 }
 
-impl DpegPolicy {
+impl DepegPolicy {
     fn validate(&self) -> Result<()> {
         if self.peg_target <= 0.0 {
             return Err(anyhow!("peg_target must be > 0"));
@@ -311,7 +311,7 @@ impl DpegPolicy {
         }
     }
 
-    fn isolated_bands(&self) -> DpegSeverityBands {
+    fn isolated_bands(&self) -> DepegSeverityBands {
         self.severity_bands_isolated
             .clone()
             .or_else(|| {
@@ -321,17 +321,17 @@ impl DpegPolicy {
                     None
                 }
             })
-            .unwrap_or(DpegSeverityBands {
+            .unwrap_or(DepegSeverityBands {
                 medium: 0.5,
                 high: 1.0,
                 critical: 5.0,
             })
     }
 
-    fn systemic_bands(&self) -> DpegSeverityBands {
+    fn systemic_bands(&self) -> DepegSeverityBands {
         self.severity_bands_systemic
             .clone()
-            .unwrap_or(DpegSeverityBands {
+            .unwrap_or(DepegSeverityBands {
                 medium: 0.01,
                 high: 0.25,
                 critical: 0.25,
@@ -365,7 +365,7 @@ struct EvidenceContributor {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct DpegAlertState {
+struct DepegAlertState {
     pub cooldown_until: Option<DateTime<Utc>>,
     pub last_alerted_at: Option<DateTime<Utc>>,
     pub last_divergence_pct: Option<f64>,
@@ -383,11 +383,11 @@ struct DpegAlertState {
 
 // ─── Pattern impl ─────────────────────────────────────────────────────────────
 
-/// Per-tenant, per-market DPEG detection pattern.
+/// Per-tenant, per-market DEPEG detection pattern.
 #[derive(Default)]
-pub struct DpegPattern {
-    /// (tenant_id, market_key) → DpegPolicy
-    policies: HashMap<(String, String), DpegPolicy>,
+pub struct DepegPattern {
+    /// (tenant_id, market_key) → DepegPolicy
+    policies: HashMap<(String, String), DepegPolicy>,
     /// (tenant_id, market_key, replay_scope) → recent quotes per source_id.
     ///
     /// Replay streams can arrive slightly out of payload timestamp order across
@@ -408,7 +408,7 @@ struct SourceBindingRuntimeOverride {
     stream_field_mappings: HashMap<String, Vec<FieldMapping>>,
 }
 
-impl DpegPattern {
+impl DepegPattern {
     const MAX_QUOTE_HISTORY_PER_SOURCE: usize = 16;
 
     fn state_key(market_key: &str, simulation_run_id: Option<&str>) -> String {
@@ -597,16 +597,16 @@ impl DpegPattern {
         Value::Array(vec![Value::Object(policy)])
     }
 
-    fn parse_policies(tenant_id: &str, config: &Value) -> Vec<DpegPolicy> {
+    fn parse_policies(tenant_id: &str, config: &Value) -> Vec<DepegPolicy> {
         let config_value = Self::normalized_policy_config(config);
 
-        let entries: Vec<DpegPolicy> = match serde_json::from_value(config_value) {
+        let entries: Vec<DepegPolicy> = match serde_json::from_value(config_value) {
             Ok(value) => value,
             Err(err) => {
                 common::log_error!(
                     warn,
                     err,
-                    "failed to parse dpeg config",
+                    "failed to parse depeg config",
                     tenant_id = %tenant_id
                 );
                 return Vec::new();
@@ -620,7 +620,7 @@ impl DpegPattern {
                 common::log_error!(
                     warn,
                     err,
-                    "invalid dpeg policy — skipping market",
+                    "invalid depeg policy — skipping market",
                     tenant_id = %tenant_id,
                     market_key = %policy.market_key
                 );
@@ -631,7 +631,7 @@ impl DpegPattern {
         parsed
     }
 
-    fn effective_policy(&self, tenant_id: &str, market_key: &str) -> Option<DpegPolicy> {
+    fn effective_policy(&self, tenant_id: &str, market_key: &str) -> Option<DepegPolicy> {
         self.policies
             .get(&(tenant_id.to_string(), market_key.to_string()))
             .cloned()
@@ -639,7 +639,7 @@ impl DpegPattern {
 
     fn classify_context(
         &self,
-        policy: &DpegPolicy,
+        policy: &DepegPolicy,
         tenant_id: &str,
         replay_scope: &str,
         now: DateTime<Utc>,
@@ -648,7 +648,7 @@ impl DpegPattern {
             return ContextClassification::Isolated;
         }
 
-        let tenant_policies: Vec<DpegPolicy> = self
+        let tenant_policies: Vec<DepegPolicy> = self
             .policies
             .iter()
             .filter(|((candidate_tenant, _), _)| candidate_tenant == tenant_id)
@@ -684,7 +684,7 @@ impl DpegPattern {
 }
 
 #[async_trait]
-impl DetectionPattern for DpegPattern {
+impl DetectionPattern for DepegPattern {
     fn pattern_id(&self) -> &str {
         PATTERN_ID
     }
@@ -712,7 +712,10 @@ impl DetectionPattern for DpegPattern {
         self.policies = new_policies;
         self.source_bindings = next_bindings;
         self.source_mapping_overrides = next_mapping_overrides;
-        tracing::info!(policy_count = self.policies.len(), "dpeg policies reloaded");
+        tracing::info!(
+            policy_count = self.policies.len(),
+            "depeg policies reloaded"
+        );
         Ok(())
     }
 
@@ -789,7 +792,7 @@ impl DetectionPattern for DpegPattern {
         let current_state = repo
             .load_pattern_state(&policy_key.0, PATTERN_ID, &state_key)
             .await?
-            .and_then(|v| serde_json::from_value::<DpegAlertState>(v).ok())
+            .and_then(|v| serde_json::from_value::<DepegAlertState>(v).ok())
             .unwrap_or_default();
 
         let quotes = latest_quotes_for_time(market_quotes, evaluation_time);
@@ -816,7 +819,7 @@ impl DetectionPattern for DpegPattern {
                 source_count = outcome.snapshot.source_count,
                 min_healthy_sources,
                 oracle_confirmed = outcome.snapshot.oracle_confirmed,
-                "dpeg source health below minimum; suppressing alert evaluation until enough sources recover"
+                "depeg source health below minimum; suppressing alert evaluation until enough sources recover"
             );
         }
 
@@ -907,7 +910,7 @@ impl DetectionPattern for DpegPattern {
     }
 }
 
-// ─── DPEG evaluation engine (inlined from crates/dpeg-engine) ─────────────────
+// ─── DEPEG evaluation engine (inlined from crates/depeg-engine) ─────────────────
 
 struct ConsensusSnapshot {
     weighted_median_price: f64,
@@ -927,15 +930,15 @@ struct ConsensusSnapshot {
 struct EvaluationOutcome {
     snapshot: ConsensusSnapshot,
     should_emit_alert: bool,
-    next_state: DpegAlertState,
+    next_state: DepegAlertState,
     transition: Option<IncidentTransition>,
     emitted_severity: Option<Severity>,
 }
 
 fn evaluate_policy(
-    policy: &DpegPolicy,
+    policy: &DepegPolicy,
     quotes: &[QuoteInput],
-    current_state: &DpegAlertState,
+    current_state: &DepegAlertState,
     now: DateTime<Utc>,
     classification: ContextClassification,
 ) -> Result<EvaluationOutcome> {
@@ -994,7 +997,7 @@ fn evaluate_policy(
                 contributors: Vec::new(),
             },
             should_emit_alert: false,
-            next_state: DpegAlertState::default(),
+            next_state: DepegAlertState::default(),
             transition: None,
             emitted_severity: None,
         });
@@ -1178,7 +1181,7 @@ fn evaluate_policy(
 }
 
 fn market_divergence_pct(
-    policy: &DpegPolicy,
+    policy: &DepegPolicy,
     quotes: &[QuoteInput],
     now: DateTime<Utc>,
 ) -> Option<f64> {
@@ -1205,7 +1208,7 @@ fn market_divergence_pct(
 }
 
 fn oracle_confirmation_met(
-    policy: &DpegPolicy,
+    policy: &DepegPolicy,
     eligible_quotes: &[QuoteInput],
     trigger_floor_pct: f64,
     now: DateTime<Utc>,
@@ -1238,7 +1241,7 @@ fn available_oracles_within_resolution_floor(
 }
 
 fn compute_confidence_breakdown(
-    policy: &DpegPolicy,
+    policy: &DepegPolicy,
     eligible_quotes: &[QuoteInput],
     weighted_median_price: f64,
     oracle_confirmed: bool,
@@ -1294,7 +1297,7 @@ fn compute_confidence_breakdown(
 }
 
 fn build_evidence_contributors(
-    policy: &DpegPolicy,
+    policy: &DepegPolicy,
     eligible_quotes: &[QuoteInput],
     now: DateTime<Utc>,
     peg_target: f64,
@@ -1368,8 +1371,8 @@ fn remember_quote(market_quotes: &mut HashMap<String, Vec<QuoteInput>>, quote: Q
             && a.source_kind == b.source_kind
             && a.source_id == b.source_id
     });
-    if history.len() > DpegPattern::MAX_QUOTE_HISTORY_PER_SOURCE {
-        let excess = history.len() - DpegPattern::MAX_QUOTE_HISTORY_PER_SOURCE;
+    if history.len() > DepegPattern::MAX_QUOTE_HISTORY_PER_SOURCE {
+        let excess = history.len() - DepegPattern::MAX_QUOTE_HISTORY_PER_SOURCE;
         history.drain(0..excess);
     }
 }
@@ -1390,7 +1393,7 @@ fn latest_quotes_for_time(
         .collect()
 }
 
-fn severity_for_divergence(pct: f64, bands: &DpegSeverityBands) -> Option<Severity> {
+fn severity_for_divergence(pct: f64, bands: &DepegSeverityBands) -> Option<Severity> {
     if pct >= bands.critical {
         return Some(Severity::Critical);
     }
@@ -1433,7 +1436,7 @@ fn context_classification_str(value: &ContextClassification) -> &'static str {
     }
 }
 
-/// Map `SourceType` debug string ("CexWebsocket", "DexApi", etc.) to a dpeg source_kind.
+/// Map `SourceType` debug string ("CexWebsocket", "DexApi", etc.) to a depeg source_kind.
 fn infer_source_kind(source_type: &str) -> String {
     match source_type.to_ascii_lowercase().as_str() {
         "cexwebsocket" | "cexapi" => "cex".to_string(),
@@ -1464,7 +1467,7 @@ fn oracle_price_fields(
 
 fn build_detection(
     event: &UnifiedEvent,
-    policy: &DpegPolicy,
+    policy: &DepegPolicy,
     snapshot: &ConsensusSnapshot,
     severity: Severity,
     transition: Option<IncidentTransition>,
@@ -1577,7 +1580,7 @@ fn build_detection(
     DetectionResult {
         detection_id: Uuid::new_v4(),
         pattern_id: PATTERN_ID.to_string(),
-        event_key: Some(format!("dpeg:{}:{}", policy.tenant_id, policy.market_key)),
+        event_key: Some(format!("depeg:{}:{}", policy.tenant_id, policy.market_key)),
         subject_type: Some("market".to_string()),
         subject_key: Some(subject_key),
         tenant_id: Some(policy.tenant_id.clone()),
@@ -1588,9 +1591,9 @@ fn build_detection(
         requires_confirmation: policy.toggles.oracle_confirmation,
         attack_family: AttackFamily::PegDeviation,
         severity,
-        tx_hash: format!("dpeg-{}", Uuid::new_v4()),
+        tx_hash: format!("depeg-{}", Uuid::new_v4()),
         block_number: 0,
-        triggered_rule_ids: vec!["dpeg.sustained_breach".to_string()],
+        triggered_rule_ids: vec!["depeg.sustained_breach".to_string()],
         description: Some(description),
         signals: vec![DetectionSignal {
             signal_type: SignalType::PriceDeviation,
@@ -1612,9 +1615,9 @@ fn build_detection(
 
 fn log_test_mode_decision(
     event: &UnifiedEvent,
-    policy: &DpegPolicy,
+    policy: &DepegPolicy,
     market_key: &str,
-    current_state: &DpegAlertState,
+    current_state: &DepegAlertState,
     outcome: &EvaluationOutcome,
     now: DateTime<Utc>,
     simulation_run_id: Option<&str>,
@@ -1631,7 +1634,7 @@ fn log_test_mode_decision(
     let cooldown_until = current_state.cooldown_until;
     let cooldown_active = cooldown_until.map(|until| until > now).unwrap_or(false);
     let suppression_reason =
-        dpeg_test_mode_reason(policy, current_state, outcome, now, confidence_total);
+        depeg_test_mode_reason(policy, current_state, outcome, now, confidence_total);
     let transition = outcome
         .transition
         .as_ref()
@@ -1682,13 +1685,13 @@ fn log_test_mode_decision(
         incident_transition = transition.as_deref(),
         should_emit_alert = outcome.should_emit_alert,
         suppression_reason,
-        "test-mode dpeg evaluation completed"
+        "test-mode depeg evaluation completed"
     );
 }
 
-fn dpeg_test_mode_reason(
-    policy: &DpegPolicy,
-    current_state: &DpegAlertState,
+fn depeg_test_mode_reason(
+    policy: &DepegPolicy,
+    current_state: &DepegAlertState,
     outcome: &EvaluationOutcome,
     now: DateTime<Utc>,
     confidence_total: f64,
@@ -1789,8 +1792,8 @@ mod tests {
     use super::*;
     use event_schema::SourceType;
 
-    fn base_policy() -> DpegPolicy {
-        DpegPolicy {
+    fn base_policy() -> DepegPolicy {
+        DepegPolicy {
             tenant_id: "tenant-a".to_string(),
             market_key: "USDC/USD".to_string(),
             peg_target: 1.0,
@@ -1798,17 +1801,17 @@ mod tests {
             quorum_pct: 0.0,
             cooldown_sec: 0,
             stale_timeout_ms: 60_000,
-            severity_bands: DpegSeverityBands {
+            severity_bands: DepegSeverityBands {
                 medium: 0.5,
                 high: 1.0,
                 critical: 5.0,
             },
-            severity_bands_isolated: Some(DpegSeverityBands {
+            severity_bands_isolated: Some(DepegSeverityBands {
                 medium: 0.5,
                 high: 1.0,
                 critical: 5.0,
             }),
-            severity_bands_systemic: Some(DpegSeverityBands {
+            severity_bands_systemic: Some(DepegSeverityBands {
                 medium: 0.01,
                 high: 0.25,
                 critical: 0.25,
@@ -1817,12 +1820,12 @@ mod tests {
             systemic_floor_pct: 0.01,
             deescalation_blocks: 5,
             resolution_blocks: 30,
-            source_filter: DpegSourceFilter {
+            source_filter: DepegSourceFilter {
                 min_healthy_sources: 1,
-                ..DpegSourceFilter::default()
+                ..DepegSourceFilter::default()
             },
-            toggles: DpegToggles::default(),
-            confidence_weights: DpegConfidenceWeights::default(),
+            toggles: DepegToggles::default(),
+            confidence_weights: DepegConfidenceWeights::default(),
             min_confidence_to_fire: 0.0,
             source_overrides: HashMap::new(),
         }
@@ -1845,10 +1848,10 @@ mod tests {
     #[test]
     fn simulation_state_key_is_scoped_by_run() {
         assert_eq!(
-            DpegPattern::state_key("USDC/USD", Some("run_123")),
+            DepegPattern::state_key("USDC/USD", Some("run_123")),
             "USDC/USD::run_123"
         );
-        assert_eq!(DpegPattern::state_key("USDC/USD", None), "USDC/USD");
+        assert_eq!(DepegPattern::state_key("USDC/USD", None), "USDC/USD");
     }
 
     #[test]
@@ -1864,7 +1867,7 @@ mod tests {
         let outcome = evaluate_policy(
             &policy,
             &quotes,
-            &DpegAlertState::default(),
+            &DepegAlertState::default(),
             now,
             ContextClassification::Isolated,
         )
@@ -1913,7 +1916,7 @@ mod tests {
         let outcome = evaluate_policy(
             &policy,
             &quotes,
-            &DpegAlertState::default(),
+            &DepegAlertState::default(),
             now,
             ContextClassification::Isolated,
         )
@@ -1927,7 +1930,7 @@ mod tests {
     #[test]
     fn contagion_toggle_off_forces_isolated_classification() {
         let now = Utc::now();
-        let mut pattern = DpegPattern::default();
+        let mut pattern = DepegPattern::default();
         let mut policy = base_policy();
         policy.toggles.contagion_detection = false;
         pattern.policies.insert(
@@ -1941,7 +1944,7 @@ mod tests {
 
     #[tokio::test]
     async fn reload_config_keeps_tenant_policies_isolated_for_same_market() {
-        let mut pattern = DpegPattern::default();
+        let mut pattern = DepegPattern::default();
         let mut config_map = HashMap::new();
 
         config_map.insert(
@@ -2013,7 +2016,7 @@ mod tests {
             }]
         });
 
-        let overrides = DpegPattern::parse_source_mapping_overrides(&config);
+        let overrides = DepegPattern::parse_source_mapping_overrides(&config);
         let pyth = overrides.get("pyth-eth-mainnet").expect("override");
         assert_eq!(pyth.active_stream_ids, vec!["stream-1".to_string()]);
         assert_eq!(
@@ -2024,7 +2027,7 @@ mod tests {
 
     #[test]
     fn effective_event_fields_apply_gateway_mapping_override() {
-        let mut pattern = DpegPattern::default();
+        let mut pattern = DepegPattern::default();
         pattern.source_mapping_overrides.insert(
             "tenant-a".to_string(),
             HashMap::from([(
@@ -2098,7 +2101,7 @@ mod tests {
             "severity_bands": { "medium": 1.0, "high": 3.0, "critical": 5.0 }
         });
 
-        let policies = DpegPattern::parse_policies("tenant-a", &config);
+        let policies = DepegPattern::parse_policies("tenant-a", &config);
 
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0].tenant_id, "tenant-a");
@@ -2116,7 +2119,7 @@ mod tests {
         tenant_a_policy.tenant_id = "tenant-a".to_string();
         tenant_a_policy.severity_bands.medium = 0.5;
         tenant_a_policy.toggles.oracle_confirmation = false;
-        tenant_a_policy.severity_bands_isolated = Some(DpegSeverityBands {
+        tenant_a_policy.severity_bands_isolated = Some(DepegSeverityBands {
             medium: 0.5,
             high: 1.0,
             critical: 5.0,
@@ -2127,7 +2130,7 @@ mod tests {
         tenant_b_policy.tenant_id = "tenant-b".to_string();
         tenant_b_policy.severity_bands.medium = 2.0;
         tenant_b_policy.toggles.oracle_confirmation = false;
-        tenant_b_policy.severity_bands_isolated = Some(DpegSeverityBands {
+        tenant_b_policy.severity_bands_isolated = Some(DepegSeverityBands {
             medium: 2.0,
             high: 4.0,
             critical: 8.0,
@@ -2137,7 +2140,7 @@ mod tests {
         let tenant_a = evaluate_policy(
             &tenant_a_policy,
             &quotes,
-            &DpegAlertState::default(),
+            &DepegAlertState::default(),
             now,
             ContextClassification::Isolated,
         )
@@ -2145,7 +2148,7 @@ mod tests {
         let tenant_b = evaluate_policy(
             &tenant_b_policy,
             &quotes,
-            &DpegAlertState::default(),
+            &DepegAlertState::default(),
             now,
             ContextClassification::Isolated,
         )
@@ -2159,8 +2162,8 @@ mod tests {
 
     #[test]
     fn effective_policy_is_scoped_by_tenant_and_market() {
-        let mut pattern = DpegPattern::default();
-        let usdt_default = DpegPolicy {
+        let mut pattern = DepegPattern::default();
+        let usdt_default = DepegPolicy {
             market_key: "USDT/USD".to_string(),
             ..base_policy()
         };
@@ -2172,7 +2175,7 @@ mod tests {
             usdt_default,
         );
 
-        let usdc_policy = DpegPolicy {
+        let usdc_policy = DepegPolicy {
             market_key: "USDC/USD".to_string(),
             ..base_policy()
         };
@@ -2197,7 +2200,7 @@ mod tests {
         let mut policy = base_policy();
         policy.toggles.oracle_confirmation = false;
         let quotes = vec![quote("cex-a", "cex", 0.994, now)];
-        let mut state = DpegAlertState {
+        let mut state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now),
             last_divergence_pct: Some(1.2),
@@ -2237,7 +2240,7 @@ mod tests {
         let now = Utc::now();
         let policy = base_policy();
         let quotes = vec![quote("cex-a", "cex", 0.9998, now)];
-        let mut state = DpegAlertState {
+        let mut state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now),
             last_divergence_pct: Some(0.8),
@@ -2281,7 +2284,7 @@ mod tests {
         policy.stale_timeout_ms = 300_000;
         policy.toggles.oracle_confirmation = false;
         let quotes = vec![quote("cex-a", "cex", 0.989, now)];
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: Some(now + Duration::seconds(120)),
             last_alerted_at: Some(now - Duration::seconds(10)),
             last_divergence_pct: Some(0.6),
@@ -2334,7 +2337,7 @@ mod tests {
         policy.stale_timeout_ms = 300_000;
         policy.toggles.oracle_confirmation = false;
         let quotes = vec![quote("cex-a", "cex", 0.994, now)];
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: Some(now + Duration::seconds(60)),
             last_alerted_at: Some(now - Duration::seconds(10)),
             last_divergence_pct: Some(1.2),
@@ -2412,14 +2415,14 @@ mod tests {
 
     /// Build a policy matching the spec's test fixture defaults.
     /// oracle_confirmation = true, min_sources = 3, min_confidence = 0.
-    fn spec_policy() -> DpegPolicy {
-        DpegPolicy {
-            toggles: DpegToggles {
+    fn spec_policy() -> DepegPolicy {
+        DepegPolicy {
+            toggles: DepegToggles {
                 oracle_confirmation: true,
                 ..Default::default()
             },
             min_sources: 3,
-            source_filter: DpegSourceFilter {
+            source_filter: DepegSourceFilter {
                 min_healthy_sources: 3,
                 ..Default::default()
             },
@@ -2431,7 +2434,7 @@ mod tests {
 
     /// Evaluate with fresh (default) state.
     fn eval_fresh(
-        policy: &DpegPolicy,
+        policy: &DepegPolicy,
         quotes: &[QuoteInput],
         now: DateTime<Utc>,
         classification: ContextClassification,
@@ -2439,7 +2442,7 @@ mod tests {
         evaluate_policy(
             policy,
             quotes,
-            &DpegAlertState::default(),
+            &DepegAlertState::default(),
             now,
             classification,
         )
@@ -2449,12 +2452,12 @@ mod tests {
     /// Run N evaluation steps, threading state. Returns all outcomes.
     #[allow(dead_code)]
     fn eval_sequence(
-        policy: &DpegPolicy,
+        policy: &DepegPolicy,
         steps: &[(Vec<QuoteInput>, ContextClassification)],
         start: DateTime<Utc>,
         tick: Duration,
     ) -> Vec<EvaluationOutcome> {
-        let mut state = DpegAlertState::default();
+        let mut state = DepegAlertState::default();
         let mut outcomes = Vec::new();
         for (i, (quotes, class)) in steps.iter().enumerate() {
             let ts = start + tick * i as i32;
@@ -3020,7 +3023,7 @@ mod tests {
         let policy = spec_policy();
 
         // Set up state as if there was an active ISOLATED incident
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3052,7 +3055,7 @@ mod tests {
         let quotes = make_quotes(depeg_price, Some(depeg_price), Some(depeg_price), 12, now);
         let policy = spec_policy();
 
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(30)),
             last_divergence_pct: Some(1.5),
@@ -3094,7 +3097,7 @@ mod tests {
         policy.resolution_blocks = 1; // Fast resolution for test
 
         // Incident was triggered under SYSTEMIC (trigger_floor_pct = 0.01)
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(0.05),
@@ -3127,7 +3130,7 @@ mod tests {
         let mut policy = spec_policy();
         policy.resolution_blocks = 1;
 
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(0.05),
@@ -3166,7 +3169,7 @@ mod tests {
         let mut policy = spec_policy();
         policy.resolution_blocks = 1;
 
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(1.5),
@@ -3202,7 +3205,7 @@ mod tests {
         policy.toggles.oracle_confirmation = false; // Don't require oracle for detection either
         policy.resolution_blocks = 1;
 
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(1.5),
@@ -3237,7 +3240,7 @@ mod tests {
         policy.toggles.oracle_confirmation = false;
         policy.resolution_blocks = 30;
 
-        let mut state = DpegAlertState {
+        let mut state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3281,7 +3284,7 @@ mod tests {
         policy.toggles.oracle_confirmation = false;
         policy.resolution_blocks = 30;
 
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3316,7 +3319,7 @@ mod tests {
         policy.toggles.oracle_confirmation = false;
         policy.resolution_blocks = 30;
 
-        let base_state = DpegAlertState {
+        let base_state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(120)),
             last_divergence_pct: Some(1.5),
@@ -3382,7 +3385,7 @@ mod tests {
         policy.toggles.oracle_confirmation = false;
         policy.resolution_blocks = 1; // Fast resolution
 
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(1.5),
@@ -3534,7 +3537,7 @@ mod tests {
         policy.cooldown_sec = 300;
 
         // State: just resolved, cooldown active
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: Some(now + Duration::seconds(250)),
             last_alerted_at: Some(now - Duration::seconds(5)),
             last_divergence_pct: None,
@@ -3574,7 +3577,7 @@ mod tests {
         policy.cooldown_sec = 300;
 
         // State: resolved long ago, cooldown expired
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: Some(now - Duration::seconds(10)), // Expired
             last_alerted_at: Some(now - Duration::seconds(310)),
             last_divergence_pct: None,
@@ -3617,7 +3620,7 @@ mod tests {
         policy.cooldown_sec = 300;
 
         // State after resolution: severity cleared, cooldown active
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: Some(now + Duration::seconds(250)),
             last_alerted_at: Some(now - Duration::seconds(5)),
             last_divergence_pct: None,
@@ -3659,7 +3662,7 @@ mod tests {
         policy.cooldown_sec = 600;
 
         // Simulate a false-positive closure: severity cleared, long cooldown
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: Some(now + Duration::seconds(500)),
             last_alerted_at: Some(now - Duration::seconds(10)),
             last_divergence_pct: None,
@@ -3699,7 +3702,7 @@ mod tests {
         policy.deescalation_blocks = 5;
 
         // Active incident at CRITICAL
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(60)),
             last_divergence_pct: Some(5.50),
@@ -3763,7 +3766,7 @@ mod tests {
         policy.resolution_blocks = 3;
 
         // Stale state: says HIGH but divergence is now 0.10%
-        let state = DpegAlertState {
+        let state = DepegAlertState {
             cooldown_until: None,
             last_alerted_at: Some(now - Duration::seconds(300)),
             last_divergence_pct: Some(1.50),
@@ -3854,7 +3857,7 @@ mod tests {
             now,
         );
 
-        assert_eq!(detection.pattern_id, "dpeg");
+        assert_eq!(detection.pattern_id, "depeg");
         assert_eq!(detection.severity, Severity::Critical);
         assert_eq!(detection.chain, Chain::Offchain);
         assert_eq!(detection.attack_family, AttackFamily::PegDeviation);
@@ -3929,7 +3932,7 @@ mod tests {
     /// TC-D-1402: severity_for_divergence returns None below all bands
     #[test]
     fn tc_d_1402_severity_none_below_all_bands() {
-        let bands = DpegSeverityBands {
+        let bands = DepegSeverityBands {
             medium: 0.5,
             high: 1.0,
             critical: 5.0,
@@ -3941,7 +3944,7 @@ mod tests {
     /// TC-D-1403: severity_for_divergence boundary tests
     #[test]
     fn tc_d_1403_severity_boundaries() {
-        let bands = DpegSeverityBands {
+        let bands = DepegSeverityBands {
             medium: 0.5,
             high: 1.0,
             critical: 5.0,
@@ -3966,7 +3969,7 @@ mod tests {
     /// TC-D-1404: Systemic severity bands boundary tests
     #[test]
     fn tc_d_1404_systemic_severity_boundaries() {
-        let bands = DpegSeverityBands {
+        let bands = DepegSeverityBands {
             medium: 0.01,
             high: 0.25,
             critical: 0.25,
@@ -4102,7 +4105,7 @@ mod tests {
         policy.source_filter.min_healthy_sources = 1;
         policy.source_overrides.insert(
             "bad-source".to_string(),
-            DpegSourceOverride {
+            DepegSourceOverride {
                 source_id: "bad-source".to_string(),
                 weight: 0.0,
                 enabled: true,
@@ -4133,7 +4136,7 @@ mod tests {
         policy.source_filter.min_healthy_sources = 1;
         policy.source_overrides.insert(
             "disabled-cex".to_string(),
-            DpegSourceOverride {
+            DepegSourceOverride {
                 source_id: "disabled-cex".to_string(),
                 weight: 1.0,
                 enabled: false,
@@ -4296,7 +4299,7 @@ mod tests {
         policy.toggles.oracle_confirmation = false;
         policy.source_overrides.insert(
             "slow-source".to_string(),
-            DpegSourceOverride {
+            DepegSourceOverride {
                 source_id: "slow-source".to_string(),
                 weight: 1.0,
                 enabled: true,

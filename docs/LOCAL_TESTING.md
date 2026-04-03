@@ -101,7 +101,7 @@ cargo check
 cargo test --workspace
 
 # Targeted pattern checks
-cargo test -p detector dpeg
+cargo test -p detector depeg
 cargo test -p detector flash_loan
 ```
 

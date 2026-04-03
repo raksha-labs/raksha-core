@@ -535,7 +535,7 @@ fn derive_supported_patterns(
 
     let normalized = incident_class.to_ascii_lowercase();
     if normalized.contains("depeg") {
-        return vec!["dpeg".to_string()];
+        return vec!["depeg".to_string()];
     }
     if normalized.contains("oracle") {
         return vec!["oracle_manipulation".to_string(), "flash_loan".to_string()];

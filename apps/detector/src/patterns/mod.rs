@@ -3,7 +3,7 @@
 //! Each pattern is responsible for processing `UnifiedEvent`s and emitting
 //! `DetectionResult`s when anomalous conditions are detected.
 
-pub mod dpeg;
+pub mod depeg;
 pub mod flash_loan;
 pub mod generic_rule;
 pub mod tvl_drop;
@@ -176,7 +176,7 @@ impl PatternRegistry {
     pub fn new() -> Self {
         Self {
             patterns: vec![
-                Box::new(dpeg::DpegPattern::default()),
+                Box::new(depeg::DepegPattern::default()),
                 Box::new(flash_loan::FlashLoanPattern::default()),
                 Box::new(tvl_drop::TvlDropPattern::default()),
                 Box::new(generic_rule::GenericRulePattern::default()),

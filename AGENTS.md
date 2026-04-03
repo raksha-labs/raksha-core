@@ -16,7 +16,7 @@ Do not change platform control-plane code from this repo.
 ## Primary Runtime Model
 
 Unified Pipeline:
-`indexer -> detector (pattern registry: dpeg, flash_loan) -> orchestrator -> finality -> alerts`
+`indexer -> detector (pattern registry: depeg, flash_loan) -> orchestrator -> finality -> alerts`
 
 Patterns are registered within detector and configured via tenant_pattern_configs table.
 Redis streams and PostgreSQL schema are core runtime contracts.

@@ -21,7 +21,7 @@ use serde_json::Value;
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalField {
     // ── Common ────────────────────────────────────────────────────────────────
-    /// Normalized market key, e.g. "USDC/USD". Primary DPEG key.
+    /// Normalized market key, e.g. "USDC/USD". Primary DEPEG key.
     MarketKey,
     /// Normalized asset price as f64.
     Price,

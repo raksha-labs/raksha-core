@@ -239,7 +239,7 @@ impl Default for RiskScore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectionResult {
     pub detection_id: Uuid,
-    /// Which pattern produced this detection (e.g. "dpeg", "flash_loan").
+    /// Which pattern produced this detection (e.g. "depeg", "flash_loan").
     pub pattern_id: String,
     pub event_key: Option<String>,
     pub subject_type: Option<String>,

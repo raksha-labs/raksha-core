@@ -14,7 +14,7 @@ EVM chains / CEX / DEX / Oracles
   raksha:unified-events  (Redis Stream)
           │
           ▼
-      [detector]         ← pattern registry (DPEG, Flash-Loan, …)
+      [detector]         ← pattern registry (DEPEG, Flash-Loan, …)
           │  publishes DetectionResult
           ▼
   raksha:detections
@@ -48,7 +48,7 @@ EVM chains / CEX / DEX / Oracles
 | `apps/finality` | Confirmation-depth tracker and reorg handler. |
 
 Detection patterns live in `apps/detector/src/patterns/`:
-- `dpeg.rs` — dollar-depeg multi-source weighted median consensus
+- `depeg.rs` — dollar-depeg multi-source weighted median consensus
 - `flash_loan.rs` — EVM flash-loan profit extraction
 
 New patterns are added by implementing the `DetectionPattern` trait and registering in `PatternRegistry::new()`.

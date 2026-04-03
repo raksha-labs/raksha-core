@@ -73,7 +73,7 @@ If configured correctly, you'll see:
 2. **Detector**: Processing events, running pattern detection
    ```
    INFO detector: Consumed event from unified-events stream
-   INFO detector: Pattern check: dpeg for USDC/USD
+   INFO detector: Pattern check: depeg for USDC/USD
    ```
 
 3. **Orchestrator**: Enriching detections

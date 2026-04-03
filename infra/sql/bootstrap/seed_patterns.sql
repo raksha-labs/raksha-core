@@ -21,10 +21,10 @@ INSERT INTO pattern.patterns (
   enabled
 )
 VALUES
-    ('dpeg', 'Stablecoin Depeg Alert',
+    ('depeg', 'Stablecoin Depeg Alert',
      'Detects sustained divergence of a pegged asset from its peg target using HTTP-polled CEX and oracle price feeds with configurable polling intervals.',
      'platform', NULL, 'active', TRUE),
-    ('dpeg_rpc', 'Stablecoin Depeg Alert (WebSocket)',
+    ('depeg_rpc', 'Stablecoin Depeg Alert (WebSocket)',
      'Detects sustained divergence of a pegged asset from its peg target using real-time WebSocket feeds from exchanges and on-chain oracles.',
      'platform', NULL, 'active', TRUE),
     ('flash_loan', 'Flash Loan Attack', 
@@ -45,7 +45,7 @@ SET pattern_name = EXCLUDED.pattern_name,
 
 INSERT INTO pattern.pattern_configs (pattern_id, config)
 VALUES
-    ('dpeg', '{
+    ('depeg', '{
         "poll_interval_ms": 5000,
         "policies": [
           {
@@ -86,7 +86,7 @@ VALUES
           }
         ]
     }'::jsonb),
-    ('dpeg_rpc', '{
+    ('depeg_rpc', '{
         "policies": [
           {
             "market_key": "USDT/USD",
@@ -164,8 +164,8 @@ ON CONFLICT (pattern_id) DO NOTHING;
 
 INSERT INTO pattern.tenant_pattern_configs (tenant_id, pattern_id, enabled, config)
 VALUES
-    -- DPEG (HTTP): Primary — HTTP-polled CEX + oracle price feeds
-    ('glider', 'dpeg', TRUE, '{
+    -- DEPEG (HTTP): Primary — HTTP-polled CEX + oracle price feeds
+    ('glider', 'depeg', TRUE, '{
         "poll_interval_ms": 5000,
         "policies": [
           {
@@ -207,8 +207,8 @@ VALUES
         ]
     }'::jsonb),
 
-    -- DPEG (WebSocket): Real-time WebSocket feeds from exchanges and on-chain oracles
-    ('glider', 'dpeg_rpc', TRUE, '[
+    -- DEPEG (WebSocket): Real-time WebSocket feeds from exchanges and on-chain oracles
+    ('glider', 'depeg_rpc', TRUE, '[
         {
             "market_key": "USDT/USD",
             "peg_target": 1.0,
@@ -324,12 +324,12 @@ JOIN catalog.tenant_data_sources tds
 JOIN catalog.data_sources ds
   ON ds.source_id = tds.source_id
 WHERE tpc.enabled = TRUE
-  AND NOT (tpc.pattern_id IN ('dpeg', 'dpeg_rpc') AND ds.source_type = 'dex_api')
+  AND NOT (tpc.pattern_id IN ('depeg', 'depeg_rpc') AND ds.source_type = 'dex_api')
 ON CONFLICT (tenant_id, pattern_id, source_id) DO NOTHING;
 
 DELETE FROM pattern.tenant_pattern_source_bindings tpsb
 USING catalog.data_sources ds
-WHERE tpsb.pattern_id IN ('dpeg', 'dpeg_rpc')
+WHERE tpsb.pattern_id IN ('depeg', 'depeg_rpc')
   AND tpsb.source_id = ds.source_id
   AND ds.source_type = 'dex_api';
 
