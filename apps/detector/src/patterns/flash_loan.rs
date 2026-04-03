@@ -53,6 +53,10 @@ const DEFAULT_COOLDOWN_SEC: i64 = 300;
 pub struct FlashLoanRule {
     pub rule_id: String,
     pub name: String,
+    #[serde(default)]
+    pub protocol_id: String,
+    #[serde(default)]
+    pub chain_slug: String,
     pub min_loan_amount_usd: f64,
     pub profit_threshold_usd: f64,
     pub cooldown_sec: i64,
@@ -259,6 +263,16 @@ fn parse_rule_item(value: &Value, index: usize) -> Option<FlashLoanRule> {
     Some(FlashLoanRule {
         rule_id,
         name,
+        protocol_id: object
+            .get("protocol_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        chain_slug: object
+            .get("chain_slug")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         min_loan_amount_usd: parse_f64(object.get("min_loan_amount_usd"), DEFAULT_MIN_LOAN_USD),
         profit_threshold_usd: parse_f64(
             object.get("profit_threshold_usd"),
@@ -290,6 +304,8 @@ fn default_flash_rule(rule_id: &str, name: &str) -> FlashLoanRule {
     FlashLoanRule {
         rule_id: rule_id.to_string(),
         name: name.to_string(),
+        protocol_id: String::new(),
+        chain_slug: String::new(),
         min_loan_amount_usd: DEFAULT_MIN_LOAN_USD,
         profit_threshold_usd: DEFAULT_PROFIT_THRESHOLD_USD,
         cooldown_sec: DEFAULT_COOLDOWN_SEC,

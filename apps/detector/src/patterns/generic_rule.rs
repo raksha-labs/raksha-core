@@ -136,7 +136,7 @@ impl GenericRulePattern {
     }
 
     fn signal_type_for_pattern(pattern_id: &str) -> SignalType {
-        if pattern_id == "dpeg" {
+        if pattern_id == "depeg" {
             SignalType::PegDeviation
         } else if pattern_id == "tvl_drop" {
             SignalType::PriceDeviation
@@ -146,7 +146,7 @@ impl GenericRulePattern {
     }
 
     fn attack_family_for_pattern(pattern_id: &str) -> AttackFamily {
-        if pattern_id == "dpeg" {
+        if pattern_id == "depeg" {
             AttackFamily::PegDeviation
         } else if pattern_id == "tvl_drop" {
             AttackFamily::LiquidationCascade
@@ -377,7 +377,7 @@ impl DetectionPattern for GenericRulePattern {
         let mut next: HashMap<String, HashMap<String, Vec<CompiledRuleRef>>> = HashMap::new();
 
         for ((tenant_id, pattern_id), config) in config_map {
-            if pattern_id == "dpeg" || pattern_id == "flash_loan" || pattern_id == "tvl_drop" {
+            if pattern_id == "depeg" || pattern_id == "flash_loan" || pattern_id == "tvl_drop" {
                 continue;
             }
 

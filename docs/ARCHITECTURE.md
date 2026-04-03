@@ -9,7 +9,7 @@
 | Component | Binary | Primary Input | Primary Output | Notes |
 |---|---|---|---|---|
 | Indexer | `apps/indexer` | EVM RPC/WebSocket, CEX/DEX feeds, Oracle sources | `raksha:unified-events` | Multi-source supervisor normalizing all event types into UnifiedEvent stream. |
-| Detector | `apps/detector` | `raksha:unified-events` | `raksha:detections` | Pattern registry (DpegPattern, FlashLoanPattern) evaluates events via DetectionPattern trait. |
+| Detector | `apps/detector` | `raksha:unified-events` | `raksha:detections` | Pattern registry (DepegPattern, FlashLoanPattern) evaluates events via DetectionPattern trait. |
 | Orchestrator | `apps/orchestrator` | `raksha:detections` | `raksha:alerts` | Correlates detections, applies risk scoring, persists alerts. |
 | Finality | `apps/finality` | Block headers, reorg monitoring | `raksha:finality-updates` | Tracks confirmation depth and detects blockchain reorganizations. |
 
@@ -49,7 +49,7 @@ flowchart LR
   IDX --> UNIFIED[(raksha:unified-events)]
   
   UNIFIED --> DET[detector]
-  DET --> |Pattern Registry| DPEG[DpegPattern]
+  DET --> |Pattern Registry| DEPEG[DepegPattern]
   DET --> |Pattern Registry| FL[FlashLoanPattern]
   
   DET --> DETS[(raksha:detections)]
@@ -97,7 +97,7 @@ Source of truth for service shape is `infra/service-catalog.yaml`.
 - Finality and orchestrator logic prevent premature confirmation and support reorg correction.
 - Orchestrator maps detections to a generic incident key (`tenant_id`, `pattern_id`, `subject_type`, `subject_key`, `chain_slug`) and appends transition/context history independent of pattern family.
 - Pattern registry in detector enables extensible detection logic via DetectionPattern trait.
-- Each pattern (DpegPattern, FlashLoanPattern) maintains isolated state in `pattern_state` and `pattern_snapshots` tables.
+- Each pattern (DepegPattern, FlashLoanPattern) maintains isolated state in `pattern_state` and `pattern_snapshots` tables.
 - Patterns are configured per-tenant via `tenant_pattern_configs` for multi-tenant isolation.
 - Orchestrator enforces tenant monthly alert quota for non-critical alerts while allowing critical bypass.
 - Health endpoints are available when `HEALTH_CHECK_ENABLED=true` (`HEALTH_CHECK_PORT`, default `8080`).

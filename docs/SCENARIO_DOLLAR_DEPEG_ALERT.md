@@ -2,7 +2,7 @@
 
 ## Goal
 
-Detect sustained depeg on a dollar-pegged market (e.g., `USDC/USD`) using the `DpegPattern` within the detector's pattern registry, then emit a detection event for normal alert lifecycle handling.
+Detect sustained depeg on a dollar-pegged market (e.g., `USDC/USD`) using the `DepegPattern` within the detector's pattern registry, then emit a detection event for normal alert lifecycle handling.
 
 ## Preconditions
 
@@ -18,7 +18,7 @@ These configuration tables are created by the shared bootstrap schema and manage
 
 ## Architecture Overview
 
-DpegPattern is registered in the detector alongside other patterns (FlashLoanPattern, etc.). It implements the `DetectionPattern` trait:
+DepegPattern is registered in the detector alongside other patterns (FlashLoanPattern, etc.). It implements the `DetectionPattern` trait:
 
 ```rust
 pub trait DetectionPattern: Send + Sync {
@@ -37,11 +37,11 @@ sequenceDiagram
   participant DB as Postgres
   participant IDX as indexer
   participant UNIFIED as Redis unified-events
-  participant DET as detector (DpegPattern)
+  participant DET as detector (DepegPattern)
   participant DETS as Redis detections
   participant ORCH as orchestrator
 
-  Ops->>CFG: Configure DPEG pattern for tenant
+  Ops->>CFG: Configure DEPEG pattern for tenant
   CFG->>DB: Write tenant_pattern_configs + tenant_data_sources
 
   loop Continuous event ingestion
@@ -50,7 +50,7 @@ sequenceDiagram
   end
 
   DET->>UNIFIED: Consume unified event stream
-  DET->>DET: DpegPattern.process_event()
+  DET->>DET: DepegPattern.process_event()
   DET->>DET: Weighted median + divergence + quorum + cooldown
   DET->>DB: Persist pattern_snapshots
 
@@ -71,10 +71,10 @@ docker exec -it raksha-redis redis-cli XINFO STREAM raksha:unified-events
 
 2. Pattern snapshots are being generated:
 ```bash
-docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT tenant_id, pattern_name, snapshot_data, created_at FROM pattern_snapshots WHERE pattern_name='dpeg' ORDER BY created_at DESC LIMIT 20;"
+docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT tenant_id, pattern_name, snapshot_data, created_at FROM pattern_snapshots WHERE pattern_name='depeg' ORDER BY created_at DESC LIMIT 20;"
 ```
 
-3. DPEG detections are emitted when breach criteria are met:
+3. DEPEG detections are emitted when breach criteria are met:
 ```bash
 docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT id, protocol, severity, payload->'signals' AS signals, created_at FROM detections WHERE attack_family='PegDeviation' ORDER BY created_at DESC LIMIT 20;"
 ```
@@ -95,7 +95,7 @@ docker exec -it raksha-postgres psql -U postgres -d raksha -c "SELECT id, tenant
 ## Common Failure Modes
 
 - No unified events: indexer cannot connect to data sources; check `tenant_data_sources` configuration.
-- No pattern snapshots: no matching `tenant_pattern_configs` entry for DPEG pattern.
+- No pattern snapshots: no matching `tenant_pattern_configs` entry for DEPEG pattern.
 - No detections: breach not sustained long enough, quorum not met, or pattern cooldown active.
 - Alert row is `suppressed`: tenant hit `max_alerts_per_month`; verify non-critical quota behavior and critical bypass.
 - Detections present but no alert progression: orchestrator not running or cannot read Redis/Postgres.

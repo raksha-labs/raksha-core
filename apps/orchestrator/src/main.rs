@@ -1198,8 +1198,8 @@ async fn should_escalate_to_all_channels_for_rate_limit(
 
 fn alert_type(alert: &AlertEvent) -> &str {
     let event_key = alert.event_key.as_deref().unwrap_or_default();
-    if event_key.starts_with("dpeg:") || alert.protocol.starts_with("market:") {
-        "dpeg"
+    if event_key.starts_with("depeg:") || alert.protocol.starts_with("market:") {
+        "depeg"
     } else {
         "generic"
     }
@@ -1225,7 +1225,7 @@ fn require_alert_tenant_id(tenant_id: Option<String>, context: &str) -> Result<S
         .ok_or_else(|| anyhow!("missing tenant_id for {context}"))
 }
 
-/// Extract the base asset symbol from a DPEG subject_key.
+/// Extract the base asset symbol from a DEPEG subject_key.
 ///
 /// Subject keys are formatted as `"tenant_id:BASE/QUOTE"` (e.g. `"tenant-a:USDC/USD"`).
 /// This function returns the `BASE` portion (`"USDC"`) which is the stablecoin being
@@ -1581,8 +1581,8 @@ mod tests {
     fn mk_detection(severity: Severity, transition: IncidentTransition) -> DetectionResult {
         DetectionResult {
             detection_id: Uuid::new_v4(),
-            pattern_id: "dpeg".to_string(),
-            event_key: Some("dpeg:tenant-a:USDC/USD".to_string()),
+            pattern_id: "depeg".to_string(),
+            event_key: Some("depeg:tenant-a:USDC/USD".to_string()),
             subject_type: Some("market".to_string()),
             subject_key: Some("tenant-a:USDC/USD".to_string()),
             tenant_id: Some("tenant-a".to_string()),
@@ -2081,7 +2081,7 @@ mod tests {
         let alert = alert_from_detection(&detection).expect("alert should build");
 
         assert!(!alert.alert_id.is_nil());
-        assert_eq!(alert.pattern_id, "dpeg");
+        assert_eq!(alert.pattern_id, "depeg");
         assert_eq!(alert.severity, Severity::Critical);
         assert_eq!(alert.chain, Chain::Base);
         assert_eq!(alert.chain_slug, "base");
