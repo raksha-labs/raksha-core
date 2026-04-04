@@ -364,6 +364,19 @@ struct EvidenceContributor {
     contributes_to_breach: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct SystemicMarketContext {
+    market_key: String,
+    divergence_pct: f64,
+    trigger_floor_pct: f64,
+}
+
+#[derive(Debug, Clone)]
+struct ContextAssessment {
+    classification: ContextClassification,
+    systemic_markets: Vec<SystemicMarketContext>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct DepegAlertState {
     pub cooldown_until: Option<DateTime<Utc>>,
@@ -637,15 +650,18 @@ impl DepegPattern {
             .cloned()
     }
 
-    fn classify_context(
+    fn assess_context(
         &self,
         policy: &DepegPolicy,
         tenant_id: &str,
         replay_scope: &str,
         now: DateTime<Utc>,
-    ) -> ContextClassification {
+    ) -> ContextAssessment {
         if !policy.toggles.contagion_detection {
-            return ContextClassification::Isolated;
+            return ContextAssessment {
+                classification: ContextClassification::Isolated,
+                systemic_markets: Vec::new(),
+            };
         }
 
         let tenant_policies: Vec<DepegPolicy> = self
@@ -654,7 +670,7 @@ impl DepegPattern {
             .filter(|((candidate_tenant, _), _)| candidate_tenant == tenant_id)
             .map(|(_, candidate_policy)| candidate_policy.clone())
             .collect();
-        let mut systemic_markets = 0usize;
+        let mut systemic_markets = Vec::new();
         for candidate_policy in tenant_policies {
             let candidate_market = candidate_policy.market_key.clone();
             if !candidate_market.to_ascii_uppercase().ends_with("/USD") {
@@ -672,14 +688,43 @@ impl DepegPattern {
                 market_divergence_pct(&candidate_policy, &quote_values, now)
             {
                 if divergence_pct >= candidate_policy.systemic_floor_pct {
-                    systemic_markets += 1;
+                    systemic_markets.push(SystemicMarketContext {
+                        market_key: candidate_market,
+                        divergence_pct,
+                        trigger_floor_pct: candidate_policy.systemic_floor_pct,
+                    });
                 }
             }
-            if systemic_markets >= 2 {
-                return ContextClassification::Systemic;
-            }
         }
-        ContextClassification::Isolated
+        systemic_markets.sort_by(|left, right| {
+            right
+                .divergence_pct
+                .partial_cmp(&left.divergence_pct)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.market_key.cmp(&right.market_key))
+        });
+        let classification = if systemic_markets.len() >= 2 {
+            ContextClassification::Systemic
+        } else {
+            systemic_markets.clear();
+            ContextClassification::Isolated
+        };
+        ContextAssessment {
+            classification,
+            systemic_markets,
+        }
+    }
+
+    #[cfg(test)]
+    fn classify_context(
+        &self,
+        policy: &DepegPolicy,
+        tenant_id: &str,
+        replay_scope: &str,
+        now: DateTime<Utc>,
+    ) -> ContextClassification {
+        self.assess_context(policy, tenant_id, replay_scope, now)
+            .classification
     }
 }
 
@@ -796,15 +841,16 @@ impl DetectionPattern for DepegPattern {
             .unwrap_or_default();
 
         let quotes = latest_quotes_for_time(market_quotes, evaluation_time);
-        let classification =
-            self.classify_context(&policy, &event.tenant_id, &replay_scope, evaluation_time);
+        let context =
+            self.assess_context(&policy, &event.tenant_id, &replay_scope, evaluation_time);
         let mut outcome = evaluate_policy(
             &policy,
             &quotes,
             &current_state,
             evaluation_time,
-            classification,
+            context.classification,
         )?;
+        outcome.snapshot.systemic_markets = context.systemic_markets;
         let min_healthy_sources = policy
             .source_filter
             .min_healthy_sources
@@ -868,6 +914,7 @@ impl DetectionPattern for DepegPattern {
             "incident_transition": outcome.transition,
             "peg_target": policy.peg_target,
             "contributing_sources": outcome.snapshot.contributors,
+            "systemic_markets": outcome.snapshot.systemic_markets,
         });
         let severity_str = outcome
             .snapshot
@@ -925,6 +972,7 @@ struct ConsensusSnapshot {
     confidence_breakdown: HashMap<String, f64>,
     severity: Option<Severity>,
     contributors: Vec<EvidenceContributor>,
+    systemic_markets: Vec<SystemicMarketContext>,
 }
 
 struct EvaluationOutcome {
@@ -995,6 +1043,7 @@ fn evaluate_policy(
                 confidence_breakdown: HashMap::new(),
                 severity: None,
                 contributors: Vec::new(),
+                systemic_markets: Vec::new(),
             },
             should_emit_alert: false,
             next_state: DepegAlertState::default(),
@@ -1172,6 +1221,7 @@ fn evaluate_policy(
             confidence_breakdown,
             severity,
             contributors,
+            systemic_markets: Vec::new(),
         },
         should_emit_alert,
         next_state,
@@ -1574,6 +1624,10 @@ fn build_detection(
     oracle_context.insert(
         "contributing_sources".to_string(),
         serde_json::json!(snapshot.contributors),
+    );
+    oracle_context.insert(
+        "systemic_markets".to_string(),
+        serde_json::json!(snapshot.systemic_markets),
     );
 
     let actions_recommended = recommended_actions_for_severity(&severity);
