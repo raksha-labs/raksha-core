@@ -19,7 +19,7 @@ variable "vpc_cidr" {
 variable "db_instance_class" {
   type        = string
   description = "RDS instance type"
-  default     = "db.t4g.medium"
+  default     = "db.t4g.micro" # MVP: ~$12/mo vs $65/mo for medium
 }
 
 variable "db_name" {

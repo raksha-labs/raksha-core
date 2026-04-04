@@ -75,10 +75,7 @@ jobs:
       - name: Normalize prod-safe options
         run: |
           if [ "$ENVIRONMENT" = "prod" ]; then
-            echo "::warning title=Prod safety::Prod start workflow only scales ECS services. RDS/Redis/NAT actions are being disabled."
-            echo "START_RDS=false" >> $GITHUB_ENV
-            echo "RECREATE_REDIS=false" >> $GITHUB_ENV
-            echo "RECREATE_NAT=false" >> $GITHUB_ENV
+            echo "::warning title=Prod environment::Starting production services."
           fi
 
       - name: Setup Terraform

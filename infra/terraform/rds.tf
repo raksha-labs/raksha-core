@@ -34,8 +34,8 @@ resource "aws_db_instance" "main" {
   engine_version = "15.5"
   instance_class = var.db_instance_class
 
-  allocated_storage     = 100
-  max_allocated_storage = 500
+  allocated_storage     = 20
+  max_allocated_storage = 100
   storage_type          = "gp3"
   storage_encrypted     = true
 
@@ -46,7 +46,7 @@ resource "aws_db_instance" "main" {
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
 
-  multi_az                = true
+  multi_az                = false # MVP: disable multi-AZ to save ~50% on compute
   publicly_accessible     = false
   backup_retention_period = 7
   backup_window           = "03:00-04:00"

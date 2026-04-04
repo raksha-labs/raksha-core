@@ -155,7 +155,7 @@ variable "fargate_spot_scaling_classes" {
 variable "db_instance_class" {
   description = "RDS instance class"
   type        = string
-  default     = "db.t4g.medium"
+  default     = "db.t4g.micro" # Stage: smallest instance
 }
 
 variable "db_name" {

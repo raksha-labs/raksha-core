@@ -69,10 +69,7 @@ jobs:
       - name: Normalize prod-safe options
         run: |
           if [ "$ENVIRONMENT" = "prod" ]; then
-            echo "::warning title=Prod safety::Prod stop workflow only scales ECS services. RDS/Redis/NAT actions are being disabled."
-            echo "STOP_RDS=false" >> $GITHUB_ENV
-            echo "DELETE_REDIS=false" >> $GITHUB_ENV
-            echo "DESTROY_NAT=false" >> $GITHUB_ENV
+            echo "::warning title=Prod environment::Stopping production services. RDS will auto-restart after 7 days if not manually started."
           fi
 
       - name: Get current costs
