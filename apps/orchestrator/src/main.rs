@@ -412,6 +412,7 @@ fn alert_from_detection(detection: &DetectionResult) -> Result<AlertEvent> {
         actions_recommended: detection.actions_recommended.clone(),
         is_simulated: detection.is_simulated,
         simulation_run_id: detection.simulation_run_id.clone(),
+        detected_at: detection.detected_at,
         created_at: Utc::now(),
     })
 }
@@ -1616,6 +1617,7 @@ mod tests {
             actions_recommended: vec!["REBALANCE_TO_ETH".to_string()],
             is_simulated: false,
             simulation_run_id: None,
+            detected_at: Utc::now(),
             created_at: Utc::now(),
         }
     }

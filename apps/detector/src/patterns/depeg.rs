@@ -1054,8 +1054,11 @@ fn evaluate_policy(
 
     let weighted_median_price =
         weighted_median(&weighted_points).ok_or_else(|| anyhow!("weighted median failed"))?;
-    let divergence_pct =
-        ((weighted_median_price - policy.peg_target).abs() / policy.peg_target) * 100.0;
+    // Round divergence to 6 decimal places to eliminate floating-point noise in threshold checks.
+    // Without rounding, values like 0.009999999999998899 could falsely satisfy >= 0.01 comparisons.
+    let divergence_pct = round_to_6dp(
+        ((weighted_median_price - policy.peg_target).abs() / policy.peg_target) * 100.0,
+    );
     let severity = severity_for_divergence(divergence_pct, &selected_bands);
     let alert_direction = (weighted_median_price - policy.peg_target).signum();
 
@@ -1159,7 +1162,8 @@ fn evaluate_policy(
                 Some(context_classification_str(&classification).to_string());
             if next_state.below_severity_blocks >= policy.deescalation_blocks && !cooldown_active {
                 if let Some(curr_severity) = severity.clone() {
-                    should_emit_alert = true;
+                    // De-escalation updates internal state only — no alert record emitted.
+                    // The incident lifecycle is tracked via state transitions, not phantom alerts.
                     transition = Some(IncidentTransition::Deescalate);
                     emitted_severity = Some(curr_severity.clone());
                     next_state.last_alerted_at = Some(now);
@@ -1194,7 +1198,9 @@ fn evaluate_policy(
             }
 
             if next_state.below_trigger_blocks >= policy.resolution_blocks {
-                should_emit_alert = true;
+                // Resolution updates internal state only — no alert record emitted.
+                // Per spec §11: resolution sends a resolution *notification*, not a new alert.
+                // The incident is closed via state transition, preventing phantom alert records.
                 transition = Some(IncidentTransition::Resolve);
                 emitted_severity = previous_active.clone();
                 next_state.last_alerted_at = Some(now);
@@ -1230,6 +1236,13 @@ fn evaluate_policy(
     })
 }
 
+/// Round a floating-point value to 6 decimal places.
+/// Used to ensure threshold comparisons are not affected by floating-point noise.
+/// E.g., 0.009999999999998899 becomes 0.010000, so the >= 0.01 check is deterministic.
+fn round_to_6dp(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
+
 fn market_divergence_pct(
     policy: &DepegPolicy,
     quotes: &[QuoteInput],
@@ -1254,7 +1267,9 @@ fn market_divergence_pct(
         weighted_points.push((quote.price, weight));
     }
     let median = weighted_median(&weighted_points)?;
-    Some(((median - policy.peg_target).abs() / policy.peg_target) * 100.0)
+    Some(round_to_6dp(
+        ((median - policy.peg_target).abs() / policy.peg_target) * 100.0,
+    ))
 }
 
 fn oracle_confirmation_met(
@@ -1275,7 +1290,7 @@ fn oracle_confirmation_met(
         if age_ms > stale_ms {
             return false;
         }
-        ((quote.price - peg_target).abs() / peg_target) * 100.0 >= trigger_floor_pct
+        round_to_6dp(((quote.price - peg_target).abs() / peg_target) * 100.0) >= trigger_floor_pct
     })
 }
 
@@ -1362,7 +1377,8 @@ fn build_evidence_contributors(
                 .signed_duration_since(quote.observed_at)
                 .num_milliseconds()
                 .max(0);
-            let divergence_pct = ((quote.price - peg_target).abs() / peg_target) * 100.0;
+            let divergence_pct =
+                round_to_6dp(((quote.price - peg_target).abs() / peg_target) * 100.0);
             let supports_alert_direction =
                 alert_direction != 0.0 && (quote.price - peg_target).signum() == alert_direction;
             let confirms_oracle =
@@ -1525,9 +1541,9 @@ fn build_detection(
 ) -> DetectionResult {
     let (is_simulated, simulation_run_id) = simulation_metadata_from_event(event);
     let subject_key = format!("{}:{}", policy.tenant_id, policy.market_key);
-    let divergence_str = format!("{:.3}%", snapshot.divergence_pct);
+    let divergence_str = format!("{:.6}%", snapshot.divergence_pct);
     let description = format!(
-        "Market {} deviated {:.3}% from peg target {:.4} (weighted median: {:.4}). {} source(s), quorum: {}.",
+        "Market {} deviated {:.6}% from peg target {:.6} (median: {:.6}). {} source(s), quorum: {}.",
         policy.market_key,
         snapshot.divergence_pct,
         policy.peg_target,
@@ -1663,6 +1679,7 @@ fn build_detection(
         actions_recommended,
         is_simulated,
         simulation_run_id,
+        detected_at: now,
         created_at: now,
     }
 }
@@ -2277,13 +2294,9 @@ mod tests {
             )
             .expect("evaluation");
             if i < policy.deescalation_blocks {
-                assert!(!outcome.should_emit_alert);
+                assert!(outcome.transition.is_none());
             } else {
-                assert!(outcome.should_emit_alert);
-                assert!(matches!(
-                    outcome.transition,
-                    Some(IncidentTransition::Deescalate)
-                ));
+                assert_lifecycle_transition(&outcome, IncidentTransition::Deescalate);
             }
             state = outcome.next_state;
         }
@@ -2317,13 +2330,9 @@ mod tests {
             )
             .expect("evaluation");
             if i < policy.resolution_blocks {
-                assert!(!outcome.should_emit_alert);
+                assert!(outcome.transition.is_none());
             } else {
-                assert!(outcome.should_emit_alert);
-                assert!(matches!(
-                    outcome.transition,
-                    Some(IncidentTransition::Resolve)
-                ));
+                assert_lifecycle_transition(&outcome, IncidentTransition::Resolve);
             }
             state = outcome.next_state;
         }
@@ -2424,11 +2433,7 @@ mod tests {
             ContextClassification::Isolated,
         )
         .expect("evaluation");
-        assert!(emitted.should_emit_alert);
-        assert!(matches!(
-            emitted.transition,
-            Some(IncidentTransition::Deescalate)
-        ));
+        assert_lifecycle_transition(&emitted, IncidentTransition::Deescalate);
         assert_eq!(emitted.next_state.last_severity.as_deref(), Some("medium"));
         assert_eq!(emitted.next_state.below_severity_blocks, 0);
     }
@@ -2545,6 +2550,16 @@ mod tests {
     }
 
     fn assert_transition(outcome: &EvaluationOutcome, expected: IncidentTransition) {
+        assert_eq!(outcome.transition, Some(expected), "Transition mismatch");
+    }
+
+    /// Assert that a lifecycle transition occurred (resolve/deescalate) which updates
+    /// internal state but does NOT emit an alert record.
+    fn assert_lifecycle_transition(outcome: &EvaluationOutcome, expected: IncidentTransition) {
+        assert!(
+            !outcome.should_emit_alert,
+            "Lifecycle transitions (resolve/deescalate) should not emit alerts"
+        );
         assert_eq!(outcome.transition, Some(expected), "Transition mismatch");
     }
 
@@ -3319,11 +3334,14 @@ mod tests {
             )
             .expect("evaluation");
             if i < 30 {
-                assert!(!outcome.should_emit_alert, "Should not emit at block {}", i);
+                assert!(
+                    outcome.transition.is_none(),
+                    "Should not transition at block {}",
+                    i
+                );
                 assert_eq!(outcome.next_state.below_trigger_blocks, i);
             } else {
-                assert!(outcome.should_emit_alert, "Should emit resolve at block 30");
-                assert_transition(&outcome, IncidentTransition::Resolve);
+                assert_lifecycle_transition(&outcome, IncidentTransition::Resolve);
             }
             state = outcome.next_state;
         }
@@ -3800,13 +3818,13 @@ mod tests {
         }
         assert_eq!(s.below_severity_blocks, 4);
 
-        // 5th block — deescalation fires
+        // 5th block — deescalation fires (state transition, no alert record)
         let ts = now + Duration::seconds(4);
         let q = make_quotes(medium_price, Some(medium_price), Some(medium_price), 12, ts);
         let final_out = evaluate_policy(&policy, &q, &s, ts, ContextClassification::Isolated)
             .expect("evaluation");
-        assert_alert_with_severity(&final_out, Severity::Medium);
-        assert_transition(&final_out, IncidentTransition::Deescalate);
+        assert_lifecycle_transition(&final_out, IncidentTransition::Deescalate);
+        assert_eq!(final_out.emitted_severity, Some(Severity::Medium));
     }
 
     /// TC-D-708: Stale state recovery — if last_severity references a state that
@@ -4263,7 +4281,7 @@ mod tests {
         assert_transition(&s2, IncidentTransition::Escalate);
         assert_alert_with_severity(&s2, Severity::Critical);
 
-        // Steps 3-4: Deescalate (2 blocks at MEDIUM)
+        // Steps 3-4: Deescalate (2 blocks at MEDIUM — lifecycle transition, no alert record)
         let mut state = s2.next_state;
         for i in 2..4 {
             let ts = now + Duration::seconds(i);
@@ -4271,13 +4289,13 @@ mod tests {
             let out = evaluate_policy(&policy, &q, &state, ts, ContextClassification::Isolated)
                 .expect("evaluation");
             if i == 3 {
-                assert_transition(&out, IncidentTransition::Deescalate);
-                assert_alert_with_severity(&out, Severity::Medium);
+                assert_lifecycle_transition(&out, IncidentTransition::Deescalate);
+                assert_eq!(out.emitted_severity, Some(Severity::Medium));
             }
             state = out.next_state;
         }
 
-        // Steps 5-6: Resolve (2 blocks below trigger floor)
+        // Steps 5-6: Resolve (2 blocks below trigger floor — lifecycle transition, no alert record)
         let recovery_price = price_from_deviation(1.0, 0.10);
         for i in 4..6 {
             let ts = now + Duration::seconds(i);
@@ -4285,7 +4303,7 @@ mod tests {
             let out = evaluate_policy(&policy, &q, &state, ts, ContextClassification::Isolated)
                 .expect("evaluation");
             if i == 5 {
-                assert_transition(&out, IncidentTransition::Resolve);
+                assert_lifecycle_transition(&out, IncidentTransition::Resolve);
             }
             state = out.next_state;
         }

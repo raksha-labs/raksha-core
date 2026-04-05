@@ -256,6 +256,7 @@ impl GenericRulePattern {
             ],
             is_simulated,
             simulation_run_id,
+            detected_at: Utc::now(),
             created_at: Utc::now(),
         }
     }
