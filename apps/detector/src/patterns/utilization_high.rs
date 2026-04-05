@@ -754,6 +754,24 @@ impl UtilizationHighPattern {
 
         let rate_10min = rate_of_change(&state.samples, context.observed_at, 10).unwrap_or(0.0);
         let rate_60min = rate_of_change(&state.samples, context.observed_at, 60).unwrap_or(0.0);
+        let available_liquidity_usd =
+            (sample.tvl_usd * (1.0 - (sample.utilization_pct / 100.0))).max(0.0);
+        let breached_threshold_pct = match context.severity {
+            Severity::Critical => rule.critical_threshold_pct,
+            Severity::High => rule.high_threshold_pct,
+            Severity::Medium | Severity::Low | Severity::Info => rule.medium_threshold_pct,
+        };
+        let resolution_threshold_pct =
+            rule.resolution_threshold_for(severity_to_str(context.severity));
+        let exit_feasibility = if state.paused_status {
+            "protocol_paused"
+        } else if sample.utilization_pct >= rule.critical_threshold_pct {
+            "severely_constrained"
+        } else if sample.utilization_pct >= rule.high_threshold_pct {
+            "constrained"
+        } else {
+            "open"
+        };
 
         let mut oracle_context = HashMap::new();
         oracle_context.insert("protocol_id".to_string(), json!(sample.protocol_id));
@@ -772,6 +790,31 @@ impl UtilizationHighPattern {
             json!(sample.total_borrowed_tokens),
         );
         oracle_context.insert("tvl_usd".to_string(), json!(sample.tvl_usd));
+        oracle_context.insert(
+            "available_liquidity_usd".to_string(),
+            json!(available_liquidity_usd),
+        );
+        oracle_context.insert("exit_feasibility".to_string(), json!(exit_feasibility));
+        oracle_context.insert(
+            "breached_threshold_pct".to_string(),
+            json!(breached_threshold_pct),
+        );
+        oracle_context.insert(
+            "resolution_threshold_pct".to_string(),
+            json!(resolution_threshold_pct),
+        );
+        oracle_context.insert(
+            "medium_threshold_pct".to_string(),
+            json!(rule.medium_threshold_pct),
+        );
+        oracle_context.insert(
+            "high_threshold_pct".to_string(),
+            json!(rule.high_threshold_pct),
+        );
+        oracle_context.insert(
+            "critical_threshold_pct".to_string(),
+            json!(rule.critical_threshold_pct),
+        );
         oracle_context.insert("rate_of_change_10min".to_string(), json!(rate_10min));
         oracle_context.insert("rate_of_change_60min".to_string(), json!(rate_60min));
         oracle_context.insert("paused_status".to_string(), json!(state.paused_status));
@@ -852,6 +895,7 @@ impl UtilizationHighPattern {
             actions_recommended: actions_for_severity(context.severity, state.paused_status),
             is_simulated,
             simulation_run_id,
+            detected_at: context.observed_at,
             created_at: context.observed_at,
         }
     }
@@ -868,6 +912,15 @@ impl UtilizationHighPattern {
             .incident_active_since
             .map(|start| (context.observed_at - start).num_seconds())
             .unwrap_or(0);
+        let available_liquidity_usd =
+            (sample.tvl_usd * (1.0 - (sample.utilization_pct / 100.0))).max(0.0);
+        let breached_threshold_pct = match context.resolved_severity {
+            Severity::Critical => rule.critical_threshold_pct,
+            Severity::High => rule.high_threshold_pct,
+            Severity::Medium | Severity::Low | Severity::Info => rule.medium_threshold_pct,
+        };
+        let resolution_threshold_pct =
+            rule.resolution_threshold_for(severity_to_str(context.resolved_severity));
 
         let mut oracle_context = HashMap::new();
         oracle_context.insert("protocol_id".to_string(), json!(sample.protocol_id));
@@ -876,6 +929,19 @@ impl UtilizationHighPattern {
         oracle_context.insert(
             "current_utilization_pct".to_string(),
             json!(sample.utilization_pct),
+        );
+        oracle_context.insert(
+            "available_liquidity_usd".to_string(),
+            json!(available_liquidity_usd),
+        );
+        oracle_context.insert("exit_feasibility".to_string(), json!("recovering"));
+        oracle_context.insert(
+            "breached_threshold_pct".to_string(),
+            json!(breached_threshold_pct),
+        );
+        oracle_context.insert(
+            "resolution_threshold_pct".to_string(),
+            json!(resolution_threshold_pct),
         );
         oracle_context.insert("transition".to_string(), json!("resolve"));
         oracle_context.insert("incident_duration_sec".to_string(), json!(duration_sec));
@@ -951,6 +1017,7 @@ impl UtilizationHighPattern {
             ],
             is_simulated,
             simulation_run_id,
+            detected_at: context.observed_at,
             created_at: context.observed_at,
         }
     }
@@ -1033,6 +1100,7 @@ impl UtilizationHighPattern {
             },
             is_simulated,
             simulation_run_id,
+            detected_at: now,
             created_at: now,
         }
     }

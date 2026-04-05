@@ -466,10 +466,16 @@ impl TvlDropPattern {
         oracle_context.insert("chain_slug".to_string(), json!(sample.chain_slug));
         oracle_context.insert("market_id".to_string(), json!(sample.market_id));
         oracle_context.insert("tvl_usd".to_string(), json!(sample.tvl_usd));
+        oracle_context.insert("current_tvl_usd".to_string(), json!(sample.tvl_usd));
         oracle_context.insert(
             "fast_window_reference_tvl_usd".to_string(),
             json!(evaluation.fast_window_reference_tvl_usd),
         );
+        oracle_context.insert(
+            "window_start_tvl_usd".to_string(),
+            json!(evaluation.fast_window_reference_tvl_usd),
+        );
+        oracle_context.insert("drop_pct".to_string(), json!(evaluation.selected_drop_pct));
         oracle_context.insert(
             "time_to_reach_current_drop_minutes".to_string(),
             json!(evaluation.time_to_reach_current_drop_minutes),
@@ -487,8 +493,30 @@ impl TvlDropPattern {
             json!(evaluation.velocity_pattern),
         );
         oracle_context.insert(
+            "velocity_classification".to_string(),
+            json!(evaluation.velocity_pattern),
+        );
+        oracle_context.insert(
             "breached_branches".to_string(),
             json!(evaluation.breached_branches),
+        );
+        let breached_threshold_branch = evaluation
+            .breached_branches
+            .first()
+            .map(String::as_str)
+            .unwrap_or("fast");
+        let breached_threshold_pct = match breached_threshold_branch {
+            "velocity" => rule.velocity_critical_pct,
+            "slow" => rule.slow_drop_pct,
+            _ => rule.fast_drop_pct,
+        };
+        oracle_context.insert(
+            "breached_threshold_branch".to_string(),
+            json!(breached_threshold_branch),
+        );
+        oracle_context.insert(
+            "breached_threshold_pct".to_string(),
+            json!(breached_threshold_pct),
         );
         oracle_context.insert(
             "transition".to_string(),
@@ -587,6 +615,7 @@ impl TvlDropPattern {
             actions_recommended: recommended_actions_for_severity(&context.severity),
             is_simulated,
             simulation_run_id,
+            detected_at: context.now,
             created_at: context.now,
         }
     }
@@ -677,6 +706,7 @@ impl TvlDropPattern {
             },
             is_simulated,
             simulation_run_id,
+            detected_at: context.now,
             created_at: context.now,
         }
     }

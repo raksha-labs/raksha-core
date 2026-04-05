@@ -448,6 +448,7 @@ fn build_detection(
         ],
         is_simulated,
         simulation_run_id,
+        detected_at: now,
         created_at: now,
     }
 }
