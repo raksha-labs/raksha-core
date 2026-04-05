@@ -51,8 +51,12 @@ resource "aws_cloudwatch_dashboard" "main" {
   })
 }
 
+locals {
+  alarm_services = coalesce(var.alarm_service_names, var.service_names)
+}
+
 resource "aws_cloudwatch_metric_alarm" "ecs_cpu_high" {
-  for_each = toset(var.service_names)
+  for_each = toset(local.alarm_services)
 
   alarm_name          = "raksha-${var.environment}-${each.key}-cpu-high"
   comparison_operator = "GreaterThanThreshold"
@@ -75,7 +79,7 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu_high" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "ecs_memory_high" {
-  for_each = toset(var.service_names)
+  for_each = toset(local.alarm_services)
 
   alarm_name          = "raksha-${var.environment}-${each.key}-memory-high"
   comparison_operator = "GreaterThanThreshold"

@@ -35,6 +35,10 @@ async fn main() -> Result<()> {
         .await
         .context("failed to initialize indexer stream configuration repository")?;
     let stream_purge_enabled = read_bool_env("STREAM_PURGE_ENABLED", false);
+    let purge_retention_seconds: i64 = std::env::var("PURGE_RETENTION_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7200); // default 2 hours
     let live_streams_enabled = read_bool_env("INDEXER_ENABLE_LIVE_STREAMS", true);
 
     if let Some(status) = health_status.as_ref() {
@@ -45,6 +49,7 @@ async fn main() -> Result<()> {
             "config_source=catalog.source_stream_configs".to_string(),
             "reload_triggers=LISTEN source_stream_config_changed + POST /reload + periodic reconcile".to_string(),
             format!("stream_purge_enabled={stream_purge_enabled}"),
+            format!("purge_retention_seconds={purge_retention_seconds}"),
             format!("live_streams_enabled={live_streams_enabled}"),
         ];
         health.is_ready = true;
@@ -60,6 +65,7 @@ async fn main() -> Result<()> {
         stream,
         database_url,
         stream_purge_enabled,
+        purge_retention_seconds,
         live_streams_enabled,
         supervisor_command_rx,
     )

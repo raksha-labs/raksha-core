@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use state_manager::{
     describe_redis_url, AlertEvidenceOperationalQuery, AlertEvidenceOperationalRow,
-    AlertEvidenceSnapshotRecord, EntityExposureRecord, IncidentKey, IncidentRecord,
-    PostgresRepository, RedisStreamPublisher,
+    AlertEvidenceSimulationQuery, AlertEvidenceSnapshotRecord, EntityExposureRecord, IncidentKey,
+    IncidentRecord, PostgresRepository, RedisStreamPublisher,
 };
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -1436,6 +1436,17 @@ async fn persist_alert_evidence_snapshot(
     let mut matched_sources = HashSet::new();
 
     for row in &operational_rows {
+        // Skip events with no useful data (e.g. RPC errors where no price/value was captured).
+        // These pollute the evidence chart with empty rows at wrong timestamps.
+        let has_rpc_error = row
+            .payload
+            .get("rpc_state_error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if row.price.is_none() && has_rpc_error {
+            continue;
+        }
+
         let matched_contributor = contributors
             .iter()
             .find(|contributor| same_operational_event(row, contributor));
@@ -1470,6 +1481,61 @@ async fn persist_alert_evidence_snapshot(
             raw_ref_type: Some("catalog.ingest_operational_events".to_string()),
             raw_ref_id: Some(row.ingest_event_id.clone()),
         });
+    }
+
+    // For simulated alerts, also load events from the scenario bundle.
+    // Bundle events use original scenario timestamps (not wall-clock) and contain
+    // the actual TVL/utilization values that operational events may lack.
+    if alert.is_simulated {
+        if let Some(run_id) = alert.simulation_run_id.as_deref() {
+            let sim_rows = repo
+                .load_simulation_events_for_alert_evidence(AlertEvidenceSimulationQuery {
+                    simulation_run_id: run_id,
+                    source_ids: &source_ids,
+                    window_start: window_start - ChronoDuration::hours(1),
+                    window_end: window_end + ChronoDuration::hours(1),
+                })
+                .await
+                .unwrap_or_default();
+
+            for row in &sim_rows {
+                let payload = if row.published_payload.is_object()
+                    && row
+                        .published_payload
+                        .as_object()
+                        .is_none_or(|m| !m.is_empty())
+                {
+                    row.published_payload.clone()
+                } else {
+                    row.original_payload.clone()
+                };
+                let price = payload
+                    .get("tvl_usd")
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| payload.get("utilization").and_then(|v| v.as_f64()))
+                    .or_else(|| payload.get("price").and_then(|v| v.as_f64()));
+
+                records.push(AlertEvidenceSnapshotRecord {
+                    alert_id: alert.alert_id.to_string(),
+                    incident_id: alert.incident_id.clone(),
+                    tenant_id: tenant_id.clone(),
+                    pattern_id: Some(alert.pattern_id.clone()),
+                    source_id: row.source_id.clone(),
+                    source_type: "evm_chain".to_string(),
+                    event_type: row.event_type.clone(),
+                    market_key: market_key.clone(),
+                    price,
+                    observed_at: row.observed_at,
+                    event_ts: Some(row.observed_at),
+                    tx_hash: None,
+                    block_number: payload.get("block_number").and_then(|v| v.as_i64()),
+                    payload,
+                    normalized_fields: serde_json::json!({}),
+                    raw_ref_type: Some("workbench.simulation_run_events".to_string()),
+                    raw_ref_id: Some(row.run_event_id.clone()),
+                });
+            }
+        }
     }
 
     for contributor in &contributors {

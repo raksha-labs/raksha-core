@@ -463,6 +463,7 @@ module "observability" {
   environment         = var.environment
   cluster_name        = module.compute.cluster_name
   service_names       = keys(local.service_catalog_map)
+  alarm_service_names = ["detector", "indexer", "orchestrator"]
   log_retention_days  = var.log_retention_days
   alarm_sns_topic_arn = module.cost_controls.budget_alert_topic_arn
   tags                = var.tags

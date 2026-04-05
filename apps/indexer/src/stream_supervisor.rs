@@ -25,7 +25,6 @@ use crate::stream_worker::{run_stream_worker, RuntimeStreamConfig};
 const NOTIFY_CONNECTED_RECONCILE_INTERVAL_SECS: u64 = 600;
 const NOTIFY_DEGRADED_RECONCILE_INTERVAL_SECS: u64 = 30;
 const DEFAULT_PURGE_INTERVAL_SECS: u64 = 15;
-const DEFAULT_RETENTION_SECONDS: i64 = 300;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NotifySignal {
@@ -50,6 +49,7 @@ pub async fn run_stream_supervisor(
     stream: RedisStreamPublisher,
     database_url: String,
     purge_enabled: bool,
+    purge_retention_seconds: i64,
     live_streams_enabled: bool,
     mut command_rx: mpsc::Receiver<SupervisorCommand>,
 ) -> Result<()> {
@@ -165,13 +165,34 @@ pub async fn run_stream_supervisor(
                 }
             }
             _ = purge_tick.tick(), if purge_enabled => {
-                match repo.purge_old_tick_events(DEFAULT_RETENTION_SECONDS).await {
+                let retention = purge_retention_seconds;
+                // Purge operational events (quote/trade rows used by System Health UI)
+                match repo.purge_old_tick_events(retention).await {
                     Ok(deleted) => {
                         if deleted > 0 {
-                            info!(deleted, retention_seconds = DEFAULT_RETENTION_SECONDS, "purged old quote/trade source feed rows");
+                            info!(deleted, retention_seconds = retention, "purged old quote/trade operational rows");
                         }
                     }
-                    Err(error) => common::log_error!(warn, error, "failed purging old quote/trade source feed rows"),
+                    Err(error) => common::log_error!(warn, error, "failed purging old quote/trade operational rows"),
+                }
+                // Purge raw ingest tables (on the raw database, not core)
+                if let Some(raw) = raw_repo.as_ref() {
+                    match raw.purge_old_cex_ticks(retention).await {
+                        Ok(deleted) => { if deleted > 0 { info!(deleted, retention_seconds = retention, "purged old cex_ticks"); } }
+                        Err(error) => common::log_error!(warn, error, "failed purging old cex_ticks"),
+                    }
+                    match raw.purge_old_chain_events(retention).await {
+                        Ok(deleted) => { if deleted > 0 { info!(deleted, retention_seconds = retention, "purged old chain_events"); } }
+                        Err(error) => common::log_error!(warn, error, "failed purging old chain_events"),
+                    }
+                    match raw.purge_old_dex_events(retention).await {
+                        Ok(deleted) => { if deleted > 0 { info!(deleted, retention_seconds = retention, "purged old dex_events"); } }
+                        Err(error) => common::log_error!(warn, error, "failed purging old dex_events"),
+                    }
+                    match raw.purge_old_ingest_failures(retention).await {
+                        Ok(deleted) => { if deleted > 0 { info!(deleted, retention_seconds = retention, "purged old ingest_failures"); } }
+                        Err(error) => common::log_error!(warn, error, "failed purging old ingest_failures"),
+                    }
                 }
             }
         }

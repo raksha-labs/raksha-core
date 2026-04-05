@@ -101,19 +101,15 @@ impl RpcStateConnector {
             let raw_result = match provider.request::<_, String>("eth_call", params).await {
                 Ok(value) => value,
                 Err(error) => {
-                    self.pending.push_back(json!({
-                        "event_type": spec.event_type.unwrap_or_else(|| "protocol_state".to_string()),
-                        "metric": spec.metric,
-                        "protocol_id": spec.protocol_id,
-                        "chain_slug": spec.chain_slug,
-                        "market_id": spec.market_id,
-                        "contract_address": spec.contract_address,
-                        "call_data": spec.call_data,
-                        "chainId": self.chain_id,
-                        "block_number": block_number.as_u64(),
-                        "timestamp": observed_at.timestamp_millis(),
-                        "rpc_state_error": error.to_string(),
-                    }));
+                    // Log the error but do NOT emit a data event — RPC failures produce
+                    // empty payloads with no metric values, which pollute evidence snapshots
+                    // and break investigation charts.
+                    tracing::warn!(
+                        contract = %spec.contract_address,
+                        metric = ?spec.metric,
+                        error = %error,
+                        "rpc_state eth_call failed; skipping event"
+                    );
                     continue;
                 }
             };

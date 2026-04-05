@@ -19,6 +19,12 @@ variable "log_retention_days" {
   default     = 7
 }
 
+variable "alarm_service_names" {
+  description = "Service names to create CPU/memory alarms for. Defaults to all service_names if null. Set to a subset to stay within CloudWatch free tier (10 alarms)."
+  type        = list(string)
+  default     = null
+}
+
 variable "alarm_sns_topic_arn" {
   description = "SNS topic ARN for alarms"
   type        = string

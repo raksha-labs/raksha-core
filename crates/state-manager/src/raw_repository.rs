@@ -430,6 +430,70 @@ impl PostgresRawRepository {
         let index = self.next_client.fetch_add(1, Ordering::Relaxed) % client_count;
         self.clients[index].clone()
     }
+
+    pub async fn purge_old_cex_ticks(&self, retention_seconds: i64) -> Result<u64> {
+        let seconds = retention_seconds.max(0);
+        let client = self.client();
+        let deleted = client
+            .execute(
+                r#"
+                DELETE FROM raw_ingest.cex_ticks
+                WHERE observed_at < NOW() - ($1::BIGINT * INTERVAL '1 second')
+                  AND NOT is_simulated
+                "#,
+                &[&seconds],
+            )
+            .await?;
+        Ok(deleted)
+    }
+
+    pub async fn purge_old_chain_events(&self, retention_seconds: i64) -> Result<u64> {
+        let seconds = retention_seconds.max(0);
+        let client = self.client();
+        let deleted = client
+            .execute(
+                r#"
+                DELETE FROM raw_ingest.chain_events
+                WHERE observed_at < NOW() - ($1::BIGINT * INTERVAL '1 second')
+                  AND NOT is_simulated
+                "#,
+                &[&seconds],
+            )
+            .await?;
+        Ok(deleted)
+    }
+
+    pub async fn purge_old_dex_events(&self, retention_seconds: i64) -> Result<u64> {
+        let seconds = retention_seconds.max(0);
+        let client = self.client();
+        let deleted = client
+            .execute(
+                r#"
+                DELETE FROM raw_ingest.dex_events
+                WHERE observed_at < NOW() - ($1::BIGINT * INTERVAL '1 second')
+                  AND NOT is_simulated
+                "#,
+                &[&seconds],
+            )
+            .await?;
+        Ok(deleted)
+    }
+
+    pub async fn purge_old_ingest_failures(&self, retention_seconds: i64) -> Result<u64> {
+        let seconds = retention_seconds.max(0);
+        let client = self.client();
+        let deleted = client
+            .execute(
+                r#"
+                DELETE FROM raw_ingest.ingest_failures
+                WHERE created_at < NOW() - ($1::BIGINT * INTERVAL '1 second')
+                  AND NOT is_simulated
+                "#,
+                &[&seconds],
+            )
+            .await?;
+        Ok(deleted)
+    }
 }
 
 fn raw_database_pool_size() -> usize {

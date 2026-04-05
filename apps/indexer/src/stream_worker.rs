@@ -1251,7 +1251,7 @@ async fn process_payload(
                 raw_landing.status,
                 raw_landing.error.as_deref(),
             );
-            let record = to_operational_record(
+            let mut record = to_operational_record(
                 config,
                 &parsed,
                 payload_for_storage.clone(),
@@ -1263,7 +1263,20 @@ async fn process_payload(
                 is_simulated,
                 simulation_run_id.clone(),
             );
-            let inserted = repo.insert_ingest_operational_event(&record).await?;
+            // Fan-out: insert one operational event per tenant target so each tenant
+            // sees its own event counts in the System Health UI.
+            let inserted = if config.tenant_targets.len() > 1 {
+                let mut any_inserted = false;
+                for tenant in &config.tenant_targets {
+                    record.tenant_id = Some(tenant.clone());
+                    if repo.insert_ingest_operational_event(&record).await? {
+                        any_inserted = true;
+                    }
+                }
+                any_inserted
+            } else {
+                repo.insert_ingest_operational_event(&record).await?
+            };
             maybe_log_test_mode_payload(
                 config,
                 payload_ctx.test_mode_log_state,
@@ -1381,7 +1394,7 @@ async fn process_payload(
                 raw_landing.status,
                 raw_landing.error.as_deref(),
             );
-            let record = IngestOperationalEventRecord {
+            let mut record = IngestOperationalEventRecord {
                 stream_id: Some(config.stream_config_id.clone()),
                 source_id: config.source_id.clone(),
                 source_type: config.source_type.clone(),
@@ -1410,7 +1423,15 @@ async fn process_payload(
                 is_simulated,
                 simulation_run_id: simulation_run_id.clone(),
             };
-            let _ = repo.insert_ingest_operational_event(&record).await?;
+            // Fan-out per tenant for multi-tenant streams
+            if config.tenant_targets.len() > 1 {
+                for tenant in &config.tenant_targets {
+                    record.tenant_id = Some(tenant.clone());
+                    let _ = repo.insert_ingest_operational_event(&record).await?;
+                }
+            } else {
+                let _ = repo.insert_ingest_operational_event(&record).await?;
+            }
             maybe_log_test_mode_parse_failure(
                 config,
                 payload_ctx.test_mode_log_state,
