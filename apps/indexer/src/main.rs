@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use common::{init_logging, start_health_check_server_with_commands, HealthCommand};
 use dotenvy::dotenv;
+use rustls::crypto::ring::default_provider;
 use state_manager::{describe_redis_url, PostgresRepository, RedisStreamPublisher};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -21,6 +22,7 @@ const REDIS_STARTUP_RETRY_DELAY_MS: u64 = 2_000;
 async fn main() -> Result<()> {
     dotenv().ok();
     init_logging("info");
+    install_rustls_crypto_provider();
     let (command_tx, command_rx) = mpsc::channel(16);
     let command_token = std::env::var("AUTH_INTERNAL_SERVICE_TOKEN").ok();
     let health_status =
@@ -62,6 +64,10 @@ async fn main() -> Result<()> {
         supervisor_command_rx,
     )
     .await
+}
+
+fn install_rustls_crypto_provider() {
+    let _ = default_provider().install_default();
 }
 
 fn read_bool_env(name: &str, default: bool) -> bool {

@@ -1,7 +1,7 @@
 # Multi-stage build for Rust Raksha services.
 # Local Docker stack binaries: indexer + detector.
 
-FROM rust:slim AS builder
+FROM rust:slim-bookworm AS builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \

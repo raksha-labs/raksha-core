@@ -30,6 +30,7 @@ sha2 = { workspace = true }
 uuid = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
+rustls = { workspace = true }
 chainlink-data-streams-report = { workspace = true }
 chainlink-data-streams-sdk = { workspace = true }
 url = { workspace = true }
