@@ -30,6 +30,8 @@ const ALL_NOTIFICATION_CHANNELS: [&str; 5] = ["webhook", "slack", "telegram", "d
 const ALERT_EVIDENCE_BUFFER_BEFORE_MS: i64 = 30_000;
 const ALERT_EVIDENCE_BUFFER_AFTER_MS: i64 = 10_000;
 const DEFAULT_DUPLICATE_SUPPRESSION_SECONDS: i64 = 300;
+const DEFAULT_ALERT_CONTEXT_TTL_HOURS: i64 = 24;
+const DEFAULT_ALERT_CONTEXT_MAX_ENTRIES: usize = 10_000;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct EvidenceContributorTrace {
     source_id: String,
@@ -79,6 +81,18 @@ async fn main() -> Result<()> {
         .ok()
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(true); // Enable consumer groups by default for horizontal scaling
+    let alert_context_ttl = ChronoDuration::hours(
+        std::env::var("STATE_MANAGER_ALERT_CONTEXT_TTL_HOURS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_ALERT_CONTEXT_TTL_HOURS),
+    );
+    let alert_context_max_entries = std::env::var("STATE_MANAGER_ALERT_CONTEXT_MAX_ENTRIES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ALERT_CONTEXT_MAX_ENTRIES);
 
     let mut detections_last_id =
         std::env::var("STATE_MANAGER_DETECTIONS_START_ID").unwrap_or_else(|_| "0-0".to_string());
@@ -199,6 +213,12 @@ async fn main() -> Result<()> {
                     }
                 };
             alerts_by_event_key.insert(event_key.to_string(), dispatched);
+            prune_alert_contexts(
+                &mut alerts_by_event_key,
+                Utc::now(),
+                alert_context_ttl,
+                alert_context_max_entries,
+            );
             processed += 1;
 
             if use_consumer_group {
@@ -345,6 +365,12 @@ async fn main() -> Result<()> {
                 }
             };
             alerts_by_event_key.insert(update.event_key.clone(), dispatched);
+            prune_alert_contexts(
+                &mut alerts_by_event_key,
+                Utc::now(),
+                alert_context_ttl,
+                alert_context_max_entries,
+            );
             processed += 1;
 
             if use_consumer_group {
@@ -377,6 +403,31 @@ async fn main() -> Result<()> {
 fn default_consumer_name(prefix: &str) -> String {
     let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "local".to_string());
     format!("{prefix}-{hostname}")
+}
+
+fn prune_alert_contexts(
+    cache: &mut HashMap<String, AlertEvent>,
+    now: DateTime<Utc>,
+    ttl: ChronoDuration,
+    max_entries: usize,
+) {
+    let cutoff = now - ttl;
+    cache.retain(|_, alert| alert.created_at >= cutoff);
+
+    if cache.len() <= max_entries {
+        return;
+    }
+
+    let mut oldest_keys = cache
+        .iter()
+        .map(|(event_key, alert)| (event_key.clone(), alert.created_at))
+        .collect::<Vec<_>>();
+    oldest_keys.sort_by_key(|(_, created_at)| *created_at);
+
+    let remove_count = cache.len().saturating_sub(max_entries);
+    for (event_key, _) in oldest_keys.into_iter().take(remove_count) {
+        cache.remove(&event_key);
+    }
 }
 
 fn alert_from_detection(detection: &DetectionResult) -> Result<AlertEvent> {

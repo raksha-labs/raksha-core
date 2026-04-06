@@ -23,6 +23,8 @@ use uuid::Uuid;
 use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
 
 pub const PATTERN_ID: &str = "depeg";
+const DEPEG_QUOTE_CACHE_TTL_MINUTES: i64 = 120;
+const DEPEG_QUOTE_CACHE_MAX_KEYS: usize = 2_048;
 
 // ─── Policy types (inlined from crates/depeg-engine) ──────────────────────────
 
@@ -514,6 +516,43 @@ impl DepegPattern {
         overrides
     }
 
+    fn prune_quote_cache(&mut self, now: DateTime<Utc>, current_key: &(String, String, String)) {
+        let cutoff = now - Duration::minutes(DEPEG_QUOTE_CACHE_TTL_MINUTES);
+        self.quote_cache.retain(|key, market_quotes| {
+            if key == current_key {
+                return true;
+            }
+            latest_quote_timestamp(market_quotes)
+                .map(|observed_at| observed_at >= cutoff)
+                .unwrap_or(false)
+        });
+
+        if self.quote_cache.len() <= DEPEG_QUOTE_CACHE_MAX_KEYS {
+            return;
+        }
+
+        let mut oldest_keys = self
+            .quote_cache
+            .iter()
+            .filter(|(key, _)| *key != current_key)
+            .map(|(key, market_quotes)| {
+                (
+                    key.clone(),
+                    latest_quote_timestamp(market_quotes).unwrap_or(DateTime::<Utc>::MIN_UTC),
+                )
+            })
+            .collect::<Vec<_>>();
+        oldest_keys.sort_by_key(|(_, observed_at)| *observed_at);
+
+        let remove_count = self
+            .quote_cache
+            .len()
+            .saturating_sub(DEPEG_QUOTE_CACHE_MAX_KEYS);
+        for (key, _) in oldest_keys.into_iter().take(remove_count) {
+            self.quote_cache.remove(&key);
+        }
+    }
+
     fn effective_event_fields(
         &self,
         event: &UnifiedEvent,
@@ -821,16 +860,19 @@ impl DetectionPattern for DepegPattern {
         let source_kind = infer_source_kind(&format!("{:?}", event.source_type));
 
         // Update quote cache for this source.
-        let market_quotes = self.quote_cache.entry(policy_key.clone()).or_default();
-        remember_quote(
-            market_quotes,
-            QuoteInput {
-                source_id: event.source_id.clone(),
-                source_kind,
-                price,
-                observed_at: evaluation_time,
-            },
-        );
+        {
+            let market_quotes = self.quote_cache.entry(policy_key.clone()).or_default();
+            remember_quote(
+                market_quotes,
+                QuoteInput {
+                    source_id: event.source_id.clone(),
+                    source_kind,
+                    price,
+                    observed_at: evaluation_time,
+                },
+            );
+        }
+        self.prune_quote_cache(evaluation_time, &policy_key);
 
         // Use persisted state as the source of truth so cleanup/reset operations
         // take effect on the next replay without needing a detector restart.
@@ -840,7 +882,11 @@ impl DetectionPattern for DepegPattern {
             .and_then(|v| serde_json::from_value::<DepegAlertState>(v).ok())
             .unwrap_or_default();
 
-        let quotes = latest_quotes_for_time(market_quotes, evaluation_time);
+        let quotes = self
+            .quote_cache
+            .get(&policy_key)
+            .map(|market_quotes| latest_quotes_for_time(market_quotes, evaluation_time))
+            .unwrap_or_default();
         let context =
             self.assess_context(&policy, &event.tenant_id, &replay_scope, evaluation_time);
         let mut outcome = evaluate_policy(
@@ -1441,6 +1487,15 @@ fn remember_quote(market_quotes: &mut HashMap<String, Vec<QuoteInput>>, quote: Q
         let excess = history.len() - DepegPattern::MAX_QUOTE_HISTORY_PER_SOURCE;
         history.drain(0..excess);
     }
+}
+
+fn latest_quote_timestamp(
+    market_quotes: &HashMap<String, Vec<QuoteInput>>,
+) -> Option<DateTime<Utc>> {
+    market_quotes
+        .values()
+        .filter_map(|history| history.last().map(|quote| quote.observed_at))
+        .max()
 }
 
 fn latest_quotes_for_time(

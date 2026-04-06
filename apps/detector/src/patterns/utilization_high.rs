@@ -29,6 +29,8 @@ use uuid::Uuid;
 use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
 
 pub const PATTERN_ID: &str = "utilization_high";
+const UTILIZATION_STATE_CACHE_TTL_HOURS: i64 = 24;
+const UTILIZATION_STATE_CACHE_MAX_ENTRIES: usize = 4_096;
 
 // ─── Default thresholds ───────────────────────────────────────────────────────
 
@@ -741,6 +743,43 @@ impl UtilizationHighPattern {
         Ok(self.configs.get(tenant_id).cloned())
     }
 
+    fn prune_state_cache(&mut self, now: DateTime<Utc>, current_cache_key: &str) {
+        let cutoff = now - Duration::hours(UTILIZATION_STATE_CACHE_TTL_HOURS);
+        self.state_cache.retain(|cache_key, state| {
+            if cache_key == current_cache_key {
+                return true;
+            }
+            utilization_state_last_activity(state)
+                .map(|observed_at| observed_at >= cutoff)
+                .unwrap_or(false)
+        });
+
+        if self.state_cache.len() <= UTILIZATION_STATE_CACHE_MAX_ENTRIES {
+            return;
+        }
+
+        let mut oldest_keys = self
+            .state_cache
+            .iter()
+            .filter(|(cache_key, _)| cache_key.as_str() != current_cache_key)
+            .map(|(cache_key, state)| {
+                (
+                    cache_key.clone(),
+                    utilization_state_last_activity(state).unwrap_or(DateTime::<Utc>::MIN_UTC),
+                )
+            })
+            .collect::<Vec<_>>();
+        oldest_keys.sort_by_key(|(_, observed_at)| *observed_at);
+
+        let remove_count = self
+            .state_cache
+            .len()
+            .saturating_sub(UTILIZATION_STATE_CACHE_MAX_ENTRIES);
+        for (cache_key, _) in oldest_keys.into_iter().take(remove_count) {
+            self.state_cache.remove(&cache_key);
+        }
+    }
+
     // ─── DetectionResult builders ─────────────────────────────────────────────
 
     fn build_utilization_detection(
@@ -1269,7 +1308,8 @@ impl DetectionPattern for UtilizationHighPattern {
                         serde_json::to_value(&state)?,
                     )
                     .await;
-                self.state_cache.insert(cache_key, state);
+                self.state_cache.insert(cache_key.clone(), state);
+                self.prune_state_cache(now, &cache_key);
             }
 
             // Enrich with concurrent_market_alerts: list other active incidents
@@ -1366,7 +1406,8 @@ impl DetectionPattern for UtilizationHighPattern {
                         serde_json::to_value(&state)?,
                     )
                     .await;
-                self.state_cache.insert(cache_key, state);
+                self.state_cache.insert(cache_key.clone(), state);
+                self.prune_state_cache(now, &cache_key);
 
                 let detection = Self::build_pause_detection(
                     event,
@@ -1389,6 +1430,18 @@ impl DetectionPattern for UtilizationHighPattern {
 
 fn severity_rank_detection(d: &DetectionResult) -> u8 {
     severity_rank(Some(&d.severity))
+}
+
+fn utilization_state_last_activity(state: &UtilizationRuleState) -> Option<DateTime<Utc>> {
+    state
+        .samples
+        .last()
+        .map(|sample| sample.observed_at)
+        .into_iter()
+        .chain(state.last_transition_at)
+        .chain(state.last_breach_at)
+        .chain(state.active_since)
+        .max()
 }
 
 fn pick_higher(

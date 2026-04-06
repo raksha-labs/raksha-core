@@ -21,6 +21,8 @@ use uuid::Uuid;
 use super::{append_snapshot_meta, simulation_metadata_from_event, DetectionPattern};
 
 pub const PATTERN_ID: &str = "tvl_drop";
+const TVL_DROP_STATE_CACHE_TTL_HOURS: i64 = 24;
+const TVL_DROP_STATE_CACHE_MAX_ENTRIES: usize = 4_096;
 
 const DEFAULT_FAST_DROP_PCT: f64 = 20.0;
 const DEFAULT_FAST_WINDOW_MINUTES: i64 = 10;
@@ -257,6 +259,43 @@ impl TvlDropPattern {
         _repo: &PostgresRepository,
     ) -> Result<Option<Vec<TvlDropRule>>> {
         Ok(self.configs.get(tenant_id).cloned())
+    }
+
+    fn prune_state_cache(&mut self, now: DateTime<Utc>, current_cache_key: &str) {
+        let cutoff = now - Duration::hours(TVL_DROP_STATE_CACHE_TTL_HOURS);
+        self.state_cache.retain(|cache_key, state| {
+            if cache_key == current_cache_key {
+                return true;
+            }
+            tvl_state_last_activity(state)
+                .map(|observed_at| observed_at >= cutoff)
+                .unwrap_or(false)
+        });
+
+        if self.state_cache.len() <= TVL_DROP_STATE_CACHE_MAX_ENTRIES {
+            return;
+        }
+
+        let mut oldest_keys = self
+            .state_cache
+            .iter()
+            .filter(|(cache_key, _)| cache_key.as_str() != current_cache_key)
+            .map(|(cache_key, state)| {
+                (
+                    cache_key.clone(),
+                    tvl_state_last_activity(state).unwrap_or(DateTime::<Utc>::MIN_UTC),
+                )
+            })
+            .collect::<Vec<_>>();
+        oldest_keys.sort_by_key(|(_, observed_at)| *observed_at);
+
+        let remove_count = self
+            .state_cache
+            .len()
+            .saturating_sub(TVL_DROP_STATE_CACHE_MAX_ENTRIES);
+        for (cache_key, _) in oldest_keys.into_iter().take(remove_count) {
+            self.state_cache.remove(&cache_key);
+        }
     }
 
     /// Return other monitored market subject-keys on the same protocol:chain
@@ -785,6 +824,7 @@ impl DetectionPattern for TvlDropPattern {
                     .unwrap_or_default();
                 self.state_cache
                     .insert(cache_key.clone(), current_state.clone());
+                self.prune_state_cache(now, &cache_key);
 
                 let mut state = current_state;
                 state.protocol_chain_key = Some(protocol_chain_key.clone());
@@ -912,6 +952,7 @@ impl DetectionPattern for TvlDropPattern {
                     )
                     .await;
                 self.state_cache.insert(cache_key.clone(), state);
+                self.prune_state_cache(now, &cache_key);
 
                 if let Some(transition) = transition {
                     let detection_context = TvlDetectionContext {
@@ -971,6 +1012,7 @@ impl DetectionPattern for TvlDropPattern {
                     .unwrap_or_default();
                 self.state_cache
                     .insert(cache_key.clone(), current_state.clone());
+                self.prune_state_cache(now, &cache_key);
                 let mut state = current_state;
                 state.protocol_chain_key = Some(protocol_chain_key);
 
@@ -1028,7 +1070,8 @@ impl DetectionPattern for TvlDropPattern {
                         serde_json::to_value(&state)?,
                     )
                     .await;
-                self.state_cache.insert(cache_key, state);
+                self.state_cache.insert(cache_key.clone(), state);
+                self.prune_state_cache(now, &cache_key);
 
                 let detection_context = PauseDetectionContext {
                     subject: DetectionSubject {
@@ -1521,6 +1564,18 @@ fn context_classification_str(value: &ContextClassification) -> &'static str {
         ContextClassification::Systemic => "systemic",
         ContextClassification::None => "none",
     }
+}
+
+fn tvl_state_last_activity(state: &TvlRuleState) -> Option<DateTime<Utc>> {
+    state
+        .samples
+        .last()
+        .map(|sample| sample.observed_at)
+        .into_iter()
+        .chain(state.last_transition_at)
+        .chain(state.last_breach_at)
+        .chain(state.active_since)
+        .max()
 }
 
 fn pick_higher_severity(

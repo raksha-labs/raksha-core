@@ -160,6 +160,9 @@ impl DetectionPattern for FlashLoanPattern {
         }
 
         let state = self.state_cache.entry(event.tenant_id.clone()).or_default();
+        state
+            .cooldowns
+            .retain(|_, cooldown_until| *cooldown_until > now);
 
         for rule in rules {
             if !rule.enabled {
