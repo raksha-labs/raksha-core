@@ -7,7 +7,7 @@ use event_schema::{
 use redis::{streams::StreamReadReply, FromRedisValue};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tracing::info;
+use tracing::{info, warn};
 use url::Url;
 
 mod correlation;
@@ -30,6 +30,87 @@ pub const STREAM_ALERTS: &str = "raksha:alerts";
 pub const STREAM_ALERT_LIFECYCLE: &str = "raksha:alerts:lifecycle";
 pub const STREAM_UNIFIED_EVENTS: &str = "raksha:unified-events";
 
+const DEFAULT_MAXLEN_NORMALIZED_EVENTS: usize = 10_000;
+const DEFAULT_MAXLEN_REORG_NOTICES: usize = 2_000;
+const DEFAULT_MAXLEN_FINALITY_UPDATES: usize = 5_000;
+const DEFAULT_MAXLEN_DETECTIONS: usize = 5_000;
+const DEFAULT_MAXLEN_ALERTS: usize = 5_000;
+const DEFAULT_MAXLEN_ALERT_LIFECYCLE: usize = 10_000;
+const DEFAULT_MAXLEN_UNIFIED_EVENTS: usize = 25_000;
+
+#[derive(Clone)]
+struct RedisStreamRetention {
+    normalized_events_maxlen: Option<usize>,
+    reorg_notices_maxlen: Option<usize>,
+    finality_updates_maxlen: Option<usize>,
+    detections_maxlen: Option<usize>,
+    alerts_maxlen: Option<usize>,
+    alert_lifecycle_maxlen: Option<usize>,
+    unified_events_maxlen: Option<usize>,
+}
+
+impl RedisStreamRetention {
+    fn from_env() -> Self {
+        Self {
+            normalized_events_maxlen: parse_stream_maxlen_env(
+                "REDIS_STREAM_MAXLEN_NORMALIZED_EVENTS",
+                DEFAULT_MAXLEN_NORMALIZED_EVENTS,
+            ),
+            reorg_notices_maxlen: parse_stream_maxlen_env(
+                "REDIS_STREAM_MAXLEN_REORG_NOTICES",
+                DEFAULT_MAXLEN_REORG_NOTICES,
+            ),
+            finality_updates_maxlen: parse_stream_maxlen_env(
+                "REDIS_STREAM_MAXLEN_FINALITY_UPDATES",
+                DEFAULT_MAXLEN_FINALITY_UPDATES,
+            ),
+            detections_maxlen: parse_stream_maxlen_env(
+                "REDIS_STREAM_MAXLEN_DETECTIONS",
+                DEFAULT_MAXLEN_DETECTIONS,
+            ),
+            alerts_maxlen: parse_stream_maxlen_env(
+                "REDIS_STREAM_MAXLEN_ALERTS",
+                DEFAULT_MAXLEN_ALERTS,
+            ),
+            alert_lifecycle_maxlen: parse_stream_maxlen_env(
+                "REDIS_STREAM_MAXLEN_ALERT_LIFECYCLE",
+                DEFAULT_MAXLEN_ALERT_LIFECYCLE,
+            ),
+            unified_events_maxlen: parse_stream_maxlen_env(
+                "REDIS_STREAM_MAXLEN_UNIFIED_EVENTS",
+                DEFAULT_MAXLEN_UNIFIED_EVENTS,
+            ),
+        }
+    }
+
+    fn maxlen_for(&self, stream: &str) -> Option<usize> {
+        match stream {
+            STREAM_NORMALIZED_EVENTS => self.normalized_events_maxlen,
+            STREAM_REORG_NOTICES => self.reorg_notices_maxlen,
+            STREAM_FINALITY_UPDATES => self.finality_updates_maxlen,
+            STREAM_DETECTIONS => self.detections_maxlen,
+            STREAM_ALERTS => self.alerts_maxlen,
+            STREAM_ALERT_LIFECYCLE => self.alert_lifecycle_maxlen,
+            STREAM_UNIFIED_EVENTS => self.unified_events_maxlen,
+            _ => None,
+        }
+    }
+}
+
+fn parse_stream_maxlen_env(name: &str, default: usize) -> Option<usize> {
+    match std::env::var(name) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(0) => None,
+            Ok(value) => Some(value),
+            Err(_) => {
+                warn!(env = name, value = %raw, fallback = default, "invalid redis stream maxlen override; using default");
+                Some(default)
+            }
+        },
+        Err(_) => Some(default),
+    }
+}
+
 pub fn describe_redis_url(redis_url: &str) -> String {
     match Url::parse(redis_url) {
         Ok(mut url) => {
@@ -51,6 +132,7 @@ pub fn describe_redis_url(redis_url: &str) -> String {
 pub struct RedisStreamPublisher {
     client: redis::Client,
     connection_target: String,
+    retention: RedisStreamRetention,
     normalized_events_stream: String,
     reorg_notices_stream: String,
     finality_updates_stream: String,
@@ -65,6 +147,7 @@ impl RedisStreamPublisher {
         Ok(Self {
             client: redis::Client::open(redis_url)?,
             connection_target: describe_redis_url(redis_url),
+            retention: RedisStreamRetention::from_env(),
             normalized_events_stream: STREAM_NORMALIZED_EVENTS.to_string(),
             reorg_notices_stream: STREAM_REORG_NOTICES.to_string(),
             finality_updates_stream: STREAM_FINALITY_UPDATES.to_string(),
@@ -152,8 +235,12 @@ impl RedisStreamPublisher {
     pub async fn publish_raw_json(&self, stream: &str, payload: &Value) -> Result<()> {
         let payload = serde_json::to_string(payload)?;
         let mut connection = self.client.get_multiplexed_async_connection().await?;
-        let _: String = redis::cmd("XADD")
-            .arg(stream)
+        let mut cmd = redis::cmd("XADD");
+        cmd.arg(stream);
+        if let Some(maxlen) = self.retention.maxlen_for(stream) {
+            cmd.arg("MAXLEN").arg("~").arg(maxlen);
+        }
+        let _: String = cmd
             .arg("*")
             .arg("payload")
             .arg(payload)
