@@ -233,6 +233,18 @@ async fn reconcile(
         }
 
         let targets = resolve_runtime_tenant_targets(repo, &cfg).await?;
+        if cfg.operating_mode_profile == "live" && targets.is_empty() {
+            info!(
+                stream_config_id = %cfg.stream_config_id,
+                source_id = %cfg.source_id,
+                stream_name = %cfg.stream_name,
+                connector_mode = %cfg.connector_mode,
+                operating_mode_profile = %cfg.operating_mode_profile,
+                reason = "live stream has no enabled tenant targets",
+                "skipping stream config during reconcile",
+            );
+            continue;
+        }
 
         let runtime_cfg = to_runtime_config(cfg, targets);
         log_test_mode_stream_selection(&runtime_cfg);
