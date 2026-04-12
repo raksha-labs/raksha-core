@@ -4,21 +4,25 @@
 //! Patterns are DB-configured: configs are loaded from tenant_pattern_configs at startup
 //! and refreshed on LISTEN/NOTIFY, explicit reload requests, and a periodic fallback.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use common::{
-    init_logging, make_postgres_tls_connector, start_health_check_server_with_commands,
-    HealthCommand,
+    init_logging, make_postgres_tls_connector,
+    start_health_check_server_with_commands_and_handlers, HealthCommand, JsonHandler,
 };
 use dotenvy::dotenv;
 use futures_util::future::poll_fn;
+use serde_json::{json, Value};
 use state_manager::{describe_redis_url, PostgresRepository, RedisStreamPublisher};
 use tokio::{signal, sync::mpsc, time::interval};
 use tokio_postgres::AsyncMessage;
 use tracing::{info, warn};
 
 mod patterns;
+
+use patterns::depeg_v2::{run_decision_expression_test, DecisionExpressionTestRequest};
 
 /// Consumer group name for the unified-events stream.
 const CONSUMER_GROUP: &str = "detector-workers";
@@ -35,8 +39,37 @@ async fn main() -> Result<()> {
     init_logging("info");
     let (command_tx, mut command_rx) = mpsc::channel(16);
     let command_token = std::env::var("AUTH_INTERNAL_SERVICE_TOKEN").ok();
-    let health_status =
-        start_health_check_server_with_commands("detector", command_tx, command_token);
+
+    // Phase 3b: register the depeg_v2 dry-run endpoint as a JSON handler on
+    // the health-check server. The Pattern Creator's "Test" button calls
+    // this through the api-service proxy. The handler is a pure function
+    // (compile a CEL expression, run it against named test cases) — no
+    // database access, no shared state.
+    let depeg_v2_test_handler: JsonHandler = Arc::new(|body: Value| -> Value {
+        match serde_json::from_value::<DecisionExpressionTestRequest>(body) {
+            Ok(request) => match serde_json::to_value(run_decision_expression_test(request)) {
+                Ok(value) => value,
+                Err(err) => json!({
+                    "error": "internal_serialization_error",
+                    "detail": err.to_string(),
+                }),
+            },
+            Err(err) => json!({
+                "error": "invalid_request_shape",
+                "detail": err.to_string(),
+            }),
+        }
+    });
+
+    let health_status = start_health_check_server_with_commands_and_handlers(
+        "detector",
+        command_tx,
+        command_token,
+        vec![(
+            "/v1/depeg_v2/test_expression".to_string(),
+            depeg_v2_test_handler,
+        )],
+    );
 
     let redis_url = std::env::var("REDIS_URL").context("REDIS_URL not set")?;
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL not set")?;

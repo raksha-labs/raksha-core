@@ -16,6 +16,7 @@ state-manager = { path = "../../crates/state-manager" }
 # External dependencies
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+cel = { workspace = true }
 chrono = { workspace = true }
 dotenvy = { workspace = true }
 futures-util = { workspace = true }

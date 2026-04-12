@@ -4,6 +4,7 @@
 //! `DetectionResult`s when anomalous conditions are detected.
 
 pub mod depeg;
+pub mod depeg_v2;
 pub mod flash_loan;
 pub mod generic_rule;
 pub mod tvl_drop;
@@ -173,10 +174,18 @@ pub struct PatternRegistry {
 
 impl PatternRegistry {
     /// Build a registry pre-loaded with all built-in patterns.
+    ///
+    /// Note: `depeg` and `depeg_v2` deliberately run **side-by-side**. Both
+    /// engines reload from the same `tenant_pattern_configs` rows (v2 mirrors
+    /// any row saved as `pattern_id = "depeg"`) and emit detections under
+    /// distinct `pattern_id` values so an operator can SQL-diff them in the
+    /// `detections` table. v2 is the active development surface for the
+    /// "generalize the detector" plan; `depeg.rs` is the frozen baseline.
     pub fn new() -> Self {
         Self {
             patterns: vec![
                 Box::new(depeg::DepegPattern::default()),
+                Box::new(depeg_v2::DepegPatternV2::default()),
                 Box::new(flash_loan::FlashLoanPattern::default()),
                 Box::new(tvl_drop::TvlDropPattern::default()),
                 Box::new(generic_rule::GenericRulePattern::default()),

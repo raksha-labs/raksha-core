@@ -20,8 +20,9 @@ pub use circuit_breaker::{
 
 pub mod health_check;
 pub use health_check::{
-    start_health_check_server, start_health_check_server_with_commands, HealthCheckServer,
-    HealthCommand, HealthStatus,
+    start_health_check_server, start_health_check_server_with_commands,
+    start_health_check_server_with_commands_and_handlers, HealthCheckServer, HealthCommand,
+    HealthStatus, JsonHandler,
 };
 
 pub mod data_source;
