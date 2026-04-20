@@ -887,11 +887,27 @@ impl DepegPatternV2 {
             }
             // Phase 7: compile the remaining sub-predicate CEL expressions.
             for (field_name, expr_field, target_field) in [
-                ("oracle_expression", &policy.oracle_expression.clone(), &mut policy.compiled_oracle as &mut Option<Arc<CelProgram>>),
-                ("confidence_expression", &policy.confidence_expression.clone(), &mut policy.compiled_confidence),
-                ("contagion_expression", &policy.contagion_expression.clone(), &mut policy.compiled_contagion),
+                (
+                    "oracle_expression",
+                    &policy.oracle_expression.clone(),
+                    &mut policy.compiled_oracle as &mut Option<Arc<CelProgram>>,
+                ),
+                (
+                    "confidence_expression",
+                    &policy.confidence_expression.clone(),
+                    &mut policy.compiled_confidence,
+                ),
+                (
+                    "contagion_expression",
+                    &policy.contagion_expression.clone(),
+                    &mut policy.compiled_contagion,
+                ),
             ] {
-                if let Some(expr) = expr_field.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(expr) = expr_field
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
                     match CelProgram::compile(expr) {
                         Ok(program) => {
                             *target_field = Some(Arc::new(program));
@@ -1000,7 +1016,8 @@ impl DepegPatternV2 {
                 0.0, // deviation_pct not yet computed
                 0,   // source_count not yet computed
                 policy,
-            ).unwrap_or(default_classification),
+            )
+            .unwrap_or(default_classification),
             None => default_classification,
         };
         ContextAssessment {
@@ -1065,14 +1082,21 @@ impl DetectionPattern for DepegPatternV2 {
             if pattern_id != MIRRORED_CONFIG_PATTERN_ID && pattern_id != PATTERN_ID {
                 continue;
             }
-            if let Some(pc) = config.get("pattern_config").or_else(|| config.get("detection_config").and_then(|dc| dc.get("pattern_config"))) {
+            if let Some(pc) = config.get("pattern_config").or_else(|| {
+                config
+                    .get("detection_config")
+                    .and_then(|dc| dc.get("pattern_config"))
+            }) {
                 if let Some(v) = pc.get("quote_cache_ttl_minutes").and_then(|v| v.as_i64()) {
                     self.quote_cache_ttl_minutes = v.max(1);
                 }
                 if let Some(v) = pc.get("quote_cache_max_keys").and_then(|v| v.as_u64()) {
                     self.quote_cache_max_keys = (v as usize).max(16);
                 }
-                if let Some(v) = pc.get("max_quote_history_per_source").and_then(|v| v.as_u64()) {
+                if let Some(v) = pc
+                    .get("max_quote_history_per_source")
+                    .and_then(|v| v.as_u64())
+                {
                     self.max_quote_history_per_source = (v as usize).max(2);
                 }
                 break;
@@ -1443,9 +1467,15 @@ fn evaluate_policy(
     );
     let oracle_confirmed = match policy.compiled_oracle.as_ref() {
         Some(prog) => eval_oracle_expression(
-            prog, &eligible_quotes, trigger_floor_pct, divergence_pct,
-            policy.peg_target, now, policy,
-        ).unwrap_or(default_oracle),
+            prog,
+            &eligible_quotes,
+            trigger_floor_pct,
+            divergence_pct,
+            policy.peg_target,
+            now,
+            policy,
+        )
+        .unwrap_or(default_oracle),
         None => default_oracle,
     };
 
@@ -1463,12 +1493,29 @@ fn evaluate_policy(
         .unwrap_or_default();
     let confidence_total = match policy.compiled_confidence.as_ref() {
         Some(prog) => {
-            let sa = confidence_breakdown.get("source_agreement").copied().unwrap_or_default();
-            let os = confidence_breakdown.get("oracle_confirmation").copied().unwrap_or_default();
-            let vs = confidence_breakdown.get("volume_confirmation").copied().unwrap_or_default();
+            let sa = confidence_breakdown
+                .get("source_agreement")
+                .copied()
+                .unwrap_or_default();
+            let os = confidence_breakdown
+                .get("oracle_confirmation")
+                .copied()
+                .unwrap_or_default();
+            let vs = confidence_breakdown
+                .get("volume_confirmation")
+                .copied()
+                .unwrap_or_default();
             let w_s = policy.confidence_weights.source_agreement.max(0.0);
-            let w_o = if policy.toggles.oracle_confirmation { policy.confidence_weights.oracle_confirmation.max(0.0) } else { 0.0 };
-            let w_v = if policy.toggles.volume_confirmation { policy.confidence_weights.volume_confirmation.max(0.0) } else { 0.0 };
+            let w_o = if policy.toggles.oracle_confirmation {
+                policy.confidence_weights.oracle_confirmation.max(0.0)
+            } else {
+                0.0
+            };
+            let w_v = if policy.toggles.volume_confirmation {
+                policy.confidence_weights.volume_confirmation.max(0.0)
+            } else {
+                0.0
+            };
             eval_confidence_expression(prog, sa, os, vs, w_s, w_o, w_v, policy)
                 .unwrap_or(default_confidence)
         }
@@ -1912,7 +1959,10 @@ fn eval_contagion_expression(
     policy: &DepegPolicy,
 ) -> Option<ContextClassification> {
     let mut ctx = CelContext::empty();
-    ctx.add_variable_from_value("systemic_market_count", CelValue::Int(systemic_market_count as i64));
+    ctx.add_variable_from_value(
+        "systemic_market_count",
+        CelValue::Int(systemic_market_count as i64),
+    );
     ctx.add_variable_from_value("deviation_pct", CelValue::Float(deviation_pct));
     ctx.add_variable_from_value("source_count", CelValue::Int(source_count as i64));
 
@@ -2068,10 +2118,7 @@ pub fn run_decision_expression_test(
             "confidence_total",
             CelValue::Float(case.inputs.confidence_total),
         );
-        ctx.add_variable_from_value(
-            "deviation_pct",
-            CelValue::Float(case.inputs.deviation_pct),
-        );
+        ctx.add_variable_from_value("deviation_pct", CelValue::Float(case.inputs.deviation_pct));
         ctx.add_variable_from_value("median_price", CelValue::Float(case.inputs.median_price));
         ctx.add_variable_from_value("source_count", CelValue::Int(case.inputs.source_count));
         ctx.add_variable_from_value("quorum_count", CelValue::Int(case.inputs.source_count));
@@ -2300,10 +2347,7 @@ fn build_evidence_contributors(
 /// Dispatch to the appropriate aggregation strategy for a given policy.
 /// Falls back to `WeightedMedian` when `policy.aggregation` is `None`
 /// (backward-compatible default).
-fn aggregate_price(
-    points: &[(f64, f64)],
-    strategy: Option<&MedianStrategy>,
-) -> Option<f64> {
+fn aggregate_price(points: &[(f64, f64)], strategy: Option<&MedianStrategy>) -> Option<f64> {
     match strategy.unwrap_or(&MedianStrategy::WeightedMedian) {
         MedianStrategy::WeightedMedian => weighted_median(points),
         MedianStrategy::WeightedMean => weighted_mean(points),
@@ -2934,7 +2978,11 @@ mod tests {
     fn latest_quotes_for_time_uses_last_quote_at_or_before_event_time() {
         let base = Utc::now();
         let mut market_quotes = HashMap::new();
-        remember_quote(&mut market_quotes, quote("oracle-a", "oracle", 1.0, base), 16);
+        remember_quote(
+            &mut market_quotes,
+            quote("oracle-a", "oracle", 1.0, base),
+            16,
+        );
         remember_quote(
             &mut market_quotes,
             quote("oracle-a", "oracle", 0.88, base + Duration::seconds(24)),
@@ -3132,10 +3180,8 @@ mod tests {
         // Now wire a CEL override: fire whenever both sources agree on direction
         // (source_count >= 2 && confidence_total > 50). This should fire even
         // though deviation is well below the default thresholds.
-        let policy = with_decision_expression(
-            policy,
-            "source_count >= 2 && confidence_total > 50.0",
-        );
+        let policy =
+            with_decision_expression(policy, "source_count >= 2 && confidence_total > 50.0");
         let outcome = evaluate_policy(
             &policy,
             &[
@@ -3237,7 +3283,10 @@ mod tests {
         let mut config_map = HashMap::new();
         config_map.insert(
             // Note the pattern_id key is "depeg", not "depeg_v2".
-            ("tenant-mirror".to_string(), MIRRORED_CONFIG_PATTERN_ID.to_string()),
+            (
+                "tenant-mirror".to_string(),
+                MIRRORED_CONFIG_PATTERN_ID.to_string(),
+            ),
             serde_json::json!({
                 "policies": [{
                     "market_key": "USDC/USD",
@@ -3330,7 +3379,10 @@ mod tests {
         let points = vec![(0.994, 1.0), (0.992, 1.5), (0.995, 1.0)];
         let via_dispatch = aggregate_price(&points, None);
         let via_direct = weighted_median(&points);
-        assert_eq!(via_dispatch, via_direct, "dispatch default must match direct weighted_median");
+        assert_eq!(
+            via_dispatch, via_direct,
+            "dispatch default must match direct weighted_median"
+        );
     }
 
     #[test]
@@ -3346,7 +3398,7 @@ mod tests {
         // 5 points equally weighted. trim_pct=0.2 discards the bottom 20%
         // and top 20% of weight mass, leaving only the middle 3 points.
         let points = vec![
-            (1.0, 1.0),  // bottom 20% → trimmed
+            (1.0, 1.0), // bottom 20% → trimmed
             (2.0, 1.0),
             (3.0, 1.0),
             (4.0, 1.0),
@@ -3379,7 +3431,10 @@ mod tests {
         let points = vec![(1.0, 1.0), (2.0, 1.0), (3.0, 1.0)];
         // p=0.0 should pick the lowest price.
         let result = weighted_percentile(&points, 0.01).expect("non-empty");
-        assert!((result - 1.0).abs() < 1e-9, "p≈0 should return lowest: {result}");
+        assert!(
+            (result - 1.0).abs() < 1e-9,
+            "p≈0 should return lowest: {result}"
+        );
     }
 
     #[test]
@@ -3400,7 +3455,10 @@ mod tests {
         ];
         for (strategy, expected_json) in tests {
             let json = serde_json::to_string(strategy).expect("serialize");
-            assert_eq!(&json, expected_json, "serialization mismatch for {strategy:?}");
+            assert_eq!(
+                &json, expected_json,
+                "serialization mismatch for {strategy:?}"
+            );
             let parsed: MedianStrategy = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(&parsed, strategy, "round-trip mismatch for {strategy:?}");
         }
@@ -3567,9 +3625,7 @@ mod tests {
         let mut policy = base_policy();
         policy.toggles.oracle_confirmation = false;
         let policy = with_severity_expression(policy, "true");
-        let quotes = vec![
-            quote("cex-a", "cex", 0.994, now),
-        ];
+        let quotes = vec![quote("cex-a", "cex", 0.994, now)];
 
         let outcome = evaluate_policy(
             &policy,
@@ -3644,12 +3700,22 @@ mod tests {
         ];
 
         let outcome = evaluate_policy(
-            &policy, &quotes, &DepegAlertState::default(), now,
+            &policy,
+            &quotes,
+            &DepegAlertState::default(),
+            now,
             ContextClassification::Isolated,
-        ).expect("evaluation");
+        )
+        .expect("evaluation");
 
-        assert!(outcome.snapshot.oracle_confirmed, "CEL override should force oracle_confirmed = true");
-        assert!(outcome.snapshot.breach_active, "with oracle confirmed, breach should fire");
+        assert!(
+            outcome.snapshot.oracle_confirmed,
+            "CEL override should force oracle_confirmed = true"
+        );
+        assert!(
+            outcome.snapshot.breach_active,
+            "with oracle confirmed, breach should fire"
+        );
     }
 
     #[test]
@@ -3666,9 +3732,13 @@ mod tests {
         ];
 
         let outcome = evaluate_policy(
-            &policy, &quotes, &DepegAlertState::default(), now,
+            &policy,
+            &quotes,
+            &DepegAlertState::default(),
+            now,
             ContextClassification::Isolated,
-        ).expect("evaluation");
+        )
+        .expect("evaluation");
 
         assert!(!outcome.snapshot.oracle_confirmed);
         assert!(!outcome.snapshot.breach_active);
@@ -3689,12 +3759,19 @@ mod tests {
         ];
 
         let outcome = evaluate_policy(
-            &policy, &quotes, &DepegAlertState::default(), now,
+            &policy,
+            &quotes,
+            &DepegAlertState::default(),
+            now,
             ContextClassification::Isolated,
-        ).expect("evaluation");
+        )
+        .expect("evaluation");
 
         // confidence_total = 42.0 < min_confidence_to_fire = 50.0 → no breach
-        assert!(!outcome.snapshot.breach_active, "42 < 50 → should not breach");
+        assert!(
+            !outcome.snapshot.breach_active,
+            "42 < 50 → should not breach"
+        );
     }
 
     #[test]
@@ -3710,9 +3787,13 @@ mod tests {
         ];
 
         let outcome = evaluate_policy(
-            &policy, &quotes, &DepegAlertState::default(), now,
+            &policy,
+            &quotes,
+            &DepegAlertState::default(),
+            now,
             ContextClassification::Isolated,
-        ).expect("evaluation");
+        )
+        .expect("evaluation");
 
         assert!(outcome.snapshot.breach_active, "75 >= 50 → should breach");
     }
@@ -3741,12 +3822,22 @@ mod tests {
 
         pattern.reload_config(&config_map).await.expect("reload");
 
-        let policy = pattern.policies
+        let policy = pattern
+            .policies
             .get(&("tenant-p7".to_string(), "USDC/USD".to_string()))
             .expect("policy loaded");
-        assert!(policy.compiled_oracle.is_some(), "oracle_expression should compile");
-        assert!(policy.compiled_confidence.is_some(), "confidence_expression should compile");
-        assert!(policy.compiled_contagion.is_some(), "contagion_expression should compile");
+        assert!(
+            policy.compiled_oracle.is_some(),
+            "oracle_expression should compile"
+        );
+        assert!(
+            policy.compiled_confidence.is_some(),
+            "confidence_expression should compile"
+        );
+        assert!(
+            policy.compiled_contagion.is_some(),
+            "contagion_expression should compile"
+        );
     }
 
     // ─── Phase 3b: run_decision_expression_test ────────────────────────────

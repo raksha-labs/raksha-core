@@ -178,7 +178,11 @@ impl HealthCheckServer {
 
                 let header_section = String::from_utf8_lossy(&buffer[..header_end_idx]).to_string();
                 let body_bytes = &buffer[header_end_idx..header_end_idx + content_length];
-                let request_line = header_section.lines().next().unwrap_or_default().to_string();
+                let request_line = header_section
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
 
                 let response = if request_line.starts_with("GET /health") {
                     Self::health_response()
