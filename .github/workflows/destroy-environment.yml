@@ -56,14 +56,6 @@ jobs:
           ref: master
           token: ${{ secrets.CROSS_REPO_READ_TOKEN }}
 
-      - name: Checkout raksha-simlab
-        uses: actions/checkout@v4
-        with:
-          repository: raksha-labs/raksha-simlab
-          path: raksha-simlab
-          ref: master
-          token: ${{ secrets.CROSS_REPO_READ_TOKEN }}
-
       - name: Validate confirmation input
         env:
           ENVIRONMENT: ${{ inputs.environment }}
